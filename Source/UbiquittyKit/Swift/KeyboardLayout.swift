@@ -64,9 +64,17 @@ package enum KeyboardLayout {
     /// installed layout, and under a Latin one that layout is the active one:
     /// asking it repeats the key the user pressed.
     ///
-    /// - Parameter keyCode: The hardware key code.
+    /// An ISO keyboard's two keys beside the digit row and the left Shift key
+    /// carry swapped key codes: the top-left key reports `kVK_ISO_Section` and
+    /// the key beside left Shift reports `kVK_ANSI_Grave`. The top-left key is
+    /// the PC-101 grave; the one beside left Shift has no PC-101 key and is
+    /// the less-than key.
+    ///
+    /// - Parameters:
+    ///   - keyCode: The hardware key code.
+    ///   - isISOKeyboard: Whether the keyboard hardware is the ISO type.
     /// - Returns: The character, or 0 for a key with no printable US identity.
-    package static func usANSICharacter(forKeyCode keyCode: UInt16) -> UInt32 {
+    package static func usANSICharacter(forKeyCode keyCode: UInt16, isISOKeyboard: Bool) -> UInt32 {
         let scalar: Unicode.Scalar
         switch Int(keyCode) {
         case kVK_ANSI_A: scalar = "a"
@@ -115,31 +123,46 @@ package enum KeyboardLayout {
         case kVK_ANSI_Comma: scalar = ","
         case kVK_ANSI_Period: scalar = "."
         case kVK_ANSI_Slash: scalar = "/"
-        case kVK_ANSI_Grave: scalar = "`"
+        case kVK_ANSI_Grave: scalar = isISOKeyboard ? "<" : "`"
+        case kVK_ISO_Section: scalar = "`"
         default: return 0
         }
         return scalar.value
+    }
+
+    /// Whether the keyboard hardware is the ISO type.
+    package static var isISOKeyboard: Bool {
+        KBGetLayoutType(Int16(LMGetKbdType())) == kKeyboardISO
     }
 
     /// The character that names the key a press holds, independent of the
     /// active layout: what Kitty's base-layout key reports and what a chord on
     /// a non-ASCII key folds through.
     ///
-    /// Under a layout whose own character is not ASCII the ASCII-capable
-    /// layout answers, since that is the Latin a Cyrillic, Greek or Hebrew
-    /// typist types on. Otherwise, and when that layout names no printable
-    /// character for the key (German ü answers itself), the US character does.
+    /// Under a layout that gives the key a character beyond ASCII, the
+    /// ASCII-capable layout answers when it names a different printable
+    /// character, since that is the Latin a Cyrillic, Greek or Hebrew typist
+    /// types on. When it repeats the active layout's character (a Latin
+    /// layout is its own ASCII-capable layout: German ü answers itself, and
+    /// French `)` answers `)` although its shifted `°` is beyond ASCII) the
+    /// US character answers.
     ///
     /// - Parameters:
     ///   - keyCode: The hardware key code.
     ///   - unshifted: The active layout's character for the key with no modifier.
     ///   - shifted: The active layout's character for the key with Shift alone.
+    ///   - isISOKeyboard: Whether the keyboard hardware is the ISO type.
     /// - Returns: A printable ASCII code point, or 0 for a key with none.
-    package static func baseLayoutCharacter(forKeyCode keyCode: UInt16, unshifted: UInt32, shifted: UInt32) -> UInt32 {
+    package static func baseLayoutCharacter(
+        forKeyCode keyCode: UInt16,
+        unshifted: UInt32,
+        shifted: UInt32,
+        isISOKeyboard: Bool
+    ) -> UInt32 {
         if unshifted >= 0x80 || shifted >= 0x80 {
             let asciiCapable = asciiCapableCharacter(forKeyCode: keyCode)
-            if asciiCapable >= 0x20 && asciiCapable < 0x7F { return asciiCapable }
+            if asciiCapable >= 0x20 && asciiCapable < 0x7F && asciiCapable != unshifted { return asciiCapable }
         }
-        return usANSICharacter(forKeyCode: keyCode)
+        return usANSICharacter(forKeyCode: keyCode, isISOKeyboard: isISOKeyboard)
     }
 }
