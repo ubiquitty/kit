@@ -151,16 +151,20 @@ package enum KeyboardLayout {
     ///   - keyCode: The hardware key code.
     ///   - unshifted: The active layout's character for the key with no modifier.
     ///   - shifted: The active layout's character for the key with Shift alone.
+    ///   - asciiCapable: The ASCII-capable layout's character for the key,
+    ///     asked only when the active layout's own character is beyond ASCII,
+    ///     so a press on a Latin key costs no input-source query.
     ///   - isISOKeyboard: Whether the keyboard hardware is the ISO type.
     /// - Returns: A printable ASCII code point, or 0 for a key with none.
     package static func baseLayoutCharacter(
         forKeyCode keyCode: UInt16,
         unshifted: UInt32,
         shifted: UInt32,
+        asciiCapable: @autoclosure () -> UInt32,
         isISOKeyboard: Bool
     ) -> UInt32 {
         if unshifted >= 0x80 || shifted >= 0x80 {
-            let asciiCapable = asciiCapableCharacter(forKeyCode: keyCode)
+            let asciiCapable = asciiCapable()
             if asciiCapable >= 0x20 && asciiCapable < 0x7F && asciiCapable != unshifted { return asciiCapable }
         }
         return usANSICharacter(forKeyCode: keyCode, isISOKeyboard: isISOKeyboard)
