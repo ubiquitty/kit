@@ -42,14 +42,17 @@ function(ubiquitty_bundle_license_notices target)
     # it, so the check finds the interpreter for itself.
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
     get_property(script GLOBAL PROPERTY UBIQUITTY_LICENSE_NOTICE_SCRIPT)
-    set(coreArguments)
+    set(libraryArguments)
     if(DEFINED UBIQUITTY_CORE_SOURCE_DIR)
-        set(coreArguments --core "${UBIQUITTY_CORE_SOURCE_DIR}")
+        set(libraryArguments --core "${UBIQUITTY_CORE_SOURCE_DIR}")
+    endif()
+    if(DEFINED UBIQUITTY_KIT_SOURCE_DIR)
+        list(APPEND libraryArguments --kit "${UBIQUITTY_KIT_SOURCE_DIR}")
     endif()
     # Not VERBATIM: under Xcode the bundle directory is spelled with a build
     # setting the phase's shell has to expand.
     add_custom_command(TARGET ${target} POST_BUILD
         COMMAND "${Python3_EXECUTABLE}" "${script}"
-            --source "${CMAKE_SOURCE_DIR}" ${coreArguments} --verify "${noticeRoot}"
+            --source "${CMAKE_SOURCE_DIR}" ${libraryArguments} --verify "${noticeRoot}"
         COMMENT "Checking ${target}'s bundled licence notices")
 endfunction()
