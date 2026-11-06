@@ -99,17 +99,21 @@ extension TerminalSurface {
             isKeyEvent
             ? UInt32(event.charactersIgnoringModifiers?.utf16.first ?? 0) : 0
 
-        // The Latin letter on this physical key, from the ASCII-capable layout
-        // — the one the menu bar consults for ⌘ equivalents, and the one a
-        // person on a Cyrillic, Greek or Hebrew layout types Latin on. Asked
-        // only when the layout's own letter is not ASCII, as the chord path
-        // asks it: under a Latin layout the ASCII-capable layout is the layout
-        // in use, so the answer repeats the key, which Core discards. What
-        // the letter folds to under Ctrl, and whether Kitty reports the
-        // position beside it, is Core's.
-        if press.unshiftedCodePoint >= 0x80 || press.shiftedCodePoint >= 0x80 {
-            press.baseLayoutCodePoint = KeyboardLayout.asciiCapableCharacter(forKeyCode: event.keyCode)
-        }
+        // The position this key holds, for Core to report and to fold a chord
+        // through. Under a layout whose own letter is not ASCII it is the Latin
+        // letter on this physical key from the ASCII-capable layout — the one
+        // the menu bar consults for ⌘ equivalents, and the one a person on a
+        // Cyrillic, Greek or Hebrew layout types Latin on. Everywhere else, and
+        // wherever that layout cannot name a printable letter (German ü is its
+        // own answer), it is the key's US character: the ASCII-capable layout
+        // is the layout in use under a Latin one, so asking it repeats the key.
+        // Core discards a base that repeats the primary; what the position
+        // folds to under Ctrl, and whether Kitty reports it, is Core's.
+        press.baseLayoutCodePoint = KeyboardLayout.baseLayoutCharacter(
+            forKeyCode: event.keyCode,
+            unshifted: press.unshiftedCodePoint,
+            shifted: press.shiftedCodePoint
+        )
 
         if isKeyEvent, let typed = event.characters, !typed.isEmpty {
             let units = Array(typed.utf16.prefix(Int(Ubiquitty.Keys.maxKeyEventTextLength)))
