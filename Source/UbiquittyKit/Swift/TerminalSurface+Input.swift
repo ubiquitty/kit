@@ -104,15 +104,16 @@ extension TerminalSurface {
         // letter on this physical key from the ASCII-capable layout — the one
         // the menu bar consults for ⌘ equivalents, and the one a person on a
         // Cyrillic, Greek or Hebrew layout types Latin on. Everywhere else, and
-        // wherever that layout cannot name a printable letter (German ü is its
-        // own answer), it is the key's US character: the ASCII-capable layout
-        // is the layout in use under a Latin one, so asking it repeats the key.
+        // wherever that layout only repeats the layout in use (German ü, French
+        // `)`), it is the key's US character: the ASCII-capable layout is the
+        // layout in use under a Latin one, so asking it repeats the key.
         // Core discards a base that repeats the primary; what the position
         // folds to under Ctrl, and whether Kitty reports it, is Core's.
         press.baseLayoutCodePoint = KeyboardLayout.baseLayoutCharacter(
             forKeyCode: event.keyCode,
             unshifted: press.unshiftedCodePoint,
-            shifted: press.shiftedCodePoint
+            shifted: press.shiftedCodePoint,
+            isISOKeyboard: KeyboardLayout.isISOKeyboard
         )
 
         if isKeyEvent, let typed = event.characters, !typed.isEmpty {
