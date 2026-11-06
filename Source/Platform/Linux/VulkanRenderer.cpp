@@ -2656,6 +2656,7 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
             .size = { columns, rows },
             .readCluster = in.clusterResolver,
             .readClusterContext = in.clusterResolverContext,
+            .publishedCellPixels = { term->cellPixelWidth, term->cellPixelHeight },
         };
         quadCount += Kitty::resolvePlaceholders(placeholderGrid, storedImages, imageCell, /*origin=*/ {},
             std::span { quads }.subspan(static_cast<std::size_t>(quadCount)));
