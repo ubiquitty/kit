@@ -615,6 +615,7 @@ bool RasterContext::rasterizeTerm(Ubiquitty::Terminal* term, std::vector<uint8_t
     in.placements = term->images.placements.data();
     in.placementCount = Image::maxTerminalImagePlacementCount;
     in.viewOffset = viewOffset;
+    in.publishedCellPixels = { term->cellPixelWidth, term->cellPixelHeight };
 
     if (!softwareRenderer->render(in, out, widthOut, heightOut, page ? page->color : std::array<uint8_t, 4> {}))
         return false;
