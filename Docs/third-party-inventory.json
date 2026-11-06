@@ -1,0 +1,38 @@
+[
+  {
+    "name": "Contributor Covenant",
+    "category": "documentation",
+    "sourceURL": "https://github.com/EthicalSource/contributor_covenant/tree/b1b0a0f28b68717456ef4f93566356d14730cb82",
+    "pinnedRev": "2.1 (CC-BY-4.0 at b1b0a0f28b68717456ef4f93566356d14730cb82)",
+    "licenseSPDX": "CC-BY-4.0",
+    "distributionSurface": [
+      "source-repo"
+    ],
+    "noticeRequired": true,
+    "noticeStatus": "present-complete",
+    "requiredAttributions": [
+      "Contributor Covenant contributors; project adaptation identified in .github/code_of_conduct.md"
+    ],
+    "redistributionRisk": "none",
+    "noticePath": "Docs/third-party-licenses/Contributor-Covenant-2.1-LICENSE.txt"
+  },
+  {
+    "name": "Phosphor Icons",
+    "category": "bundled-asset",
+    "sourceURL": "https://github.com/phosphor-icons/web",
+    "pinnedRev": "@phosphor-icons/web 2.1.2 (Phosphor.ttf, Phosphor-Fill.ttf) and @phosphor-icons/core 2.1.1 (the catalog), imported by Scripts/import-phosphor.py",
+    "licenseSPDX": "MIT",
+    "distributionSurface": [
+      "mac-app",
+      "ubiquittykit-framework",
+      "web"
+    ],
+    "noticeRequired": true,
+    "noticeStatus": "present-complete",
+    "requiredAttributions": [
+      "Copyright (c) 2020-2021, 2023 Phosphor Icons"
+    ],
+    "redistributionRisk": "low",
+    "noticePath": "Resources/phosphor/LICENSE"
+  }
+]

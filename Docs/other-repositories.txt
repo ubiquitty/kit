@@ -1,0 +1,37 @@
+# Copyright (C) 2026 Stanislav Yaglo
+# SPDX-License-Identifier: Apache-2.0
+#
+# What this repository's documents and comments name that another repository owns.
+#
+# A document or a comment here may point at a path or a symbol that lives in a
+# repository this checkout does not hold. Scripts/ubq_roots.py reads this file for
+# the gates that ask whether a named file or symbol exists: a name listed here is
+# the other repository's, and a name neither tracked here, held by a library this
+# checkout carries, nor listed is still reported. The entry's repository must not
+# be one this checkout holds.
+#
+#   path <repository> <repo-relative path>
+#   symbol <repository> <identifier>
+#
+# Add the path when a document or comment of this repository starts naming a file
+# the app owns.
+path app .github/workflows/ci.yml
+path app Docs/building-and-releasing.md
+path app Docs/guides/README.md
+path app Docs/images/README.md
+path app Docs/settings-catalog.md
+path app README.md
+path app Scripts/build-linux-gtk.sh
+path app Scripts/build-macos.sh
+path app Scripts/pre-push-gates.sh
+path app Source/Platform/Emacs/LICENSE
+path app Source/Platform/Emacs/README.md
+path app Source/Platform/Linux/main.cpp
+path app Source/Platform/Neovim/LICENSE
+path app Source/Platform/Neovim/README.md
+path app Source/Platform/Wscons/main.cpp
+path app Source/Platform/macOS/App/Beam/PaletteBridge.swift
+path app Source/Platform/macOS/App/CxxInterop.swift
+path app Source/Platform/macOS/App/module.modulemap
+path app Source/Platform/macOS/CMakeLists.txt
+path app Source/Platform/macOS/README.md

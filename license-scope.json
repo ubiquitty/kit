@@ -1,0 +1,173 @@
+{
+  "version": 1,
+  "description": "Every repository file has a checked header or exactly one explicit scope. The boundary assigns each first-party path its license: an exact file beats a pattern, and a pattern beats the longest directory prefix ('./' is the repository's top-level files). Rules record files that cannot carry a header and upstream material; a header or metadata rule must agree with its file's boundary license. Upstream notices remain intact. Review entries block release checks.",
+  "boundary": [
+    {
+      "license": "Apache-2.0",
+      "paths": [
+        "./",
+        "Libraries/ubiquitty-core",
+        ".github/",
+        "cmake/",
+        "Docs/",
+        "Scripts/",
+        "Source/",
+        "Tests/",
+        "Tools/"
+      ],
+      "reason": "Every original file in the repository: the terminal engine, the platform backends, the renderers, the application shells, the host daemon, the agent, the editor clients, the documentation, the tests and the tooling. The product's commercial side is an operated service that is not in this repository, so nothing here needs a narrower license."
+    },
+    {
+      "license": "CC-BY-4.0",
+      "paths": [
+        ".github/code_of_conduct.md"
+      ],
+      "reason": "Adaptation of Contributor Covenant 2.1, which keeps its upstream license."
+    }
+  ],
+  "rules": [
+    {
+      "paths": [
+        ".github/code_of_conduct.md"
+      ],
+      "mode": "header",
+      "license": "CC-BY-4.0",
+      "reason": "Adaptation of Contributor Covenant 2.1; attribution and upstream license accompany the document.",
+      "license_files": [
+        "Docs/third-party-licenses/Contributor-Covenant-2.1-LICENSE.txt"
+      ]
+    },
+    {
+      "paths": [
+        "LICENSE"
+      ],
+      "mode": "metadata",
+      "license": "Apache-2.0",
+      "reason": "Plain-text notice describing the license split; the license texts are under LICENSES/.",
+      "license_files": [
+        "LICENSES/Apache-2.0.txt"
+      ],
+      "copyright": [
+        "2026 Stanislav Yaglo"
+      ]
+    },
+    {
+      "paths": [
+        "LICENSES/Apache-2.0.txt"
+      ],
+      "mode": "upstream",
+      "license": "Apache-2.0",
+      "reason": "Verbatim license or certification text retains its own terms.",
+      "license_files": [
+        "LICENSES/Apache-2.0.txt"
+      ]
+    },
+    {
+      "paths": [
+        "NOTICE"
+      ],
+      "mode": "metadata",
+      "license": "Apache-2.0",
+      "reason": "Project attribution notice is plain text.",
+      "copyright": [
+        "2026 Stanislav Yaglo"
+      ],
+      "license_files": [
+        "LICENSE"
+      ]
+    },
+    {
+      "paths": [],
+      "mode": "metadata",
+      "license": "Apache-2.0",
+      "reason": "Captured terminal streams, rich-text inputs, and rendered golden images must remain byte-exact.",
+      "copyright": [
+        "2026 Stanislav Yaglo"
+      ],
+      "patterns": [
+        "Tests/Snapshots/golden/*.png"
+      ],
+      "payload": true
+    },
+    {
+      "paths": [
+        ".swift-format",
+        "Docs/other-repositories.txt",
+        "Docs/third-party-inventory.json",
+        "Scripts/gate-ledger.kit.txt",
+        "Scripts/repository.txt",
+        "Scripts/swift-unsafe-baseline.kit.txt",
+        "Tests/Snapshots/exempt-ios.txt",
+        "Tests/Snapshots/exempt-macos.txt",
+        "Tests/Snapshots/exempt-swift.txt",
+        "Tests/Snapshots/fixtures/coretext_parity_prose.txt",
+        "Tests/Snapshots/known-failing-macos.txt",
+        "Tests/Snapshots/known-failing-swift.txt",
+        "VERSION",
+        "license-scope.json"
+      ],
+      "mode": "metadata",
+      "license": "Apache-2.0",
+      "reason": "Project JSON, lockfiles, assets, measurements, and line-oriented input lists retain their required data format.",
+      "copyright": [
+        "2026 Stanislav Yaglo"
+      ],
+      "license_files": [
+        "LICENSES/Apache-2.0.txt"
+      ]
+    },
+    {
+      "paths": [
+        "Docs/third-party-licenses/Contributor-Covenant-2.1-LICENSE.txt"
+      ],
+      "mode": "upstream",
+      "license": "CC-BY-4.0",
+      "reason": "Preserves the license of Contributor Covenant 2.1.",
+      "license_files": [
+        "Docs/third-party-licenses/Contributor-Covenant-2.1-LICENSE.txt"
+      ]
+    },
+    {
+      "paths": [
+        ".gitmodules"
+      ],
+      "mode": "metadata",
+      "license": "Apache-2.0",
+      "reason": "Git submodule configuration is plain text without a comment-safe header position.",
+      "copyright": [
+        "2026 Stanislav Yaglo"
+      ],
+      "license_files": [
+        "LICENSES/Apache-2.0.txt"
+      ]
+    },
+    {
+      "paths": [
+        "Libraries/ubiquitty-core"
+      ],
+      "mode": "metadata",
+      "license": "Apache-2.0",
+      "reason": "The ubiquitty-core submodule is a checkout of another repository; its files carry their own headers and its license-scope.json assigns the rest.",
+      "copyright": [
+        "2026 Stanislav Yaglo"
+      ],
+      "license_files": [
+        "LICENSES/Apache-2.0.txt"
+      ]
+    },
+    {
+      "paths": [
+        "Resources/phosphor/LICENSE",
+        "Resources/phosphor/Phosphor-Fill.ttf",
+        "Resources/phosphor/Phosphor.ttf",
+        "Resources/phosphor/catalog.json"
+      ],
+      "mode": "upstream",
+      "license": "MIT",
+      "reason": "Bundled Phosphor font binaries, the catalog Scripts/import-phosphor.py derives from the upstream package, and the upstream MIT text.",
+      "license_files": [
+        "Resources/phosphor/LICENSE"
+      ]
+    }
+  ]
+}

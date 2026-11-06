@@ -1,0 +1,16 @@
+// Copyright (C) 2026 Stanislav Yaglo
+// SPDX-License-Identifier: Apache-2.0
+
+// The Swift interop surfaces of the kit's macOS seams, each naming a header
+// beside this map.
+//
+// Separate from Source/Platform/Apple/module.modulemap, which is Core's and is
+// shared with the phone. A header belongs to one map: a header named by two is
+// parsed into both and defined twice.
+
+// A remote window's sealed resume owner: the record of one window identity,
+// restored before any I/O and handed to the window's session.
+module UbiquittyRemoteResume {
+    header "RemoteResumeBridge.h"
+    export *
+}

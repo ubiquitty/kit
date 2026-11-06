@@ -1,0 +1,36 @@
+# Scripts/swift-unsafe-baseline.kit.txt — the `Unsafe*` sites ubiquitty-kit's Swift still has.
+#
+# One line per file: the count, then the path. Scripts/check-swift-unsafe.py
+# refuses any file that exceeds its count, and any file not listed here at
+# all. Every line is a Core declaration missing its interop annotation, or an
+# Apple API that hands out a raw pointer; the list is meant to shrink.
+#
+# Each repository records its own files. A checkout holding several reads
+# every Scripts/swift-unsafe-baseline.<repository>.txt it has.
+#
+# Re-record with: python3 Scripts/check-swift-unsafe.py --write
+3 Source/Platform/macOS/ClipboardPasteboard.swift
+17 Source/Platform/macOS/TypedPasteboard.swift
+1 Source/UbiquittyKit/Swift/DeliveryBench.swift
+12 Source/UbiquittyKit/Swift/SealedStore.swift
+1 Source/UbiquittyKit/Swift/ProtectedFile.swift
+2 Source/UbiquittyKit/Swift/SurfaceRenderer.swift
+5 Source/UbiquittyKit/Swift/SurfaceSelectionModel.swift
+1 Source/UbiquittyKit/Swift/SurfaceSmoke.swift
+5 Source/UbiquittyKit/Swift/SurfaceSnapshot.swift
+1 Source/UbiquittyKit/Swift/TerminalSurface+Input.swift
+7 Source/UbiquittyKit/Swift/TerminalSurface.swift
+1 Source/UbiquittyRenderKit/AtlasUploads.swift
+2 Source/UbiquittyRenderKit/ColorSheet.swift
+6 Source/UbiquittyRenderKit/FontCatalogue.swift
+2 Source/UbiquittyRenderKit/FontRouter.swift
+13 Source/UbiquittyRenderKit/GlyphAtlas.swift
+3 Source/UbiquittyRenderKit/GlyphSource.swift
+1 Source/UbiquittyRenderKit/GrowableBuffer.swift
+9 Source/UbiquittyRenderKit/LigatureSheet.swift
+17 Source/UbiquittyRenderKit/RuntimeDrive.swift
+3 Source/UbiquittyRenderKit/StreamDebugRecorder.swift
+3 Source/UbiquittyRenderKit/SurfaceImageStore.swift
+2 Source/UbiquittyRenderKit/TekPass.swift
+1 Tests/Platform/test_ios_protected_file_probe.swift
+1 Tools/classify-bench/Classify.swift
