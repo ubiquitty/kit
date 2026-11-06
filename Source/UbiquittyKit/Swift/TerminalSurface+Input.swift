@@ -113,6 +113,7 @@ extension TerminalSurface {
             forKeyCode: event.keyCode,
             unshifted: press.unshiftedCodePoint,
             shifted: press.shiftedCodePoint,
+            asciiCapable: KeyboardLayout.asciiCapableCharacter(forKeyCode: event.keyCode),
             isISOKeyboard: KeyboardLayout.isISOKeyboard
         )
 
