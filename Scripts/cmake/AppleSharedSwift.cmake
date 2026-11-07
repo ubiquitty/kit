@@ -29,6 +29,13 @@
 # macOS arm adds to them, each relative to UBIQUITTY_KIT_SOURCE_DIR.
 #
 
+# Both frontends link Swift with C++ interoperability, so swiftc supplies
+# libc++. CMake does not probe Swift's implicit link libraries; declaring the
+# runtime here keeps it from appending CXX's copy to those same links. CXX
+# links retain their own implicit runtime.
+list(APPEND CMAKE_Swift_IMPLICIT_LINK_LIBRARIES c++)
+list(REMOVE_DUPLICATES CMAKE_Swift_IMPLICIT_LINK_LIBRARIES)
+
 set(UBIQUITTY_APPLE_SHARED_RENDERKIT_SOURCES
     Source/UbiquittyRenderKit/AtlasUploads.swift
     Source/UbiquittyRenderKit/ColorSheet.swift
