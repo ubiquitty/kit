@@ -296,6 +296,9 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "iOS")
         "$<$<AND:$<COMPILE_LANGUAGE:CXX>,$<BOOL:${UBIQUITTY_WERROR}>>:-Werror>")
     target_link_libraries(ubiquitty-kit-ios-check PRIVATE UbiquittyKitModule ubiquitty-kit)
     set_property(TARGET ubiquitty-kit-ios-check PROPERTY LINKER_LANGUAGE Swift)
+    # This C++-only probe uses the Swift linker for the static Swift modules.
+    # Enable interoperability there too, so swiftc supplies its C++ runtime.
+    target_link_options(ubiquitty-kit-ios-check PRIVATE -cxx-interoperability-mode=default)
     add_dependencies(ubiquitty-kit-ios-check ubiquitty-kit-ios-shaders)
 
 # ----------------------------------------------------------------------
