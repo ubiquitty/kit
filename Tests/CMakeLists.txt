@@ -77,6 +77,13 @@ if(UBQ_FONTCONFIG_FOUND)
     # from the executable, and a test binary has no staged fonts beside it.
     set(test_linux_fontinventory_EXTRA_DEFINES
         UBQ_BUNDLED_FONTS_DIR="${UBIQUITTY_CORE_SOURCE_DIR}/Resources/fonts")
+    # Font routing belongs to the Kit and uses the inventory's shipped-face
+    # fixture, so both renderer routes are checked without an application.
+    set(test_linux_route_parity_EXTRA_SOURCES ${test_linux_fontinventory_EXTRA_SOURCES}
+                                            ${UBIQUITTY_KIT_SOURCE_DIR}/Source/Platform/Linux/FontRouting.cpp)
+    set(test_linux_route_parity_EXTRA_INCLUDES ${test_linux_fontinventory_EXTRA_INCLUDES})
+    set(test_linux_route_parity_EXTRA_LIBS ${test_linux_fontinventory_EXTRA_LIBS})
+    set(test_linux_route_parity_EXTRA_DEFINES ${test_linux_fontinventory_EXTRA_DEFINES})
     # The colour-emoji rasterizer needs the same two libraries: FreeType to read
     # a CBDT/sbix strike and fontconfig to find the font at all.
     set(test_linux_color_emoji_EXTRA_SOURCES  ${UBIQUITTY_KIT_SOURCE_DIR}/Source/Platform/Linux/FreeTypeRasterizer.cpp
@@ -122,20 +129,12 @@ if(UBQ_FONTCONFIG_FOUND)
     set(test_linux_color_glyph_painter_EXTRA_INCLUDES ${UBQ_FONTCONFIG_INCLUDE_DIRS})
     set(test_linux_color_glyph_painter_EXTRA_LIBS     ${UBQ_FONTCONFIG_LINK_LIBRARIES})
 else()
-    list(APPEND UBIQUITTY_UNAVAILABLE_TESTS test_linux_fontinventory test_linux_color_emoji test_linux_color_glyph_painter test_linux_fallback_face test_linux_sized_master test_linux_proportional_at_size)
+    list(APPEND UBIQUITTY_UNAVAILABLE_TESTS test_linux_fontinventory test_linux_color_emoji test_linux_color_glyph_painter test_linux_fallback_face test_linux_sized_master test_linux_proportional_at_size test_linux_route_parity)
     list(APPEND UBIQUITTY_DEFERRED_TESTS ${UBIQUITTY_UNAVAILABLE_TESTS})
     foreach(_ubq_unavailable_test IN LISTS UBIQUITTY_UNAVAILABLE_TESTS)
         message(STATUS "Ubiquitty tests: ${_ubq_unavailable_test} unavailable (a Linux host with fontconfig, freetype2, and harfbuzz is required)")
     endforeach()
 endif()
-
-# Individually deferred — each needs a symbol only a frontend supplies, so it
-# cannot link here. Not skipped because it is broken; skipped because the kit's
-# libraries leave that symbol to the application.
-list(APPEND UBIQUITTY_DEFERRED_TESTS
-    # configureFontRouting is defined beside the Linux frontend's GTK entry
-    # point, which cannot link into a test.
-    test_linux_route_parity)
 
 # Both this directory and every directory under it. `*/test_*.cpp` requires a
 # subdirectory, so a test written beside this file would be picked up by no one.
