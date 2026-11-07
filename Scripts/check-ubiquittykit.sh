@@ -179,7 +179,7 @@ hidden="$(find "$FRAMEWORK/Versions/A" -name '.*' | head -1)"
 # host requires the framework's Swift interface by.
 info="$FRAMEWORK/Versions/A/Resources/Info.plist"
 [ -f "$info" ] || layout_failure "Versions/A/Resources holds no Info.plist"
-kit_version="$(sed -n 's/.*kitVersionString = "\([0-9]*\.[0-9]*\.[0-9]*\)".*/\1/p' "$CORE_ROOT/Source/UbiquittyKit/Version.h")"
+kit_version="$(sed -n 's/.*kitVersionString = "\([0-9]*\.[0-9]*\.[0-9]*\)".*/\1/p' "$UBQ_CORE_ROOT/Source/UbiquittyKit/Version.h")"
 [ -n "$kit_version" ] || layout_failure "no kitVersionString in Source/UbiquittyKit/Version.h"
 for key in CFBundleShortVersionString CFBundleVersion; do
     value="$(/usr/libexec/PlistBuddy -c "Print :$key" "$info" 2>/dev/null || true)"
@@ -190,20 +190,20 @@ done
 # requires of anything that redistributes it, and the fonts, the Phosphor files
 # and the process icons each travel as the tree has them: every file, byte for
 # byte, and nothing the tree does not have.
-python3 -I - "$ROOT/Resources" "$FRAMEWORK/Versions/A/Resources" <<'EOF'
+python3 -I - "$UBQ_CORE_ROOT/Resources" "$ROOT/Resources" "$FRAMEWORK/Versions/A/Resources" <<'EOF'
 import json
 import sys
 from pathlib import Path
 
-tree, resources = Path(sys.argv[1]), Path(sys.argv[2])
+coreTree, kitTree, resources = (Path(argument) for argument in sys.argv[1:])
 findings = []
-for font in json.loads((tree / "fonts/manifest.json").read_text(encoding="utf-8"))["fonts"]:
+for font in json.loads((coreTree / "fonts/manifest.json").read_text(encoding="utf-8"))["fonts"]:
     names = [entry["path"] for entry in font["files"]] + [font["licence_file"]]
     # An entry naming files outside the directory is baked into the binary.
     if any("/" in name for name in names):
         continue
     findings += [f"does not carry fonts/{name}" for name in names if not (resources / "fonts" / name).is_file()]
-for directory in ("fonts", "phosphor", "process-icons"):
+for directory, tree in (("fonts", coreTree), ("phosphor", kitTree), ("process-icons", coreTree)):
     sources = {entry.name: entry for entry in (tree / directory).iterdir()}
     copies = {entry.name: entry for entry in (resources / directory).iterdir()} if (resources / directory).is_dir() else {}
     for name in sorted(sources.keys() - copies.keys()):
@@ -1099,7 +1099,7 @@ preferred=()
 while IFS= read -r family; do
     preferred+=("$family")
 done <<EOF
-$(sed -n 's/.*houseFontFamilies\[\] = {\(.*\)};.*/\1/p' "$ROOT/Source/Core/Preferences/PreferencesDefaults.h" | grep -o '"[^"]*"' | tr -d '"')
+$(sed -n 's/.*houseFontFamilies\[\] = {\(.*\)};.*/\1/p' "$UBQ_CORE_ROOT/Source/Core/Preferences/PreferencesDefaults.h" | grep -o '"[^"]*"' | tr -d '"')
 EOF
 [ -n "${preferred[0]:-}" ] || {
     echo "check-ubiquittykit: no preferred families in Source/Core/Preferences/PreferencesDefaults.h" >&2
@@ -2555,7 +2555,10 @@ xcrun swiftc "$HOST_DIR/resize.swift" \
 
 RESIZE_HOME="$(mktemp -d "${TMPDIR:-/tmp}/ubiquittykit-resize.XXXXXX")"
 resize_status=0
-env -i HOME="$RESIZE_HOME" TMPDIR="$RESIZE_HOME" PATH=/usr/bin:/bin "$HOST_DIR/resize-consumer" || resize_status=$?
+# AppKit's view animator follows the display even in this covered window.
+# Wake a sleeping display and keep it awake only while the consumer runs;
+# otherwise its frame animation never starts and the five-second check fails.
+/usr/bin/caffeinate -du env -i HOME="$RESIZE_HOME" TMPDIR="$RESIZE_HOME" PATH=/usr/bin:/bin "$HOST_DIR/resize-consumer" || resize_status=$?
 rm -rf "$RESIZE_HOME"
 [ "$resize_status" -eq 0 ] || exit "$resize_status"
 echo "check-ubiquittykit: ok (panes moved in code reported each grid once, settled on the grid of their final frame, and kept a picture of their text)"
