@@ -154,6 +154,12 @@ if wanted ubq_library; then
     python3 "$ROOT/Scripts/test-ubq-library.py" || exit 1
 fi
 
+if wanted test_snapshot_gate_scope; then
+    echo "=== test_snapshot_gate_scope ==="
+    RAN=$((RAN + 1))
+    python3 "$ROOT/Tests/Tools/test_snapshot_gate_scope.py" || exit 1
+fi
+
 if wanted test_resource_producers; then
     echo "=== test_resource_producers ==="
     RAN=$((RAN + 1))

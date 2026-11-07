@@ -32,8 +32,9 @@ kit_swift_arm_reached() {
     # Native snapshots use the same Swift surface and Metal encoder as the app,
     # built by the Kit's build modules, which hold the render kit's Swift flags,
     # its source lists and the shader library.
+    # Read the whole list: early grep exit can SIGPIPE its upstream under pipefail.
     if printf '%s\n' "$changed" | grep -v '^Source/Platform/macOS/UITest/' \
-        | grep -qE '^Source/(Platform/macOS|UbiquittyRenderKit|UbiquittyKit)/|^Scripts/cmake/(UbiquittyKit|AppleSharedSwift)\.cmake$'; then
+        | grep -E '^Source/(Platform/macOS|UbiquittyRenderKit|UbiquittyKit)/|^Scripts/cmake/(UbiquittyKit|AppleSharedSwift)\.cmake$' >/dev/null; then
         return 0
     fi
     # A library mount that could not be read between its pins may have changed anything.
