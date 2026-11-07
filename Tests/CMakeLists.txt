@@ -188,6 +188,8 @@ ubiquitty_add_host_tests(
 # mode the Kit's modules compile in answers it with a remark instead.
 if(TARGET test_typed_pasteboard)
     target_link_options(test_typed_pasteboard PRIVATE "$<$<LINK_LANGUAGE:Swift>:SHELL:-wmo>")
+    # This C++-only test uses the Swift linker for its pasteboard module.
+    target_link_options(test_typed_pasteboard PRIVATE "$<$<LINK_LANGUAGE:Swift>:-cxx-interoperability-mode=default>")
 endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET test_linux_rich_text)
