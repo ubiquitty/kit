@@ -30,7 +30,7 @@ Every original file is Apache-2.0 and carries
 `SPDX-License-Identifier: Apache-2.0`; `license-scope.json` assigns the files
 that cannot carry a header, and
 `Libraries/ubiquitty-core/Scripts/check-licenses.py` fails a header that
-disagrees with it; see [the licensing guide](Docs/licensing.md). Preserve
+disagrees with it; see [the licensing guide](Libraries/ubiquitty-core/Docs/licensing.md). Preserve
 third-party licenses. Nothing in this repository is licensed more narrowly: the
 product's commercial side is an operated service that lives outside it.
 Record each contributor's acceptance of the Apache-2.0 incoming grant under
