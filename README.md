@@ -1,19 +1,19 @@
 <!-- Copyright (C) 2026 Stanislav Yaglo -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
-# ubiquitty-kit
+# UbiquittyKit
 
 | You are building | Reach for | Repository |
 |---|---|---|
-| A terminal view to drop into a macOS or iOS app | UbiquittyKit's Swift `TerminalSurface` and Metal renderer | [ubiquitty-kit](https://github.com/ubiquitty/ubiquitty-kit) |
-| Linux rendering, font rasterization or GTK integration | the Vulkan, FreeType and software renderers and the GTK platform libraries | [ubiquitty-kit](https://github.com/ubiquitty/ubiquitty-kit) |
-| A renderer for a texture or layer your UI presents | UbiquittyRenderKit (Metal) or the Vulkan renderer's exportable frames | [ubiquitty-kit](https://github.com/ubiquitty/ubiquitty-kit) |
-| Your own UI, drawing from the portable terminal model | Core's C++23 API, session facade and render plan | [ubiquitty-core](https://github.com/ubiquitty/ubiquitty-core) |
-| Persistent sessions, a session daemon, attach and reattach across machines | `ubiquitty-host`, Sync, `ubq` and the agent | [ubiquitty-core](https://github.com/ubiquitty/ubiquitty-core) |
+| A terminal view to drop into a macOS or iOS app | UbiquittyKit's Swift `TerminalSurface` and Metal renderer | [ubiquitty-kit](https://github.com/ubiquitty/kit) |
+| Linux rendering, font rasterization or GTK integration | the Vulkan, FreeType and software renderers and the GTK platform libraries | [ubiquitty-kit](https://github.com/ubiquitty/kit) |
+| A renderer for a texture or layer your UI presents | UbiquittyRenderKit (Metal) or the Vulkan renderer's exportable frames | [ubiquitty-kit](https://github.com/ubiquitty/kit) |
+| Your own UI, drawing from the portable terminal model | Core's C++23 API, session facade and render plan | [ubiquitty-core](https://github.com/ubiquitty/core) |
+| Persistent sessions, a session daemon, attach and reattach across machines | `ubiquitty-host`, Sync, `ubq` and the agent | [ubiquitty-core](https://github.com/ubiquitty/core) |
 | The Ubiquitty apps themselves | the macOS, iOS, Linux and web frontends | [ubiquitty](https://github.com/ubiquitty/ubiquitty) |
 
 Ubiquitty is three repositories. Each depends only on the ones below it:
-`ubiquitty` → `ubiquitty-kit` → `ubiquitty-core`. This is the middle one.
+`ubiquitty` → `kit` → `core`. This is the middle one.
 
 ## What this repository holds
 
@@ -46,7 +46,7 @@ stays in `ubiquitty-core`, which this repository carries as the submodule
 
 Apple hosts use the Swift view API. Linux hosts link the C++ rendering and
 platform libraries above and supply their own application shell. Portable
-hosts use [Core's C++23 embedding API](https://github.com/ubiquitty/ubiquitty-core/blob/main/Docs/libubiquittycore.md).
+hosts use [Core's C++23 embedding API](https://github.com/ubiquitty/core/blob/main/Docs/libubiquittycore.md).
 
 ## Embed `TerminalSurface`
 
@@ -83,7 +83,7 @@ The Swift API is documented on
 facade supplied by Core. An application
 that compiles the kit into its own build includes
 `Scripts/cmake/UbiquittyKit.cmake` at its top directory after the Core modules,
-in the order [Core's build module](https://github.com/ubiquitty/ubiquitty-core/blob/main/Scripts/cmake/UbiquittyCoreRoot.cmake)
+in the order [Core's build module](https://github.com/ubiquitty/core/blob/main/Scripts/cmake/UbiquittyCoreRoot.cmake)
 lays out, and links the modules the file creates.
 
 ## Build
@@ -91,8 +91,8 @@ lays out, and links the modules the file creates.
 Clone with the submodule:
 
 ```sh
-git clone --recurse-submodules https://github.com/ubiquitty/ubiquitty-kit.git
-cd ubiquitty-kit
+git clone --recurse-submodules https://github.com/ubiquitty/kit.git
+cd kit
 ```
 
 In an existing clone, run `git submodule update --init --recursive`.
@@ -144,14 +144,14 @@ The Linux tests run on Linux and the macOS ones on a Mac. The Swift check driver
 (`Scripts/check-*.sh`) compile a renderer module with a driver of their own and
 need a Mac.
 
-Read [the architecture](https://github.com/ubiquitty/ubiquitty-core/blob/main/Docs/architecture.md) and
-[the coding conventions](https://github.com/ubiquitty/ubiquitty-core/blob/main/Docs/coding-conventions.md)
+Read [the architecture](https://github.com/ubiquitty/core/blob/main/Docs/architecture.md) and
+[the coding conventions](https://github.com/ubiquitty/core/blob/main/Docs/coding-conventions.md)
 before changing behavior, and [Contributing](.github/contributing.md) before
 opening a pull request.
 
 ## License
 
 Apache-2.0; see [LICENSES/Apache-2.0.txt](LICENSES/Apache-2.0.txt),
-[NOTICE](NOTICE) and [the licensing guide](https://github.com/ubiquitty/ubiquitty-core/blob/main/Docs/licensing.md). "Ubiquitty" and
+[NOTICE](NOTICE) and [the licensing guide](https://github.com/ubiquitty/core/blob/main/Docs/licensing.md). "Ubiquitty" and
 the Ubiquitty logo are trademarks of Stanislav Yaglo; see
 [TRADEMARKS.md](TRADEMARKS.md).

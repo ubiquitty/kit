@@ -15,9 +15,9 @@ Clone with `git clone --recurse-submodules`, or run
 
 ## Getting started
 
-Start with [`Docs/architecture.md`](https://github.com/ubiquitty/ubiquitty-core/blob/main/Docs/architecture.md) for the layer map
+Start with [`Docs/architecture.md`](https://github.com/ubiquitty/core/blob/main/Docs/architecture.md) for the layer map
 and end-to-end pipeline, then read
-[`Docs/coding-conventions.md`](https://github.com/ubiquitty/ubiquitty-core/blob/main/Docs/coding-conventions.md) for how the code
+[`Docs/coding-conventions.md`](https://github.com/ubiquitty/core/blob/main/Docs/coding-conventions.md) for how the code
 is written. The one rule everything hangs on: **no
 platform-specific API (Cocoa/Metal/AppKit/GTK/Vulkan) in Core or any shared,
 host-tested translation unit** — platform code lives behind the PAL seam.
@@ -44,7 +44,7 @@ unless you have push access.
 Repository hooks run the checks shipped here. A clone can add checks of its
 own: the pre-commit and pre-push hooks also run every executable file in the
 clone's `.git/hooks.d/pre-commit/` and `.git/hooks.d/pre-push/`
-([`run-local-hooks.sh`](https://github.com/ubiquitty/ubiquitty-core/blob/main/Scripts/run-local-hooks.sh)), and a clone with none
+([`run-local-hooks.sh`](https://github.com/ubiquitty/core/blob/main/Scripts/run-local-hooks.sh)), and a clone with none
 runs none. A maintainer can protect a shared checkout with
 `UBIQUITTY_SHARED_CHECKOUT`; ordinary clones are writable.
 
@@ -84,7 +84,7 @@ machines before every landing.
 
 New code meets all three simultaneously: **WebKit C++ guidelines**, **Safe C++
 (`CheckedPtr`/`CheckedRef`)**, and **Cocoa/Swift Foundation naming**. See
-[`Docs/coding-conventions.md`](https://github.com/ubiquitty/ubiquitty-core/blob/main/Docs/coding-conventions.md), the reference
+[`Docs/coding-conventions.md`](https://github.com/ubiquitty/core/blob/main/Docs/coding-conventions.md), the reference
 every pull request is reviewed against. The codebase is
 `-fno-exceptions -fno-rtti`. Names spell words out
 (`inputEncoding`, not `inputEnc`); acronyms are ALL-CAPS (`UTF8`). Comments
@@ -116,7 +116,7 @@ naming lints — run it before opening a PR.
 ## Reporting bugs & proposing features
 
 Open a [bug report or feature
-request](https://github.com/ubiquitty/ubiquitty-kit/issues/new/choose). A bug report is
+request](https://github.com/ubiquitty/kit/issues/new/choose). A bug report is
 most useful with the terminal's version, the OS, and the byte sequence or steps
 that reproduce it. For security issues, **do not** open a public issue — see
 [`security.md`](security.md).
@@ -167,7 +167,7 @@ trailer, if you add one out of habit, is neither needed nor a substitute.
 ### File headers and distribution
 
 Follow the destination file's distribution license. Original files use
-`SPDX-License-Identifier: Apache-2.0`; [the licensing guide](https://github.com/ubiquitty/ubiquitty-core/blob/main/Docs/licensing.md)
+`SPDX-License-Identifier: Apache-2.0`; [the licensing guide](https://github.com/ubiquitty/core/blob/main/Docs/licensing.md)
 names the two exceptions, and `Libraries/ubiquitty-core/Scripts/check-licenses.py` fails a header that
 disagrees with `license-scope.json`.
 Third-party material and the Emacs client keep their own identifiers and
@@ -176,6 +176,6 @@ has an Apache-2.0 incoming grant: the identifier describes the distributed
 file as a whole. Add your attribution where appropriate without removing
 others'.
 
-Read [the licensing guide](https://github.com/ubiquitty/ubiquitty-core/blob/main/Docs/licensing.md) for the policy and the
+Read [the licensing guide](https://github.com/ubiquitty/core/blob/main/Docs/licensing.md) for the policy and the
 file-level checks. These terms do not withdraw existing grants
 or assert ownership of contributions received under different terms.
