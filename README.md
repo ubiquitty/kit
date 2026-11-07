@@ -5,13 +5,12 @@
 
 | You are building | Reach for | Repository |
 |---|---|---|
-| A terminal view to drop into a macOS or iOS app | UbiquittyKit's `TerminalSurface` (Metal) | `ubiquitty-kit` |
-| A terminal view in a Linux app, or a software-rendered surface | the Vulkan, FreeType and software renderers and the GTK platform layer | `ubiquitty-kit` |
-| Core's renderer drawing into a texture or layer your app owns | UbiquittyRenderKit (Metal) or the Vulkan renderer's exportable frames | `ubiquitty-kit` |
-| Your own UI that draws the terminal itself: a GPU UI toolkit, a game engine, or an editor with its own text system | libubiquitty's C++ session facade and Core headers | `ubiquitty-core` |
-| The same from C++, linking Core in your own CMake graph | the C++ session facade and Core's headers | `ubiquitty-core` |
-| Persistent sessions, a session daemon, attach and reattach across machines | the multiplexer: `ubiquitty-host`, Sync, the `ubq` command and the agent | `ubiquitty-core` |
-| The Ubiquitty apps themselves | the macOS, iOS, Linux and web frontends | `ubiquitty` |
+| A terminal view to drop into a macOS or iOS app | UbiquittyKit's Swift `TerminalSurface` and Metal renderer | [ubiquitty-kit](https://github.com/ubiquitty/ubiquitty-kit) |
+| Linux rendering, font rasterization or GTK integration | the Vulkan, FreeType and software renderers and the GTK platform libraries | [ubiquitty-kit](https://github.com/ubiquitty/ubiquitty-kit) |
+| A renderer for a texture or layer your UI presents | UbiquittyRenderKit (Metal) or the Vulkan renderer's exportable frames | [ubiquitty-kit](https://github.com/ubiquitty/ubiquitty-kit) |
+| Your own UI, drawing from the portable terminal model | Core's C++23 API, session facade and render plan | [ubiquitty-core](https://github.com/ubiquitty/ubiquitty-core) |
+| Persistent sessions, a session daemon, attach and reattach across machines | `ubiquitty-host`, Sync, `ubq` and the agent | [ubiquitty-core](https://github.com/ubiquitty/ubiquitty-core) |
+| The Ubiquitty apps themselves | the macOS, iOS, Linux and web frontends | [ubiquitty](https://github.com/ubiquitty/ubiquitty) |
 
 Ubiquitty is three repositories. Each depends only on the ones below it:
 `ubiquitty` → `ubiquitty-kit` → `ubiquitty-core`. This is the middle one.
@@ -45,30 +44,46 @@ and input integration. Everything a program can observe about its terminal
 stays in `ubiquitty-core`, which this repository carries as the submodule
 `Libraries/ubiquitty-core`.
 
+Apple hosts use the Swift view API. Linux hosts link the C++ rendering and
+platform libraries above and supply their own application shell. Portable
+hosts use [Core's C++23 embedding API](https://github.com/ubiquitty/ubiquitty-core/blob/main/Docs/libubiquittycore.md).
+
 ## Embed `TerminalSurface`
 
-Build `UbiquittyKit.framework` (below), add it to the app and import it. This is
-the whole of a host that draws a frame; `Scripts/check-ubiquittykit.sh` builds
-and runs the same program against the built framework:
+Build `UbiquittyKit.framework` (below), add it to the app and import it. The host
+sizes its `CAMetalLayer` and calls this function on the main actor to feed bytes
+and draw a frame. `Scripts/check-ubiquittykit.sh` exercises these public entry
+points from a separate host linked to the built framework:
 
 ```swift
+import Foundation
+import Metal
+import QuartzCore
 import UbiquittyKit
 
-MainActor.assumeIsolated {
-    guard let surface = TerminalSurface(rows: 24, columns: 80),
-          let renderer = TerminalSurface.makeRenderer() else { return }
+@MainActor
+func drawHello(in layer: CAMetalLayer) -> Bool {
+    guard let device = MTLCreateSystemDefaultDevice(),
+          let surface = TerminalSurface(rows: 24, columns: 80),
+          let renderer = TerminalSurface.makeRenderer(
+              device: device, fontFamily: "JetBrains Mono") else { return false }
+    layer.device = device
+    layer.pixelFormat = .bgra8Unorm_srgb
     surface.renderer = renderer
     surface.feed(Data("hello\r\n".utf8))
-    let layer = CAMetalLayer()   // sized and given a device by the host
-    _ = renderer.encodeFrame(for: surface, into: layer)
+    return renderer.encodeFrame(for: surface, into: layer)
 }
 ```
 
-The API is described in [UbiquittyKit's API](Docs/ubiquittykit-api.md) and the
-Swift renderer in [the Swift renderer](Docs/swift-renderer.md). An application
+The Swift API is documented on
+[`TerminalSurface`](Source/UbiquittyKit/Swift/TerminalSurface.swift) and its
+[renderer factory](Source/UbiquittyKit/Swift/TerminalSurface+Factory.swift).
+[The Swift renderer](Docs/swift-renderer.md) describes the rendering backend;
+[the C++ session guide](Docs/ubiquittykit-api.md) covers the separate session
+facade supplied by Core. An application
 that compiles the kit into its own build includes
 `Scripts/cmake/UbiquittyKit.cmake` at its top directory after the Core modules,
-in the order `Libraries/ubiquitty-core/Scripts/cmake/UbiquittyCoreRoot.cmake`
+in the order [Core's build module](https://github.com/ubiquitty/ubiquitty-core/blob/main/Scripts/cmake/UbiquittyCoreRoot.cmake)
 lays out, and links the modules the file creates.
 
 ## Build
@@ -76,12 +91,14 @@ lays out, and links the modules the file creates.
 Clone with the submodule:
 
 ```sh
-git clone --recurse-submodules <url> ubiquitty-kit
-git submodule update --init     # in an existing clone
+git clone --recurse-submodules https://github.com/ubiquitty/ubiquitty-kit.git
+cd ubiquitty-kit
 ```
 
+In an existing clone, run `git submodule update --init --recursive`.
+
 The kit builds as C++23 and Swift 6 with warnings as errors, and needs CMake
-3.13 or newer, Ninja or Make, Python 3 and Bash. The first QUIC-enabled build
+with C++23 support, Ninja or Make, Python 3 and Bash. The first QUIC-enabled build
 fetches and builds its QUIC dependencies, which needs network access, Go and
 Perl; `-DUBIQUITTY_QUIC=OFF` leaves QUIC out. Build output goes outside the
 checkout; `python3 Libraries/ubiquitty-core/Scripts/build_root.py .` prints its
@@ -96,6 +113,7 @@ Scripts/check-ubiquittykit.sh   # builds UbiquittyKit.framework, then draws a fr
 **iOS** configures with an iOS toolchain, one SDK per tree:
 
 ```sh
+BUILD="$(python3 Libraries/ubiquitty-core/Scripts/build_root.py .)/ios-simulator"
 cmake -S . -B "$BUILD" -G Ninja -DUBIQUITTY_FRONTEND=iOS -DCMAKE_SYSTEM_NAME=iOS \
     -DCMAKE_OSX_SYSROOT=iphonesimulator -DCMAKE_OSX_ARCHITECTURES=arm64
 cmake --build "$BUILD"
@@ -106,6 +124,7 @@ cmake --build "$BUILD"
 `Scripts/run-linux.sh` runs any command in the container that has them:
 
 ```sh
+BUILD="$(python3 Libraries/ubiquitty-core/Scripts/build_root.py .)/linux"
 cmake -S . -B "$BUILD" -G Ninja -DUBIQUITTY_FRONTEND=Linux
 cmake --build "$BUILD"          # the libraries, the shaders and ubiquitty-kit-linux-check
 ```
@@ -113,6 +132,7 @@ cmake --build "$BUILD"          # the libraries, the shaders and ubiquitty-kit-l
 ## Test
 
 ```sh
+BUILD="$(python3 Libraries/ubiquitty-core/Scripts/build_root.py .)/tests"
 cmake -S . -B "$BUILD" -G Ninja -DUBIQUITTY_FRONTEND=Linux \
     -DUBIQUITTY_BUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Debug     # or macOS
 cmake --build "$BUILD"
@@ -124,14 +144,14 @@ The Linux tests run on Linux and the macOS ones on a Mac. The Swift check driver
 (`Scripts/check-*.sh`) compile a renderer module with a driver of their own and
 need a Mac.
 
-Read [the architecture](Libraries/ubiquitty-core/Docs/architecture.md) and
-[the coding conventions](Libraries/ubiquitty-core/Docs/coding-conventions.md)
+Read [the architecture](https://github.com/ubiquitty/ubiquitty-core/blob/main/Docs/architecture.md) and
+[the coding conventions](https://github.com/ubiquitty/ubiquitty-core/blob/main/Docs/coding-conventions.md)
 before changing behavior, and [Contributing](.github/contributing.md) before
 opening a pull request.
 
 ## License
 
 Apache-2.0; see [LICENSES/Apache-2.0.txt](LICENSES/Apache-2.0.txt),
-[NOTICE](NOTICE) and [the licensing guide](Docs/licensing.md). "Ubiquitty" and
+[NOTICE](NOTICE) and [the licensing guide](https://github.com/ubiquitty/ubiquitty-core/blob/main/Docs/licensing.md). "Ubiquitty" and
 the Ubiquitty logo are trademarks of Stanislav Yaglo; see
 [TRADEMARKS.md](TRADEMARKS.md).
