@@ -76,10 +76,31 @@ function(ubiquitty_stage_bundle_resources target directory isWhole)
         set_property(TARGET ${target} APPEND PROPERTY UBIQUITTY_WHOLE_RESOURCE_DIRECTORIES "${directory}")
     endif()
 
+    # A shared generated input has one utility owner. Depending on that owner
+    # keeps independent resource groups from duplicating its production rule.
+    set(resourceDependencies)
+    set(resourceProducers)
+    foreach(resource IN LISTS ARGN)
+        get_property(hasProducer SOURCE "${resource}" PROPERTY UBIQUITTY_RESOURCE_PRODUCER SET)
+        if(hasProducer)
+            get_property(producer SOURCE "${resource}" PROPERTY UBIQUITTY_RESOURCE_PRODUCER)
+            if(NOT TARGET "${producer}")
+                message(FATAL_ERROR "${target}: resource '${resource}' names missing producer '${producer}'")
+            endif()
+            list(APPEND resourceProducers "${producer}")
+        else()
+            list(APPEND resourceDependencies "${resource}")
+        endif()
+    endforeach()
+    list(REMOVE_DUPLICATES resourceProducers)
+
     if(CMAKE_GENERATOR MATCHES "Xcode")
         target_sources(${target} PRIVATE ${ARGN})
         set_source_files_properties(${ARGN} PROPERTIES
             MACOSX_PACKAGE_LOCATION "Resources/${directory}" HEADER_FILE_ONLY TRUE)
+        if(resourceProducers)
+            add_dependencies(${target} ${resourceProducers})
+        endif()
         return()
     endif()
 
@@ -111,8 +132,11 @@ function(ubiquitty_stage_bundle_resources target directory isWhole)
             "-DUBIQUITTY_BUNDLE_RESOURCES=${ARGN}"
             "-DUBIQUITTY_BUNDLE_WHOLE_DIRECTORY=${isWhole}"
             -P "${stagingScript}"
-        DEPENDS ${ARGN}
+        DEPENDS ${resourceDependencies}
         COMMENT "Staging ${target} bundle resources"
         VERBATIM)
+    if(resourceProducers)
+        add_dependencies(${target}-resources-${group} ${resourceProducers})
+    endif()
     add_dependencies(${target} ${target}-resources-${group})
 endfunction()
