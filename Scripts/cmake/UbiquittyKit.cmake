@@ -804,10 +804,6 @@ function(ubiquitty_kit_add_framework)
     target_include_directories(UbiquittyKit SYSTEM PRIVATE "${UBIQUITTY_RE2_DIR}" "${UBIQUITTY_SIMDUTF_DIR}")
     target_sources(UbiquittyKit PRIVATE ${UBIQUITTY_RE2_SOURCES} ${UBIQUITTY_SIMDUTF_SOURCES})
     ubiquitty_apply_third_party_policy(${UBIQUITTY_RE2_SOURCES} ${UBIQUITTY_SIMDUTF_SOURCES})
-    # The target mixes C++ and Swift; CMake links it through swiftc and appends
-    # the implicit C++ standard library for the C++ side too, so "-lc++" lands on
-    # the link line twice and ld warns "ignoring duplicate libraries".
-    target_link_options(UbiquittyKit PRIVATE "SHELL:-Xlinker -no_warn_duplicate_libraries")
     target_link_libraries(UbiquittyKit PRIVATE
         "-framework AppKit"
         "-framework Metal"
