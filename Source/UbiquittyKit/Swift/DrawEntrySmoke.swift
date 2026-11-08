@@ -1302,7 +1302,10 @@ enum DrawEntrySmoke {
         let size = surface.metalLayer.drawableSize
         guard size.width > 0, size.height > 0 else { return failed("model contention drawable has no size") }
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .bgra8Unorm, width: Int(size.width), height: Int(size.height), mipmapped: false
+            pixelFormat: .bgra8Unorm,
+            width: Int(size.width),
+            height: Int(size.height),
+            mipmapped: false
         )
         descriptor.usage = [.renderTarget, .shaderRead]
         descriptor.storageMode = .shared
@@ -1359,17 +1362,21 @@ enum DrawEntrySmoke {
         // A headless window may report itself covered, so refusing the retry
         // for that reason is valid too. Read that debt before any driven frame;
         // no needsDisplay/deliver call repairs the request after contention.
-        guard spinUntil({
-            (surface.repaintRetriesAsked + surface.repaintRetriesRefused) > retriesBefore
-                && !surface.drive.isFrameHeld
-                && firstContentionCell(surface.drive) == 0x6F22
-        }), surface.repaintRetriesAsked > retriesAskedBefore
-            || (surface.repaintRetriesRefused > retriesRefusedBefore && !window.occlusionState.contains(.visible))
+        guard
+            spinUntil({
+                (surface.repaintRetriesAsked + surface.repaintRetriesRefused) > retriesBefore
+                    && !surface.drive.isFrameHeld
+                    && firstContentionCell(surface.drive) == 0x6F22
+            }),
+            surface.repaintRetriesAsked > retriesAskedBefore
+                || (surface.repaintRetriesRefused > retriesRefusedBefore && !window.occlusionState.contains(.visible))
         else { return failed("a declined resize lost its retry or declined it without a cover") }
-        guard spinUntil({
-            renderer.render(surface, into: target, contentScale: scale)
-                && surface.drawnForegroundAlphaForTesting(row: 0, column: 0).map { abs($0) < 0.001 } == true
-        }), !surface.didLastFrameDrawSelection else {
+        guard
+            spinUntil({
+                renderer.render(surface, into: target, contentScale: scale)
+                    && surface.drawnForegroundAlphaForTesting(row: 0, column: 0).map { abs($0) < 0.001 } == true
+            }), !surface.didLastFrameDrawSelection
+        else {
             return failed("the parser's new marker did not reach an encoded frame after contention")
         }
 
@@ -1380,26 +1387,31 @@ enum DrawEntrySmoke {
         guard surface.isFrameDeliveryWithheldForTesting else { return failed("the contention pane was not covered") }
         let encodesBeforeCover = surface.encodeAttemptCount
         surface.send("h")
-        guard spinUntil({
-            firstContentionCell(surface.drive) == 0x754C
-                && surface.isFrameOwedForTesting && !surface.drive.isFrameHeld
-        }),
+        guard
+            spinUntil({
+                firstContentionCell(surface.drive) == 0x754C
+                    && surface.isFrameOwedForTesting && !surface.drive.isFrameHeld
+            }),
             surface.encodeAttemptCount == encodesBeforeCover
         else { return failed("a covered contention pane spent its new frame debt") }
         drawnAlpha = nil
         surface.isFullyOccludedForTesting = false
         NotificationCenter.default.post(name: NSWindow.didChangeOcclusionStateNotification, object: window)
-        guard spinUntil({
-            !surface.isFrameDeliveryWithheldForTesting
-                && (surface.isFrameOwedForTesting || surface.encodeAttemptCount > encodesBeforeCover)
-        }) else { return failed("revealing the contention pane lost its retained debt") }
+        guard
+            spinUntil({
+                !surface.isFrameDeliveryWithheldForTesting
+                    && (surface.isFrameOwedForTesting || surface.encodeAttemptCount > encodesBeforeCover)
+            })
+        else { return failed("revealing the contention pane lost its retained debt") }
         // The shell's parked window is not guaranteed an automatic display
         // cycle. Only after proving the mark is still owed may this consume it.
         if surface.isFrameOwedForTesting { surface.drawSurfaceFrame() }
-        guard spinUntil({
-            surface.encodeAttemptCount > encodesBeforeCover
-                && drawnAlpha.map({ abs($0) > 0.001 }) == true
-        }) else {
+        guard
+            spinUntil({
+                surface.encodeAttemptCount > encodesBeforeCover
+                    && drawnAlpha.map({ abs($0) > 0.001 }) == true
+            })
+        else {
             return failed(
                 "revealing the contention pane did not draw its retained debt: "
                     + "owed=\(surface.isFrameOwedForTesting) attempts=\(surface.encodeAttemptCount - encodesBeforeCover) "
