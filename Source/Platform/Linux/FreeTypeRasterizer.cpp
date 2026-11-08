@@ -1856,7 +1856,7 @@ int FreeTypeRasterizer::shapePrimaryRun(std::span<const std::uint32_t> codePoint
     std::span<Ubiquitty::ProportionalShapedGlyph> out)
 {
     FT_FaceRec_* drawn = monoFace(face);
-    if (!drawn || !m_textShaper || codePoints.empty() || out.empty())
+    if (!drawn || !m_textShaper || codePoints.empty() || out.empty() || codePoints.size() > static_cast<std::size_t>(std::numeric_limits<int>::max()))
         return 0;
     // A styled file's shaper is built on first use; the one face at the pen's
     // weight shapes through the text shaper, told when the axes moved, as
@@ -1880,8 +1880,8 @@ int FreeTypeRasterizer::shapePrimaryRun(std::span<const std::uint32_t> codePoint
     hb_buffer_t* buffer = hb_buffer_create();
     if (!buffer)
         return 0;
-    for (std::size_t i = 0; i < codePoints.size(); ++i)
-        hb_buffer_add(buffer, codePoints[i], static_cast<unsigned int>(i));
+    const int inputLength = static_cast<int>(codePoints.size());
+    hb_buffer_add_codepoints(buffer, codePoints.data(), inputLength, 0, inputLength);
     hb_buffer_set_content_type(buffer, HB_BUFFER_CONTENT_TYPE_UNICODE);
     hb_buffer_set_direction(buffer, HB_DIRECTION_LTR);
     hb_buffer_set_script(buffer, HB_SCRIPT_COMMON);

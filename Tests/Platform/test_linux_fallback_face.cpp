@@ -569,6 +569,40 @@ TEST(characterVariantsReachScalarGlyphsWithLigaturesDisabled)
     }
 }
 
+TEST(shapingAnInputWindowKeepsNULCharactersAndRelativeClusters)
+{
+    using namespace Ubiquitty::Rendering;
+    Ubiquitty::Linux::FreeTypeRasterizer rasterizer {
+        fontPixelSize, "JetBrains Mono", std::string(), bundled("SymbolsNerdFontMono-Regular.ttf"),
+        bundled("JetBrainsMono[wght].ttf")
+    };
+    REQUIRE(rasterizer.ready());
+    const std::array<std::uint32_t, 5> surrounding { 'W', 'A', 0, 'V', 'W' };
+    const auto window = std::span(surrounding).subspan(1, 3);
+    const std::array<std::uint32_t, 3> text { 'A', 0, 'V' };
+    for (const auto face : { FontFace::Regular, FontFace::Bold, FontFace::Italic }) {
+        std::array<Ubiquitty::ProportionalShapedGlyph, 8> expected {};
+        std::array<Ubiquitty::ProportionalShapedGlyph, 8> actual {};
+        const int expectedCount = rasterizer.shapePrimaryRun(text, face, 0, expected);
+        const int actualCount = rasterizer.shapePrimaryRun(window, face, 0, actual);
+        REQUIRE(expectedCount > 0);
+        REQUIRE(actualCount == expectedCount);
+        CHECK_EQ(actual[static_cast<std::size_t>(actualCount - 1)].cluster, 2);
+        for (int index = 0; index < actualCount; ++index) {
+            const auto offset = static_cast<std::size_t>(index);
+            CHECK_EQ(actual[offset].glyph, expected[offset].glyph);
+            CHECK_EQ(actual[offset].cluster, expected[offset].cluster);
+            CHECK_EQ(actual[offset].advanceInPixels, expected[offset].advanceInPixels);
+            CHECK_EQ(actual[offset].offsetXInPixels, expected[offset].offsetXInPixels);
+            CHECK_EQ(actual[offset].offsetYInPixels, expected[offset].offsetYInPixels);
+        }
+    }
+    std::array<Ubiquitty::Linux::FreeTypeRasterizer::ShapedGlyph, 8> shaped {};
+    const int count = rasterizer.shapeTextRun(window, 0, shaped);
+    REQUIRE(count > 0);
+    CHECK_EQ(shaped[static_cast<std::size_t>(count - 1)].cluster, 2);
+}
+
 TEST(tilingFallbackAndFontStemsReachTheCellWithoutEnteringAtlasMargins)
 {
     using namespace Ubiquitty::Rendering;
