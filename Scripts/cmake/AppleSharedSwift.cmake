@@ -164,6 +164,7 @@ set(UBIQUITTY_APPLE_SHARED_KIT_SOURCES
 # The macOS shell's chrome the renderer draws, which is AppKit and belongs to
 # macOS alone.
 set(UBIQUITTY_MACOS_RENDERKIT_SOURCES
+    Source/UbiquittyRenderKit/ModelContentionProbe.swift
     Source/Platform/macOS/App/TerminalView/ProgressBar.swift
     Source/Platform/macOS/App/TerminalView/PasswordPromptBadge.swift
     Source/Platform/macOS/App/TerminalView/PasswordPromptRegistry.swift

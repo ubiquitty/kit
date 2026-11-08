@@ -2042,6 +2042,8 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
         /// check and the capture's lock.
         case blockOpenUnderLock
         case drainSaturated
+        /// The model is in use; the repaint remains owed.
+        case modelBusy
         /// A live resize's capture met a whole-screen erase whose redraw the
         /// drain had not yet parsed whole.
         case redrawArriving
@@ -2467,8 +2469,7 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
         applyFrameRaster(to: &options, renderer.frameRasterInputs)
         // The clock facts Core's capture refuses to sample itself: the tick
         // the blink curves read and the cursor's weight at it, resolved by
-        // the session under its own lock — taken ahead of the capture's lock
-        // below, because the session's mutex does not nest.
+        // the session from its published presentation inputs.
         let clock = surface.drive.frameClockFactsNow()
         // The cursor's whole presentation through the one applier both arms
         // call: a pane paints filled when it holds focus or its window is a
@@ -2995,7 +2996,13 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
         }
 
         let lockStartedAt = isPerfLogged ? CACurrentMediaTime() : 0
-        surface.drive.lockForRead()
+        guard surface.drive.tryLockForRead() else {
+            // A declined capture must not spend the live cleanup required
+            // after a selection ends. No model state or damage was consumed.
+            surface.didLastFrameDrawSelection = didDrawSelection
+            lastFrameDecline = .modelBusy
+            return false
+        }
         var didCaptureFrame = false
         var lockedStamp: RetainedStamp?
         if let terminal = surface.drive.borrowTerminal() {

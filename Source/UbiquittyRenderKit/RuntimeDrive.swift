@@ -1618,6 +1618,18 @@ public final class RuntimeDrive {
         recorder.install(on: session)
     }
 
+    #if canImport(AppKit)
+    /// Installs the draw-entry smoke's borrowed reply gate before ingest starts.
+    package func installModelContentionProbe(_ probe: ModelContentionProbe) {
+        probe.install(on: session)
+    }
+
+    /// Removes the smoke's reply gate only after ingest has stopped and joined.
+    package func removeModelContentionProbe() {
+        session.setOutboundByteTap(nil, nil)
+    }
+    #endif
+
     /// Pumps host bytes into the model.
     ///
     /// The span is borrowed for exactly this call, which is the whole

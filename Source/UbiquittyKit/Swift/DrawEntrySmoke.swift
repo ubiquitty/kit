@@ -72,6 +72,10 @@ enum DrawEntrySmoke {
         guard verifyPresentedGrid(device: device, library: library) else { return false }
 
         #if canImport(AppKit)
+        guard modelContentionLeg(device: device, library: library, selection: .none),
+            modelContentionLeg(device: device, library: library, selection: .ended)
+        else { return false }
+
         guard let clipboardSurface = TerminalSurface(rows: 2, columns: 20) else {
             return failed("no clipboard surface")
         }
@@ -820,6 +824,7 @@ enum DrawEntrySmoke {
             _ = cursorSurface.drive.withTerminal { terminal in
                 text.withCString { Ubiquitty.processBytes(terminal, std.string_view($0)) }
             }
+            cursorSurface.drive.republishSnapshot()
         }
         inject(String(repeating: "history\r\n", count: 200) + "\u{1b}[2 q\u{1b}[?25h\u{1b}[3;4H")
         _ = cursorSurface.drive.withTerminal { terminal in
@@ -829,6 +834,7 @@ enum DrawEntrySmoke {
             terminal.lastActivityTick = 0
             terminal.cursorMotionModePref = .Off
         }
+        cursorSurface.drive.republishSnapshot()
         var frameNumber = 0
         func draw(at time: Double, programShowsCursor: Bool, row: Int, alpha: Float, named name: String) -> Bool {
             frameNumber += 1
@@ -1233,6 +1239,188 @@ enum DrawEntrySmoke {
             return failed("a run in a window with no extent left the pane in a resize")
         }
         return true
+    }
+    #endif
+
+    #if canImport(AppKit)
+    private enum ContentionSelection: Equatable {
+        case none
+        case ended
+    }
+
+    /// Exercises a real resize capture while the ingest worker owns the model.
+    ///
+    /// The worker's DSR reply holds parsing before frame publication.
+    /// A resize reaches the live capture while output admission holds other frames.
+    private static func modelContentionLeg(device: any MTLDevice, library: any MTLLibrary, selection: ContentionSelection) -> Bool {
+        guard let surface = TerminalSurface(rows: 4, columns: 40),
+            let renderer = SurfaceRenderer(device: device, library: library, familyName: defaultFamilyName, pointSize: 12)
+        else { return failed("model contention fixture unavailable") }
+        surface.renderer = renderer
+        guard let window = present(surface) else { return failed("model contention window unavailable") }
+        defer { dismiss(window) }
+        let probe = ModelContentionProbe()
+        surface.drive.installModelContentionProbe(probe)
+        defer {
+            probe.release()
+            surface.isDrawingResizeStep = false
+            surface.frameEncodedObserverForTesting = nil
+            surface.frameClock.pauseToOnDemand()
+            surface.drive.stopIngest()
+            surface.drive.removeModelContentionProbe()
+            withExtendedLifetime(probe) {}
+        }
+        // No startup byte or user-input echo can be the acknowledgement. Only
+        // the parser's exact DSR reply enters the one-shot tap. The program
+        // stays alive, ignoring that reply while it waits for another command.
+        let program = """
+            import os, select, termios
+            attributes = termios.tcgetattr(0)
+            attributes[3] &= ~(termios.ECHO | termios.ICANON)
+            attributes[6][termios.VMIN] = 1
+            attributes[6][termios.VTIME] = 0
+            termios.tcsetattr(0, termios.TCSANOW, attributes)
+            os.write(1, b"\\x1b[?25l" + "界漢 ready".encode("utf-8"))
+            while select.select([0], [], [], 5)[0]:
+                command = os.read(0, 1)
+                if not command or command == b"q":
+                    break
+                if command == b"g":
+                    os.write(1, b"\\x1b[H\\x1b[8m" + "漢".encode("utf-8") + b"\\x1b[0m\\x1b[5n")
+                elif command == b"h":
+                    os.write(1, b"\\x1b[H" + "界".encode("utf-8") + b"\\x1b[5n")
+            """
+        let quoted = program.replacingOccurrences(of: "'", with: "'\\''")
+        guard surface.drive.launchShellCommand("exec /usr/bin/python3 -c '\(quoted)'"), surface.drive.startIngest() else {
+            return failed("model contention producer did not start")
+        }
+        guard spinUntil({ firstContentionCell(surface.drive) == 0x754C }) else {
+            return failed("model contention producer did not prepare its marker")
+        }
+        surface.isDrawingResizeStep = true
+        let scale = Double(windowScale(window))
+        let size = surface.metalLayer.drawableSize
+        guard size.width > 0, size.height > 0 else { return failed("model contention drawable has no size") }
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .bgra8Unorm, width: Int(size.width), height: Int(size.height), mipmapped: false
+        )
+        descriptor.usage = [.renderTarget, .shaderRead]
+        descriptor.storageMode = .shared
+        guard let target = device.makeTexture(descriptor: descriptor),
+            spinUntil({ renderer.render(surface, into: target, contentScale: scale) }),
+            let initialAlpha = surface.drawnForegroundAlphaForTesting(row: 0, column: 0), abs(initialAlpha) > 0.001
+        else { return failed("model contention marker did not prewarm") }
+        if selection == .ended {
+            surface.selectAll(nil)
+            guard renderer.render(surface, into: target, contentScale: scale), surface.didLastFrameDrawSelection else {
+                return failed("model contention selection did not draw")
+            }
+            surface.clearSelection()
+        }
+        guard !surface.hasSelection, !surface.didLastFrameDrawSearch,
+            surface.didLastFrameDrawSelection == (selection == .ended),
+            !surface.drive.readSnapshot().syncHoldActive, !surface.drive.isDrainSaturated,
+            surface.drive.takeSyncFrame() == nil,
+            surface.registeredSyncGeometrySize == size,
+            surface.metalLayer.drawableSize == size,
+            !surface.frameRenderers.values.contains(where: { $0.didDeferForFontPreparation })
+        else { return failed("model contention live-capture preconditions changed") }
+        surface.frameClock.pauseToOnDemand()
+        let selectionCleanupWasOwed = surface.didLastFrameDrawSelection
+        let attemptsBefore = surface.encodeAttemptCount
+        let retriesBefore = surface.repaintRetriesAsked + surface.repaintRetriesRefused
+        let retriesAskedBefore = surface.repaintRetriesAsked
+        let retriesRefusedBefore = surface.repaintRetriesRefused
+        var drawnAlpha: Float?
+        surface.frameEncodedObserverForTesting = { observed in
+            drawnAlpha = observed.drawnForegroundAlphaForTesting(row: 0, column: 0)
+        }
+
+        // This is the existing synchronous resize route, not a relaxation of
+        // Core's coherence rule. The dirty request is made before contention;
+        // no request is manufactured after the failed capture to repair it.
+        surface.needsDisplay = true
+        surface.send("g")
+        guard probe.waitUntilHeld(), surface.drive.isFrameHeld, !surface.drive.isDrainSaturated else {
+            return failed("the parser did not acknowledge a held model mutex")
+        }
+        guard !renderer.render(surface, into: target, contentScale: scale),
+            renderer.lastFrameDecline == .modelBusy, probe.isWorkerHeld,
+            surface.didLastFrameDrawSelection == selectionCleanupWasOwed
+        else { return failed("a resize capture waited for the model or spent selection cleanup") }
+        surface.drawSurfaceFrame()
+        guard surface.encodeAttemptCount > attemptsBefore,
+            renderer.lastFrameDecline == .modelBusy, probe.isWorkerHeld,
+            surface.didLastFrameDrawSelection == selectionCleanupWasOwed
+        else { return failed("the draw entry waited for the parser's model mutex") }
+        probe.release()
+        surface.isDrawingResizeStep = false
+
+        // A headless window may report itself covered, so refusing the retry
+        // for that reason is valid too. Read that debt before any driven frame;
+        // no needsDisplay/deliver call repairs the request after contention.
+        guard spinUntil({
+            (surface.repaintRetriesAsked + surface.repaintRetriesRefused) > retriesBefore
+                && !surface.drive.isFrameHeld
+                && firstContentionCell(surface.drive) == 0x6F22
+        }), surface.repaintRetriesAsked > retriesAskedBefore
+            || (surface.repaintRetriesRefused > retriesRefusedBefore && !window.occlusionState.contains(.visible))
+        else { return failed("a declined resize lost its retry or declined it without a cover") }
+        guard spinUntil({
+            renderer.render(surface, into: target, contentScale: scale)
+                && surface.drawnForegroundAlphaForTesting(row: 0, column: 0).map { abs($0) < 0.001 } == true
+        }), !surface.didLastFrameDrawSelection else {
+            return failed("the parser's new marker did not reach an encoded frame after contention")
+        }
+
+        // A later real cell change while covered must remain owed until the
+        // reveal. The visibility notification is the normal reveal trigger.
+        surface.isFullyOccludedForTesting = true
+        NotificationCenter.default.post(name: NSWindow.didChangeOcclusionStateNotification, object: window)
+        guard surface.isFrameDeliveryWithheldForTesting else { return failed("the contention pane was not covered") }
+        let encodesBeforeCover = surface.encodeAttemptCount
+        surface.send("h")
+        guard spinUntil({
+            firstContentionCell(surface.drive) == 0x754C
+                && surface.isFrameOwedForTesting && !surface.drive.isFrameHeld
+        }),
+            surface.encodeAttemptCount == encodesBeforeCover
+        else { return failed("a covered contention pane spent its new frame debt") }
+        drawnAlpha = nil
+        surface.isFullyOccludedForTesting = false
+        NotificationCenter.default.post(name: NSWindow.didChangeOcclusionStateNotification, object: window)
+        guard spinUntil({
+            !surface.isFrameDeliveryWithheldForTesting
+                && (surface.isFrameOwedForTesting || surface.encodeAttemptCount > encodesBeforeCover)
+        }) else { return failed("revealing the contention pane lost its retained debt") }
+        // The shell's parked window is not guaranteed an automatic display
+        // cycle. Only after proving the mark is still owed may this consume it.
+        if surface.isFrameOwedForTesting { surface.drawSurfaceFrame() }
+        guard spinUntil({
+            surface.encodeAttemptCount > encodesBeforeCover
+                && drawnAlpha.map({ abs($0) > 0.001 }) == true
+        }) else {
+            return failed(
+                "revealing the contention pane did not draw its retained debt: "
+                    + "owed=\(surface.isFrameOwedForTesting) attempts=\(surface.encodeAttemptCount - encodesBeforeCover) "
+                    + "alpha=\(String(describing: drawnAlpha)) decline=\(renderer.lastFrameDecline.rawValue)"
+            )
+        }
+        surface.send("q")
+        return true
+    }
+
+    /// Reads a scalar only after the reply gate is released.
+    private static func firstContentionCell(_ drive: RuntimeDrive) -> UInt32? {
+        drive.withTerminal { terminal in
+            let count = Int(terminal.columns)
+            guard count > 0, count <= 4096 else { return 0 }
+            var cells = [Ubiquitty.Cell](repeating: Ubiquitty.Cell(), count: count)
+            cells.withUnsafeMutableBufferPointer {
+                Ubiquitty.Screen.getDisplayRow(terminal, 0, 0, $0.baseAddress, Int32(count))
+            }
+            return cells[0].codePoint
+        }
     }
     #endif
 

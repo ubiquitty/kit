@@ -2171,6 +2171,28 @@ public final class TerminalSurface: PlatformView {
         drawSurfaceFrame()
         frameClock.maybePause()
     }
+
+    /// Runs the ordinary frame entry on a scenario's controlled CPU clock.
+    ///
+    /// The caller holds off the native link and restores the normal clock
+    /// after invalidating its timer. Keep publication at the supplied rate:
+    /// the held-off native clock otherwise selects the background rate.
+    /// This still acquires a layer drawable; it measures no visible cadence.
+    ///
+    /// - Parameter framesPerSecond: The positive CPU rate, or nil to restore normal clock policy without drawing.
+    /// - Returns: The renderer's last recorded decline reason.
+    package func driveOneFrameForTesting(framesPerSecond: Int32?) -> String {
+        controlledFrameRateForTesting = framesPerSecond
+        guard let framesPerSecond else {
+            frameClock.resume()
+            return (renderer as? SurfaceRenderer)?.lastFrameDecline.rawValue ?? "noRenderer"
+        }
+        assert(isFrameLinkHeldOffForTesting && framesPerSecond > 0)
+        if frameLink?.isRunning == true { frameLink?.stop() }
+        frameClock.resume()
+        driveOneFrame()
+        return (renderer as? SurfaceRenderer)?.lastFrameDecline.rawValue ?? "noRenderer"
+    }
     #endif
 
     /// Whether the pointer is past the end of its row's text.
@@ -4326,7 +4348,7 @@ public final class TerminalSurface: PlatformView {
             // asked rather than refused: the report still says covered there,
             // and the frame the reveal owes is exactly the one this repairs.
             guard self.frameDelivery == .Draw,
-                window.occlusionState.contains(.visible)
+                !(self.isFullyOccludedForTesting ?? self.isWindowReportedOccluded(window))
                     || Ubiquitty.Runtime.isPaneRevealUnconfirmed(self.reveal, TerminalSurface.monotonicTicksNow())
             else {
                 self.repaintRetriesRefused += 1
@@ -4929,6 +4951,9 @@ public final class TerminalSurface: PlatformView {
     /// defers to the link's next tick instead of drawing. The draw-entry smoke
     /// asks what one pass does, so it keeps the pane on the on-demand route.
     package var isFrameLinkHeldOffForTesting = false
+
+    /// A macOS scenario's CPU rate while the native link is held off.
+    internal var controlledFrameRateForTesting: Int32?
 
     /// Pushes the machine's own budget to the drain gate.
     ///
@@ -6209,6 +6234,7 @@ private final class SurfaceClockBridge: NSObject, @preconcurrency FrameClockDele
 
     func frameClockMaxScreenFramesPerSecond(_ clock: FrameClock) -> Int32 {
         #if canImport(AppKit)
+        if let rate = surface.controlledFrameRateForTesting { return rate }
         let rate = surface.window?.screen?.maximumFramesPerSecond ?? 60
         #else
         let rate = surface.window?.screen.maximumFramesPerSecond ?? 60
@@ -6224,7 +6250,7 @@ private final class SurfaceClockBridge: NSObject, @preconcurrency FrameClockDele
         // counts full occlusion, and Core says so rather than each shell
         // deciding. On UIKit the struct carries neither occlusion nor tabs,
         // so being in a window is the whole of what the phone can answer.
-        !surface.isFrameLinkHeldOffForTesting
+        (!surface.isFrameLinkHeldOffForTesting || surface.controlledFrameRateForTesting != nil)
             && Ubiquitty.Runtime.paneFullRatePresentation(surface.paneVisibility) == .Presented
     }
 
@@ -6298,7 +6324,9 @@ private final class SurfaceClockBridge: NSObject, @preconcurrency FrameClockDele
             surface.frameLink?.stop()
             return
         }
-        surface.ensureFrameLink().start(framesPerSecond: surface.requestedFramesPerSecond)
+        if !surface.isFrameLinkHeldOffForTesting {
+            surface.ensureFrameLink().start(framesPerSecond: surface.requestedFramesPerSecond)
+        }
         #endif
     }
 
