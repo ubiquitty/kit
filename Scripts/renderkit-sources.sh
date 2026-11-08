@@ -16,6 +16,21 @@
 # module's own -target is. Left to default, swiftc compiles for the build
 # machine's OS and reports deprecations the shipped module never meets.
 
+# Fills RENDERKIT_TARGET from the selected Core's Swift deployment floor, even
+# when a driver compiles only a subset of the render kit's sources.
+renderkit_target_load() {
+    local root="$1"
+    local label="$2"
+    local floor
+    floor="$(sed -n 's/^app=//p' "${UBQ_CORE_ROOT:-$root}/Scripts/macos-deployment-target.txt")"
+    if [[ -z "$floor" ]]; then
+        echo "$label: read no app floor from ubiquitty-core's Scripts/macos-deployment-target.txt." >&2
+        exit 2
+    fi
+    # shellcheck disable=SC2034  # read by the driver that sources this file
+    RENDERKIT_TARGET="$(uname -m)-apple-macos$floor"
+}
+
 # Fills RENDERKIT_SOURCES with absolute paths, in list order, from
 # UBIQUITTY_APPLE_SHARED_RENDERKIT_SOURCES, and RENDERKIT_TARGET with the
 # module's -target triple. $1 is the repository root and $2 the
@@ -43,12 +58,5 @@ renderkit_sources_load() {
         echo "$label: read no render kit sources from $list." >&2
         exit 2
     fi
-    local floor
-    floor="$(sed -n 's/^app=//p' "${UBQ_CORE_ROOT:-$root}/Scripts/macos-deployment-target.txt")"
-    if [[ -z "$floor" ]]; then
-        echo "$label: read no app floor from ubiquitty-core's Scripts/macos-deployment-target.txt." >&2
-        exit 2
-    fi
-    # shellcheck disable=SC2034  # read by the driver that sources this file
-    RENDERKIT_TARGET="$(uname -m)-apple-macos$floor"
+    renderkit_target_load "$root" "$label"
 }

@@ -45,6 +45,7 @@ renderkit_sources_load "$ROOT" check-glyph-atlas
 # One list, read by both passes below — a second spelling for the type-check
 # pass would be a mirror of this one.
 SWIFT_ARGUMENTS=(
+    -warnings-as-errors
     -O -wmo -swift-version 6 -enforce-exclusivity=checked -parse-as-library
     -module-name GlyphAtlasDriver
     -target "$RENDERKIT_TARGET"

@@ -34,6 +34,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$UBQ_CORE_ROOT/Scripts/build-root.sh"
 cd "$ROOT"
 
+# shellcheck source=Scripts/renderkit-sources.sh
+source "$ROOT/Scripts/renderkit-sources.sh"
+renderkit_target_load "$ROOT" check-font-catalogue
+
 SWIFT_DIRECTORY="$ROOT/Source/UbiquittyRenderKit"
 OUT="${TMPDIR:-/tmp}/ubiquitty-font-catalogue-driver"
 
@@ -44,6 +48,7 @@ OUT="${TMPDIR:-/tmp}/ubiquitty-font-catalogue-driver"
 # would be a mirror of this one, and a mirror is what put seventeen source names
 # against a directory of twenty-five.
 SWIFT_ARGUMENTS=(
+    -target "$RENDERKIT_TARGET" -warnings-as-errors
     -O -wmo -enforce-exclusivity=unchecked
     -module-name FontCatalogueDriver
     -package-name ubiquitty
