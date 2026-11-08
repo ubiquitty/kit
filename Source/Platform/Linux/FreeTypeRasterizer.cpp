@@ -17,6 +17,7 @@
 #include "Core/Rendering/SizedMaster.h"
 #include "Core/Rendering/SubpixelPhase.h"
 #include "Core/Unicode/Width.h"
+#include "Platform/Linux/ColorChannel.h"
 #include "Platform/Linux/FontInventory.h"
 
 #include <algorithm>
@@ -128,12 +129,9 @@ constexpr std::array<std::uint32_t, 4> colorProbeCodePoints { 0x1F600, 0x2764, 0
 // transparent edge — which on an emoji is its whole outline.
 void writeStraightRGBA(std::uint8_t* destination, std::uint32_t blue, std::uint32_t green, std::uint32_t red, std::uint32_t alpha)
 {
-    const auto unmultiply = [alpha](std::uint32_t channel) -> std::uint8_t {
-        return alpha ? static_cast<std::uint8_t>(std::min<std::uint32_t>(255, (channel * 255 + alpha / 2) / alpha)) : 0;
-    };
-    destination[0] = unmultiply(red);
-    destination[1] = unmultiply(green);
-    destination[2] = unmultiply(blue);
+    destination[0] = unpremultiplyColorChannel(red, alpha);
+    destination[1] = unpremultiplyColorChannel(green, alpha);
+    destination[2] = unpremultiplyColorChannel(blue, alpha);
     destination[3] = static_cast<std::uint8_t>(std::min<std::uint32_t>(255, alpha));
 }
 
