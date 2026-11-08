@@ -27,12 +27,17 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$UBQ_CORE_ROOT/Scripts/build-root.sh"
 cd "$ROOT"
 
+# shellcheck source=Scripts/renderkit-sources.sh
+source "$ROOT/Scripts/renderkit-sources.sh"
+renderkit_target_load "$ROOT" check-glyph-rasterizer
+
 SWIFT_DIRECTORY="$ROOT/Source/UbiquittyRenderKit"
 OUT="${TMPDIR:-/tmp}/ubiquitty-glyph-rasterizer-driver"
 
 # One list, read by both passes below — a second spelling for the type-check
 # pass would be a mirror of this one.
 SWIFT_ARGUMENTS=(
+    -target "$RENDERKIT_TARGET" -warnings-as-errors
     -O -wmo -enforce-exclusivity=unchecked
     -module-name GlyphRasterizerDriver
     -package-name ubiquitty

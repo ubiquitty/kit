@@ -30,6 +30,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$UBQ_CORE_ROOT/Scripts/build-root.sh"
 cd "$ROOT"
 
+# shellcheck source=Scripts/renderkit-sources.sh
+source "$ROOT/Scripts/renderkit-sources.sh"
+renderkit_target_load "$ROOT" check-terminal-renderer
+
 SWIFT_DIRECTORY="$ROOT/Source/UbiquittyRenderKit"
 CORE_BUILD="$UBQ_BUILD_ROOT/core"
 METALLIB="$(ubq_metallib)"
@@ -41,6 +45,7 @@ OUT="$SCRATCH/driver"
 # testable import lets the driver exercise the real selection model without
 # widening the production API or mixing its imports with RenderKit's.
 OVERLAY_ARGUMENTS=(
+    -target "$RENDERKIT_TARGET" -warnings-as-errors
     -O -sanitize=address -wmo -swift-version 6 -enforce-exclusivity=checked -parse-as-library
     -module-name SurfaceOverlayModel -package-name ubiquitty -enable-testing
     -cxx-interoperability-mode=default -Xcc -std=c++23
@@ -57,6 +62,7 @@ xcrun swiftc "${OVERLAY_ARGUMENTS[@]}"
 # pass would be a mirror of this one, which is the drift the glob already
 # closed on the source half.
 SWIFT_ARGUMENTS=(
+    -target "$RENDERKIT_TARGET" -warnings-as-errors
     -O -sanitize=address -wmo -swift-version 6 -enforce-exclusivity=checked -parse-as-library
     -module-name TerminalRendererDriver
     -package-name ubiquitty
@@ -109,7 +115,7 @@ PAL_STUB_OBJECT="$SCRATCH/pal.o"
 ubiquitty_core_pal_stub_source "$PAL_STUB"
 # Compiled here rather than handed to swiftc: swiftc links a non-Swift input
 # rather than compiling it, so a .cpp reaches the linker as an unreadable file.
-xcrun clang++ -std=c++23 -I"$UBQ_CORE_ROOT/Source" -c "$PAL_STUB" -o "$PAL_STUB_OBJECT"
+xcrun clang++ -std=c++23 -target "$RENDERKIT_TARGET" -I"$UBQ_CORE_ROOT/Source" -c "$PAL_STUB" -o "$PAL_STUB_OBJECT"
 
 xcrun swiftc "${SWIFT_ARGUMENTS[@]}" \
     "$SCRATCH/SurfaceOverlayModel.o" \

@@ -46,6 +46,7 @@ renderkit_sources_load "$ROOT" check-frame-encoder
 # One list, read by both passes below — a second spelling for the type-check
 # pass would be a mirror of this one.
 SWIFT_ARGUMENTS=(
+    -warnings-as-errors
     -O -wmo -swift-version 6 -enforce-exclusivity=checked
     -module-name FrameEncoderDriver
     -target "$RENDERKIT_TARGET"

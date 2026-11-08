@@ -165,3 +165,9 @@ if wanted test_resource_producers; then
     RAN=$((RAN + 1))
     python3 "$ROOT/Tests/Tools/test_resource_producers.py" || exit 1
 fi
+
+if wanted test_swift_driver_target; then
+    echo "=== test_swift_driver_target ==="
+    RAN=$((RAN + 1))
+    python3 "$ROOT/Tests/Tools/test_swift_driver_target.py" || exit 1
+fi

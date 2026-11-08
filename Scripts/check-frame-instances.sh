@@ -33,6 +33,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$UBQ_CORE_ROOT/Scripts/build-root.sh"
 cd "$ROOT"
 
+# shellcheck source=Scripts/renderkit-sources.sh
+source "$ROOT/Scripts/renderkit-sources.sh"
+renderkit_target_load "$ROOT" check-frame-instances
+
 SWIFT_DIRECTORY="$ROOT/Source/UbiquittyRenderKit"
 CORE_BUILD="$UBQ_BUILD_ROOT/core"
 OUT="${TMPDIR:-/tmp}/ubiquitty-frame-instances-driver"
@@ -40,6 +44,7 @@ OUT="${TMPDIR:-/tmp}/ubiquitty-frame-instances-driver"
 # One list, read by both passes below — a second spelling for the type-check
 # pass would be a mirror of this one.
 SWIFT_ARGUMENTS=(
+    -target "$RENDERKIT_TARGET" -warnings-as-errors
     -O -wmo -enforce-exclusivity=unchecked
     -module-name FrameInstancesDriver
     -package-name ubiquitty
