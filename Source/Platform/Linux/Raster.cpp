@@ -109,7 +109,7 @@ std::vector<IntRect> RasterContext::snapshotOverlayRegions(const Terminal& termi
     };
     append(m_state->beamChrome.originColumn, m_state->beamChrome.originRow, m_state->beamChrome.canvas.columns, m_state->beamChrome.canvas.rows);
     append(m_state->hintChrome.originColumn, m_state->hintChrome.originRow, m_state->hintChrome.canvas.columns, m_state->hintChrome.canvas.rows);
-    if (!m_state->preeditText.empty() && viewOffset == 0 && terminal.screens.active) {
+    if (!m_state->preeditText.empty() && Ubiquitty::Screen::resolvedViewOffset(&terminal, viewOffset) == 0 && terminal.screens.active) {
         int width = 0;
         for (const auto scalar : m_state->preeditText)
             width += std::max(Unicode::Width::forCodePoint(scalar, terminal.ambiguousWidth), 0);
@@ -411,6 +411,10 @@ bool RasterContext::rasterizeTerm(Ubiquitty::Terminal* term, std::vector<uint8_t
     const int rows = term->rows;
     if (columns <= 0 || rows <= 0)
         return false;
+    // The offset the frame shows (Screen::resolvedViewOffset), resolved once:
+    // a pane hands over the offset its view holds, and over the alternate
+    // screen, which has no history, the frame is the tail.
+    viewOffset = Ubiquitty::Screen::resolvedViewOffset(term, viewOffset);
 
     std::vector<Cell> grid;
     snapshotVisibleGrid(term, viewOffset, grid);

@@ -2267,7 +2267,8 @@ enum SurfaceSmoke {
     /// Each must be drawn by a boundary frame, as the drain resolved it at the
     /// capture, and leave the live capture owing a whole frame: the target
     /// then holds a selection that capture's record of what it baked never
-    /// saw.
+    /// saw. The view scrolled back holds its rows while output arrives
+    /// without registering the capture geometry again.
     ///
     /// - Parameters:
     ///   - surface: The surface, its shell awake.
@@ -2300,6 +2301,7 @@ enum SurfaceSmoke {
         guard encodeAfterFontPreparation(renderer, for: surface, into: layer) else {
             return "the frame over the history selection declined: decline=\(renderer.lastFrameDecline.rawValue)"
         }
+        let registeredViewOffset = surface.registeredSyncViewOffset
         guard drawsSelectedBoundaryFrame(surface, renderer: renderer, layer: layer) else {
             return "no boundary frame drew the history selection (decline=\(renderer.lastFrameDecline.rawValue))"
         }
@@ -2308,6 +2310,10 @@ enum SurfaceSmoke {
         }
         guard surface.selectedText == inHistory else {
             return "the history selection left its text while output arrived"
+        }
+        guard surface.registeredSyncViewOffset == registeredViewOffset else {
+            return "the view holding its rows under output registered the capture geometry again "
+                + "(\(String(describing: registeredViewOffset)) to \(String(describing: surface.registeredSyncViewOffset)))"
         }
 
         surface.clearSelection()
