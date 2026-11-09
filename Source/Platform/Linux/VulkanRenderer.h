@@ -119,8 +119,9 @@ public:
     ///   - outRGBA: Receives the pixels, widthOut × heightOut × 4 bytes.
     ///   - widthOut: Set to columns × cellWidth.
     ///   - heightOut: Set to rows × cellHeight.
-    ///   - viewOffset: The scrollback window (0 = live tail); when > 0 the
-    ///     cursor is suppressed.
+    ///   - viewOffset: The scrollback window (0 = live tail), as the pane's view
+    ///     holds it; resolved here (``Screen::resolvedViewOffset``), and a
+    ///     window into history suppresses the cursor.
     ///   - selection: The pane's selection session driving the overlay;
     ///     nullable.
     ///   - cursor: The resolved cursor look; null draws a static focused

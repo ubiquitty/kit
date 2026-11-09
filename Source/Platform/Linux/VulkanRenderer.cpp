@@ -2129,6 +2129,10 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
     const int rows = term->rows;
     if (columns <= 0 || rows <= 0)
         return false;
+    // The offset the frame shows (Screen::resolvedViewOffset), resolved once:
+    // a pane hands over the offset its view holds, and over the alternate
+    // screen, which has no history, the frame is the tail.
+    viewOffset = Ubiquitty::Screen::resolvedViewOffset(term, viewOffset);
 
     VkPhysicalDeviceProperties physicalProperties {};
     vkGetPhysicalDeviceProperties(m_physical, &physicalProperties);

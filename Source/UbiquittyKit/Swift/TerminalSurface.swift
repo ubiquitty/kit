@@ -2557,6 +2557,14 @@ public final class TerminalSurface: PlatformView {
     /// assembled at.
     package var registeredSyncViewOffset: Int?
 
+    /// The history ``registeredSyncViewOffset`` was measured against, and
+    /// whether the drain holds the view's rows by it: a view scrolled back
+    /// holds its rows while output arrives, a row further back for each row
+    /// appended, and so does each capture, so only a move of the view's own
+    /// re-registers.
+    package var registeredSyncViewHistory = Ubiquitty.Screen.HistoryFacts()
+    package var isRegisteredSyncViewOffsetHeld = false
+
     /// The atlas's raster facts the boundary-capture geometry was last
     /// registered with; nil before the first registration.
     ///
@@ -5757,23 +5765,25 @@ public final class TerminalSurface: PlatformView {
         guard let renderer else { return }
         let cell = renderer.drawnCellSize(for: self)
         guard cell.width > 0, cell.height > 0 else { return }
-        let grid: (column: Int, row: Int, columns: Int, rows: Int) =
+        let grid: (column: Int, row: Int, columns: Int, rows: Int, shownOffset: Int) =
             drive.withTerminal { terminal in
-                guard let screen = terminal.screens.active else { return (0, 0, 0, 0) }
+                guard let screen = terminal.screens.active else { return (0, 0, 0, 0, 0) }
                 return (
                     column: Int(max(0, screen.pointee.cursorX)),
                     row: Int(max(0, screen.pointee.cursorY)),
                     columns: Int(terminal.columns),
-                    rows: Int(terminal.rows)
+                    rows: Int(terminal.rows),
+                    shownOffset: Int(Ubiquitty.Screen.resolvedViewOffset(terminal, Int32(viewOffset)))
                 )
-            } ?? (0, 0, 0, 0)
+            } ?? (0, 0, 0, 0, 0)
         var column = grid.column + 1
         if column >= grid.columns {
             column = max(grid.column - 1, 0)
         }
-        // A view scrolled back by `viewOffset` rows shows the cursor's row
-        // that many rows lower, if it shows it at all.
-        let row = grid.row + viewOffset
+        // A view scrolled back shows the cursor's row as many rows lower as
+        // its frame shows history (``Screen::resolvedViewOffset``), if it
+        // shows it at all.
+        let row = grid.row + grid.shownOffset
         guard grid.rows > 0, row < grid.rows else {
             passwordBadge.frame = .zero
             return

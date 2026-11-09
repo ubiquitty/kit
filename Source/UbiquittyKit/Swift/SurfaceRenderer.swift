@@ -1790,7 +1790,12 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
             x: Float(surface.remotePanOffsetInPoints.x * deviceScale),
             y: Float(surface.remotePanOffsetInPoints.y * deviceScale)
         )
-        request.shouldFollowCursor = surface.viewOffset == 0 && isCursorVisible
+        request.shouldFollowCursor =
+            Ubiquitty.Screen.resolvedViewOffset(
+                Int32(surface.viewOffset),
+                Int32(snapshot.scrollbackCount),
+                snapshot.modes.alternateScreenActive
+            ) == 0 && isCursorVisible
         let offset = Ubiquitty.Rendering.remotePanOffset(request)
         geometry.originInPixels = PixelExtent(width: Float(clip.minX) - offset.x, height: Float(clip.minY) - offset.y)
         return (geometry, clip, 1, CGPoint(x: Double(offset.x) / deviceScale, y: Double(offset.y) / deviceScale))
@@ -2818,6 +2823,19 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
             hasSelection
             && surface.registeredSyncPlatformSelectionColor
                 != SIMD4(platformSelectionColor.x, platformSelectionColor.y, platformSelectionColor.z, platformSelectionColor.w)
+        // A view scrolled back holds its rows while output arrives, and the
+        // drain holds them in each capture by the same rule, measured against
+        // the history the view's offset was last judged by: the registration
+        // stands while the view only holds, and a move of its own, a jump to
+        // the tail included, registers again.
+        let viewSession = surface.selectionModel.session
+        let viewHistory = viewSession.pointee.viewportObservedHistory
+        let isViewOffsetHeld = Ubiquitty.Selection.isViewOffsetHeldByHistory(viewSession.pointee)
+        let registeredViewOffsetNow = surface.registeredSyncViewOffset.map { offset in
+            surface.isRegisteredSyncViewOffsetHeld
+                ? Int(Ubiquitty.Selection.heldViewOffset(Int32(offset), surface.registeredSyncViewHistory, viewHistory))
+                : offset
+        }
         if surface.registeredSyncGeometryOrigin != captureOrigin
             || surface.registeredSyncGeometrySize != drawableSize
             || surface.registeredSyncGeometryScale != font.atlasScale
@@ -2825,7 +2843,7 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
             || surface.registeredSyncBackground != captureBackground
             || surface.registeredSyncBackgroundOpacity != groundOpacity
             || surface.isRegisteredSyncCursorFilled != options.isFocused
-            || surface.registeredSyncViewOffset != surface.viewOffset
+            || registeredViewOffsetNow != surface.viewOffset
             || surface.registeredSyncRaster != raster
             || surface.registeredSyncCellWidth != frameMetrics.cellWidth
             || surface.registeredSyncSheetKey != currentSheetKey
@@ -2836,6 +2854,8 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
             // capture routes cannot drift a field apart.
             var geometry = Ubiquitty.Runtime.SyncFrameCaptureGeometry()
             geometry.viewOffset = options.viewOffset
+            geometry.viewHistory = viewHistory
+            geometry.isViewOffsetHeld = isViewOffsetHeld
             // Focus rides the same assembled options as the style, so the
             // boundary route's cursor and the live route's agree.
             geometry.isFocused = options.isFocused
@@ -2899,6 +2919,8 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
             surface.registeredSyncBackgroundOpacity = groundOpacity
             surface.isRegisteredSyncCursorFilled = options.isFocused
             surface.registeredSyncViewOffset = surface.viewOffset
+            surface.registeredSyncViewHistory = viewHistory
+            surface.isRegisteredSyncViewOffsetHeld = isViewOffsetHeld
             surface.registeredSyncRaster = raster
             surface.registeredSyncCellWidth = frameMetrics.cellWidth
             surface.registeredSyncSheetKey = currentSheetKey
