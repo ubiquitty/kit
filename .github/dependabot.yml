@@ -1,0 +1,16 @@
+# Copyright (C) 2026 Stanislav Yaglo
+# SPDX-License-Identifier: Apache-2.0
+
+# The Core pin: once a day Dependabot proposes moving Libraries/ubiquitty-core
+# to Core's default branch, as a pull request titled the way this repository's
+# commits are, an imperative sentence with no prefix ("Bump Libraries/... from
+# <commit> to <commit>"), and without labels, which this repository does not use.
+version: 2
+updates:
+  - package-ecosystem: gitsubmodule
+    directory: "/"
+    schedule:
+      interval: daily
+    allow:
+      - dependency-name: Libraries/ubiquitty-core
+    labels: []
