@@ -2191,6 +2191,44 @@ public final class RuntimeDrive {
         session.updateSelectionAfterOutput(&selection, viewOffset, history)
     }
 
+    /// Hands the view's selection to the boundary captures the drain takes
+    /// from here on, without the model lock.
+    ///
+    /// The drain resolves the latest hand-off at each capture, against the
+    /// terminal the frame freezes. A selection unchanged since the last
+    /// hand-off hands nothing over, so a call before every frame costs a
+    /// comparison.
+    ///
+    /// - Parameter selection: The caller-owned selection session.
+    // swift-only: the printer cannot represent the selection pointer, and the only callers are in-package Swift
+    package func publishSelectionForCaptures(_ selection: inout Ubiquitty.Selection.Session) {
+        session.publishSelectionForCaptures(&selection)
+    }
+
+    /// The selection a taken boundary frame shows, resolved when the drain
+    /// captured it, without the model lock.
+    ///
+    /// The caller's session is brought up to what output did to the
+    /// selection there, unless the view moved its selection since handing it
+    /// over.
+    ///
+    /// - Parameters:
+    ///   - selection: The caller-owned selection session.
+    ///   - capture: A frame from ``takeSyncFrame()``, still held.
+    ///   - spans: Receives the spans, in the frame's visible rows.
+    ///   - ends: Receives where the selection begins and ends on the frame.
+    /// - Returns: How many spans were written, what output did to the
+    ///   selection, and whether the session took the resolved one.
+    // swift-only: the printer cannot represent the selection pointer, and the only callers are in-package Swift
+    package func selectionOverCapture(
+        _ selection: inout Ubiquitty.Selection.Session,
+        _ capture: Ubiquitty.Rendering.FrameCapture,
+        _ spans: Ubiquitty.Selection.ViewportSpans,
+        _ ends: inout Ubiquitty.Selection.ViewportEnds
+    ) -> Ubiquitty.Selection.CaptureSpans {
+        session.selectionOverCapture(&selection, capture, spans, &ends)
+    }
+
     /// Runs one scroll fact through Core's wheel ladder — report,
     /// alternate-scroll fold, or local view — and answers what remains.
     ///
@@ -4213,6 +4251,12 @@ public final class RuntimeDrive {
     /// ahead and each pass publishes its own frame into the sync slot.
     public var isDrainSaturated: Bool {
         session.isDrainSaturated()
+    }
+
+    /// Whether a tick that found no capture in the sync slot may present
+    /// nothing and wait for the drain's next one rather than read the model.
+    public var shouldSkipLiveReadForSaturation: Bool {
+        session.shouldSkipLiveReadForSaturation()
     }
 
     /// The adaptive drain streak, for a debug readout.
