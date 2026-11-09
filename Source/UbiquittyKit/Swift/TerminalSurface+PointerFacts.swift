@@ -331,6 +331,9 @@ extension TerminalSurface {
             frameClock.noteAnimationActivity()
         }
         if outcome.didChangeSelection {
+            // The drain's next capture resolves the gesture's selection, not
+            // the one before it.
+            selectionModel.withSession { drive.publishSelectionForCaptures(&$0) }
             noteAccessibilityContentChanged()
             observer?.terminalSurfaceSelectionDidChange(self)
         }

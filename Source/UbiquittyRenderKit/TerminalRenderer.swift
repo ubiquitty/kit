@@ -69,7 +69,8 @@ package final class TerminalRenderer {
     /// have accumulated slack from content that scrolled away, and the next
     /// frame must rebuild every row so the re-baselined pins are exact. The
     /// frame that carries the flag draws correct but softer; the one after it
-    /// is whole again.
+    /// is whole again. Also set when the retained pixels stop describing the
+    /// damage baseline: a viewport clip that moved.
     public private(set) var wantsFullRebuild = false
     /// Refusal-triggered re-baselines are rate-limited: a working set that
     /// genuinely exceeds the sheets refuses again right after a re-baseline,
@@ -199,6 +200,16 @@ package final class TerminalRenderer {
     package func noteFrameNotPresented() {
         lastPresentedOverlay = nil
     }
+
+    /// Whether the retained target holds a view tier, or lacks one, where the
+    /// live capture's own record of what it baked says otherwise.
+    ///
+    /// The live capture repaints the rows its baked selection reached or left
+    /// by comparing it with the one it baked last, and a boundary frame that
+    /// draws a tier, or rebuilds over rows a live frame baked one on, changes
+    /// the target behind that record. The live route plans every row while
+    /// this holds, and a live capture that does clears it.
+    package private(set) var hasTiersUnknownToLiveCapture = false
 
     private var preparedViewportClip: CGRect?
 
@@ -885,6 +896,9 @@ package final class TerminalRenderer {
             options.selectionSpanCount > 0 || options.searchMatchSpanCount > 0
             || options.otherSearchMatchSpanCount > 0 || options.triggerHighlightSpanCount > 0
             || options.hiliteRegionSpanCount > 0
+        if !plan.shouldLoadRetainedTarget {
+            hasTiersUnknownToLiveCapture = false
+        }
         // Held for the build, which runs once the caller has let the lock go.
         // The options are not: every tier they carry is a borrow of the model or
         // of the caller's scratch, and both die at that release — the capture has
@@ -1094,6 +1108,9 @@ package final class TerminalRenderer {
         var reusesGrid =
             !capture.isFullFrame() && !hasBakedViewTiers && !hadBakedViewTiers
             && !wantsFullRebuild && !imagesMayChange && backdrop == nil
+        if hasBakedViewTiers || hadBakedViewTiers {
+            hasTiersUnknownToLiveCapture = true
+        }
         hadBakedViewTiers = hasBakedViewTiers
         didBoundaryFrameReuseGrid = reusesGrid
         boundaryFrameDirtyRows = reusesGrid ? Int(capture.capturedDirtyRowCount()) : Int(capture.rows())

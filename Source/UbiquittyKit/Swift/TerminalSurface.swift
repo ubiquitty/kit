@@ -2578,6 +2578,15 @@ public final class TerminalSurface: PlatformView {
     /// The atlas key used by boundary captures, including font metrics and slot geometry.
     package var registeredSyncSheetKey: String?
 
+    /// The system selection colour the boundary-capture geometry was last
+    /// registered with; nil before the first registration.
+    ///
+    /// Part of the key because a selection drawn over a boundary capture
+    /// fills in the colour the capture resolved from its registered style,
+    /// and focus or the Highlight setting moves the colour without moving
+    /// anything else the key holds.
+    package var registeredSyncPlatformSelectionColor: SIMD4<Float>?
+
     #if canImport(AppKit)
     /// The ordinary question on this surface, retired when Core's token changes.
     package var consentPresentation: ConsentPresentation?
@@ -3637,10 +3646,11 @@ public final class TerminalSurface: PlatformView {
         return demand
     }
 
-    /// Whether the last frame drawn for this surface drew a selection.
+    /// Whether the last frame committed for this surface drew a selection,
+    /// on either capture route.
     ///
-    /// Read by the frame assembly, which routes the frame after a selection
-    /// ends through the live capture rather than a boundary one.
+    /// Set once the frame that draws or leaves the selection is committed,
+    /// never by a tick that declines, which repaints nothing.
     package var didLastFrameDrawSelection = false
 
     /// Whether the last frame drawn for this surface drew a search tier: the

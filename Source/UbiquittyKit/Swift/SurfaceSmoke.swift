@@ -346,9 +346,33 @@ enum SurfaceSmoke {
         guard renderer.encodeFrame(for: surface, into: layer) else {
             return failed("selected frame declined")
         }
+        guard surface.didLastFrameDrawSelection else {
+            return failed("a frame drawn with a selection did not record that it drew one")
+        }
         surface.clearSelection()
         guard !surface.hasSelection else {
             return failed("clear left a selection standing")
+        }
+        // A tick that declines draws nothing, so the glass still holds the
+        // selection it drew: the record must survive it for the frame that
+        // finally draws to repaint the rows the selection leaves. The block
+        // is fed open so the declined tick is one a held presentation causes,
+        // whichever way the capture's recheck falls.
+        waitForAdmittedFrame(surface)
+        feed(surface.drive, "\u{1b}[?2026h")
+        let drewInsideSelectionBlock = renderer.encodeFrame(for: surface, into: layer)
+        let keptSelectionRecord = surface.didLastFrameDrawSelection
+        feed(surface.drive, "\u{1b}[?2026l")
+        guard drewInsideSelectionBlock || keptSelectionRecord else {
+            return failed(
+                "a declined tick consumed the record of the selection the glass still shows: decline=\(renderer.lastFrameDecline.rawValue)"
+            )
+        }
+        guard encodeAfterFontPreparation(renderer, for: surface, into: layer) else {
+            return failed("the frame after the selection ended declined: decline=\(renderer.lastFrameDecline.rawValue)")
+        }
+        guard !surface.didLastFrameDrawSelection else {
+            return failed("the frame after the selection ended recorded a selection")
         }
 
         // The scale leg. A frame resolves its geometry against the layer's own
@@ -939,6 +963,12 @@ enum SurfaceSmoke {
         }
         guard surface.drive.takeSyncFrame() == nil else {
             return failed("the encode left the boundary frame undrained")
+        }
+
+        // The boundary-selection leg: a selected pane keeps the route a flood
+        // presents on.
+        if let failure = boundarySelectionFailure(surface, renderer: renderer, layer: layer) {
+            return failed(failure)
         }
 
         // The style leg. A host's styling must be the styling the frame
@@ -2228,6 +2258,141 @@ enum SurfaceSmoke {
     static func feed(_ drive: RuntimeDrive, _ text: String) {
         let bytes = Array(text.utf8CString.dropLast())
         drive.feed(bytes.span)
+    }
+
+    /// Draws selections over the boundary captures the drain takes, through
+    /// the shell: one lying in the history with the view scrolled back over
+    /// it, and one on the screen at the tail while output arrives below it.
+    ///
+    /// Each must be drawn by a boundary frame, as the drain resolved it at the
+    /// capture, and leave the live capture owing a whole frame: the target
+    /// then holds a selection that capture's record of what it baked never
+    /// saw.
+    ///
+    /// - Parameters:
+    ///   - surface: The surface, its shell awake.
+    ///   - renderer: The surface renderer.
+    ///   - layer: The layer to present into.
+    /// - Returns: Why the leg failed, or nil.
+    private static func boundarySelectionFailure(
+        _ surface: TerminalSurface,
+        renderer: SurfaceRenderer,
+        layer: CAMetalLayer
+    ) -> String? {
+        surface.clearSelection()
+        let rows = Int(surface.drive.readSnapshot().rows)
+        feed(surface.drive, String(repeating: "boundary selection history\r\n", count: 3 * rows))
+        // A fed byte reaches no delivery, so the view takes the output here:
+        // the history its offset is judged against is then the fed one.
+        surface.followTailOrHoldViewport()
+        let history = surface.drive.withTerminal { Int($0.scrollbackCount) } ?? 0
+        guard history >= 2 * rows else {
+            return "the boundary-selection history kept \(history) rows"
+        }
+        surface.setViewOffset(absolute: rows, limit: history)
+        if let failure = selectWord(surface, row: rows / 2) {
+            return failure
+        }
+        guard let inHistory = surface.selectedText, !inHistory.isEmpty else {
+            return "a word press in the history selected nothing"
+        }
+        waitForAdmittedFrame(surface)
+        guard encodeAfterFontPreparation(renderer, for: surface, into: layer) else {
+            return "the frame over the history selection declined: decline=\(renderer.lastFrameDecline.rawValue)"
+        }
+        guard drawsSelectedBoundaryFrame(surface, renderer: renderer, layer: layer) else {
+            return "no boundary frame drew the history selection (decline=\(renderer.lastFrameDecline.rawValue))"
+        }
+        guard surface.frameRenderers.values.contains(where: { $0.hasTiersUnknownToLiveCapture }) else {
+            return "a boundary frame drew a selection and left the live capture's baked record trusted"
+        }
+        guard surface.selectedText == inHistory else {
+            return "the history selection left its text while output arrived"
+        }
+
+        surface.clearSelection()
+        surface.setViewOffset(absolute: 0)
+        feed(surface.drive, "\u{1b}[2J\u{1b}[Hboundary selection on the screen\r\n\r\n")
+        surface.followTailOrHoldViewport()
+        if let failure = selectWord(surface, row: 0) {
+            return failure
+        }
+        guard let onScreen = surface.selectedText, !onScreen.isEmpty else {
+            return "a word press on the screen selected nothing"
+        }
+        waitForAdmittedFrame(surface)
+        guard encodeAfterFontPreparation(renderer, for: surface, into: layer) else {
+            return "the frame over the screen selection declined: decline=\(renderer.lastFrameDecline.rawValue)"
+        }
+        guard drawsSelectedBoundaryFrame(surface, renderer: renderer, layer: layer) else {
+            return "no boundary frame drew the selection on the screen (decline=\(renderer.lastFrameDecline.rawValue))"
+        }
+        guard surface.selectedText == onScreen else {
+            return "the screen selection left its text while output arrived below it"
+        }
+
+        surface.clearSelection()
+        waitForAdmittedFrame(surface)
+        guard encodeAfterFontPreparation(renderer, for: surface, into: layer) else {
+            return "the frame after the boundary selections declined: decline=\(renderer.lastFrameDecline.rawValue)"
+        }
+        guard !surface.didLastFrameDrawSelection else {
+            return "the frame after the boundary selections ended recorded a selection"
+        }
+        return nil
+    }
+
+    /// Selects the word under column 2 of a visible row, as a double click
+    /// there does.
+    ///
+    /// - Parameters:
+    ///   - surface: The surface.
+    ///   - row: The visible row.
+    /// - Returns: Why nothing was selected, or nil.
+    private static func selectWord(_ surface: TerminalSurface, row: Int) -> String? {
+        _ = surface.drive.withTerminal { terminal in
+            _ = Ubiquitty.Selection.beginGesture(
+                &surface.selectionModel.session.pointee,
+                terminal,
+                Int32(row),
+                2,
+                2,
+                Int32(surface.viewOffset),
+                Ubiquitty.Selection.GestureStyle()
+            )
+            _ = Ubiquitty.Selection.endGesture(&surface.selectionModel.session.pointee)
+        }
+        return surface.hasSelection ? nil : "a word press on visible row \(row) selected nothing"
+    }
+
+    /// Drives synchronized updates through the shell until a boundary frame
+    /// draws the surface's selection, for up to ten seconds.
+    ///
+    /// - Parameters:
+    ///   - surface: The surface, its shell awake and a selection standing.
+    ///   - renderer: The surface renderer.
+    ///   - layer: The layer to present into.
+    /// - Returns: Whether a boundary frame drew the selection.
+    private static func drawsSelectedBoundaryFrame(
+        _ surface: TerminalSurface,
+        renderer: SurfaceRenderer,
+        layer: CAMetalLayer
+    ) -> Bool {
+        let deadline = Date(timeIntervalSinceNow: 10)
+        while Date() < deadline {
+            let seenBefore = surface.drive.syncClearSeenCount
+            surface.send("printf '\\033[?2026hboundary-selection-frame\\033[?2026l\\n'\n")
+            let blockDeadline = Date(timeIntervalSinceNow: 2)
+            while surface.drive.syncClearSeenCount == seenBefore, Date() < blockDeadline {
+                RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.02))
+            }
+            let selectedBefore = renderer.selectedBoundaryFrameCount
+            _ = renderer.encodeFrame(for: surface, into: layer)
+            if renderer.selectedBoundaryFrameCount > selectedBefore {
+                return true
+            }
+        }
+        return false
     }
 
     /// Draws a frame after font preparation and presentation holds settle.

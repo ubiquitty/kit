@@ -581,6 +581,39 @@ extension SurfaceStyle {
     }
 }
 
+// The selection a boundary capture shows. It lives here and not beside the
+// selection model because it reads the drive, and the model compiles apart
+// from RenderKit.
+extension SurfaceSelectionModel {
+    /// The selection a boundary capture shows, drawn into ``spanScratch``
+    /// without the model lock.
+    ///
+    /// The drain resolved it when it captured the frame, against the
+    /// terminal the frame froze, by the evaluation the live read runs; Core
+    /// brings the session up to it unless the view moved its selection since
+    /// handing it over. ``visibleEnds`` follows the frame.
+    ///
+    /// - Parameters:
+    ///   - capture: The boundary capture the frame presents, still held.
+    ///   - drive: The drive whose slot handed the capture out.
+    /// - Returns: How many spans the frame draws.
+    func spansOverCapture(_ capture: Ubiquitty.Rendering.FrameCapture, drive: RuntimeDrive) -> Int {
+        let capacity = Int(Ubiquitty.Selection.viewportSpanCapacity(capture.rows(), capture.columns()))
+        if spanScratch.count < capacity {
+            spanScratch = Array(repeating: Ubiquitty.Rendering.SelectionRowSpan(), count: capacity)
+        }
+        var ends = Ubiquitty.Selection.ViewportEnds()
+        let answer = spanScratch.withUnsafeMutableBufferPointer { spans in
+            drive.selectionOverCapture(&session.pointee, capture, Ubiquitty.Selection.ViewportSpans(spans), &ends)
+        }
+        visibleEnds =
+            ends.isVisible
+            ? ((Int(ends.startRow), Int(ends.startColumn)), (Int(ends.endRow), Int(ends.endColumn)))
+            : nil
+        return Int(answer.count)
+    }
+}
+
 /// Draws terminal surfaces through the Swift renderer, one font configuration
 /// per instance.
 ///
@@ -1076,6 +1109,10 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
     /// again, so a reader watching a pane that never paints can tell this from
     /// a pass that was refused a drawable.
     package private(set) var skippedAsReproducingGlassCount = 0
+
+    /// Boundary frames committed with a selection drawn over the captured
+    /// rows.
+    package private(set) var selectedBoundaryFrameCount = 0
     private var phaseLogRowSignature = ""
 
     /// The rows of the live grid as Core's one-line signature (see
@@ -2655,11 +2692,12 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
         )
         options.style.brailleStyle = style.brailleStyle.core
         options.style.shadeStyle = style.shadeStyle.core
+        let hasSelection = Ubiquitty.Selection.hasSelection(surface.selectionModel.session.pointee)
         applyPlatformSelection(
             to: &options.style,
             selectionStyle: style.selectionStyle.core,
             isFocused: surface.isSurfaceFocused,
-            hasSelection: Ubiquitty.Selection.hasSelection(surface.selectionModel.session.pointee)
+            hasSelection: hasSelection
         )
         options.style.shouldEnhanceTextContrast = style.shouldEnhanceTextContrast && !isLetterboxed
         options.style.preservesBackgroundTints = style.preservesBackgroundTints && !isLetterboxed
@@ -2772,6 +2810,14 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
         let raster = renderer.frameRasterInputs
         let captureBackground = SIMD4(defaultBackground.x, defaultBackground.y, defaultBackground.z, defaultBackground.w)
         let captureOrigin = CGPoint(x: CGFloat(options.originInPixels.x), y: CGFloat(options.originInPixels.y))
+        // The system's selection colour is resolved only for a frame that
+        // draws a selection, so only such a frame can tell a registered one
+        // went stale: focus or the Highlight setting moved it.
+        let platformSelectionColor = options.style.platformSelectionColor
+        let isRegisteredSelectionColorStale =
+            hasSelection
+            && surface.registeredSyncPlatformSelectionColor
+                != SIMD4(platformSelectionColor.x, platformSelectionColor.y, platformSelectionColor.z, platformSelectionColor.w)
         if surface.registeredSyncGeometryOrigin != captureOrigin
             || surface.registeredSyncGeometrySize != drawableSize
             || surface.registeredSyncGeometryScale != font.atlasScale
@@ -2783,6 +2829,7 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
             || surface.registeredSyncRaster != raster
             || surface.registeredSyncCellWidth != frameMetrics.cellWidth
             || surface.registeredSyncSheetKey != currentSheetKey
+            || isRegisteredSelectionColorStale
         {
             // The placement and style are the ones the live path below
             // applies — copied from the same assembled options, so the two
@@ -2809,6 +2856,16 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
             // The style stores whole: the borrow that made it nonescapable
             // lives on the options now.
             geometry.style = options.style
+            // The system's selection colour rides the registration whether or
+            // not a selection stands now: a selection drawn over a boundary
+            // capture fills in the colour the capture resolved.
+            applyPlatformSelection(
+                to: &geometry.style,
+                selectionStyle: style.selectionStyle.core,
+                isFocused: surface.isSurfaceFocused,
+                hasSelection: true
+            )
+            let registeredSelectionColor = geometry.style.platformSelectionColor
             // The link styling's durable half, from the same assembled
             // options as the style so the two capture routes cannot drift;
             // hover stays out of the registration on purpose — it would
@@ -2845,34 +2902,33 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
             surface.registeredSyncRaster = raster
             surface.registeredSyncCellWidth = frameMetrics.cellWidth
             surface.registeredSyncSheetKey = currentSheetKey
+            surface.registeredSyncPlatformSelectionColor = SIMD4(
+                registeredSelectionColor.x,
+                registeredSelectionColor.y,
+                registeredSelectionColor.z,
+                registeredSelectionColor.w
+            )
         }
 
         // A frame frozen at a DECSET-2026 boundary presents ahead of the live
         // read: the live capture below can catch a mid-frame state, which is
-        // the artefact the boundary capture exists to exclude. A surface with
-        // an active selection takes the live path, whose capture resolves the
-        // selection tint from the terminal — the override path substitutes
-        // every tier field it names, so routing a selection through it needs
-        // the tint resolved on this side of the seam first.
+        // the artefact the boundary capture exists to exclude.
         //
-        // The frame after a selection ends takes the live path too. A selection
-        // behind the text is in the retained cells, and the live capture is
-        // the one that remembers it and repaints the rows it leaves; the
-        // boundary capture reuses those rows without knowing they hold it.
-        let hasSelection = Ubiquitty.Selection.hasSelection(surface.selectionModel.session.pointee)
-        let didDrawSelection = surface.didLastFrameDrawSelection
-        surface.didLastFrameDrawSelection = hasSelection
-        // A surface showing search matches keeps the live path too: a
-        // boundary frame is built without the search tiers, so the frame it
-        // presents drops every match and leaves the focused match's cells in
-        // the retained grid unfilled. Under a saturated drain the live route
-        // draws nothing, so the boundary frame presents there, and the first
-        // live frame after the flood paints the tiers back; Core's plan owes
-        // it the focused match's rows.
-        let keepsSearchLive = surface.didLastFrameDrawSearch && !surface.drive.isDrainSaturated
-        if !hasSelection, !didDrawSelection, !keepsSearchLive,
-            let syncFrame = surface.drive.takeSyncFrame()
-        {
+        // The view's selection is drawn over it as the drain resolved it when
+        // it captured the frame, against the terminal the frame froze, by the
+        // evaluation the live read runs; nothing here reads the model for it.
+        // The selection is handed over first, so a capture taken from here on
+        // resolves it as it stands now.
+        //
+        // A surface showing search matches keeps the live path, saturated or
+        // not: a boundary frame is built without the search tiers, so the
+        // frame it presents drops every match and leaves the focused match's
+        // cells in the retained grid unfilled.
+        surface.selectionModel.withSession { surface.drive.publishSelectionForCaptures(&$0) }
+        let keepsSearchLive = surface.didLastFrameDrawSearch
+        if !keepsSearchLive, let syncFrame = surface.drive.takeSyncFrame() {
+            let selection = surface.selectionModel
+            let spanCount = selection.spansOverCapture(syncFrame, drive: surface.drive)
             surface.didLastFrameDrawSearch = false
             // Live changes can follow the captured boundary before this display
             // request is consumed. On-demand presentation needs another pass
@@ -2892,8 +2948,21 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
                 pixelWidth: backdropPixelWidth,
                 pixelHeight: backdropPixelHeight
             )
-            let view = Ubiquitty.Rendering.FrameCapture.ViewTierOverrides()
-            guard var pending = renderer.buildFrame(captured: syncFrame, view: view)
+            // The selection is a tier over the frozen rows, in the fill and ink
+            // the capture resolved from its own style and the host's colours.
+            let built = selection.spanScratch.withUnsafeBufferPointer { spans -> TerminalRenderer.PendingFrame? in
+                var view = Ubiquitty.Rendering.FrameCapture.ViewTierOverrides()
+                if spanCount > 0 {
+                    view.selectionSpans = spans.baseAddress
+                    view.selectionSpanCount = Int32(spanCount)
+                    view.selectionColor = syncFrame.selectionFillColor()
+                    view.isSelectionBehindText = syncFrame.isSelectionFillBehindText()
+                    view.hasSelectionForegroundOverride = syncFrame.hasSelectionForegroundOverride()
+                    view.selectionForeground = syncFrame.selectionForeground()
+                }
+                return renderer.buildFrame(captured: syncFrame, view: view)
+            }
+            guard var pending = built
             else {
                 // A frame that reproduced the glass was consumed and not
                 // composited: the drawable goes back unpresented, the verdict
@@ -2960,6 +3029,10 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
                 transactionally: presentsWithTransaction
             )
             notePresentedGeometry(for: surface, frame: pending, deviceScale: deviceScale, panOffset: presentation.panOffset)
+            surface.didLastFrameDrawSelection = spanCount > 0
+            if spanCount > 0 {
+                selectedBoundaryFrameCount += 1
+            }
             if isPerfLogged {
                 let finishedAt = CACurrentMediaTime()
                 perfFrame.drawSeconds = finishedAt - modelTakenAt
@@ -2983,13 +3056,13 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
         }
 
         // Under a saturated flood the drain publishes each full pass's frame
-        // and the route above presents it. A tick that found the slot empty is
-        // between two captures, and going to the model for it means waiting on
-        // the lock the parser holds for the whole burst — measured as a third
-        // of this thread's time, and the CPU the flood reader's spin band
-        // loses to it. The tick is skipped; the next capture is at most one
-        // publish window away, and the link fires again regardless.
-        if surface.drive.isDrainSaturated {
+        // and the route above presents it. Core says when a tick that found
+        // the slot empty may wait for the next capture instead of reading the
+        // model; the link fires again regardless. A tick holding search
+        // tiers always takes the live capture below: the slot route never
+        // serves it, and skipping it would present nothing for the whole
+        // flood.
+        if !keepsSearchLive, surface.drive.shouldSkipLiveReadForSaturation {
             lastFrameDecline = .drainSaturated
             return false
         }
@@ -2997,6 +3070,7 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
         let lockStartedAt = isPerfLogged ? CACurrentMediaTime() : 0
         surface.drive.lockForRead()
         var didCaptureFrame = false
+        var liveFrameDrawsSelection = false
         var lockedStamp: RetainedStamp?
         if let terminal = surface.drive.borrowTerminal() {
             // The parser can open a block or erase the screen after the
@@ -3091,6 +3165,10 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
                 pixelHeight: backdropPixelHeight
             )
             let grantsFullRebuild = renderer.wantsFullRebuild
+            // A boundary frame changed which rows of the target hold a view
+            // tier behind the live capture's record of what it baked, so the
+            // rows that record would repaint are not the rows that differ.
+            let owesTierRows = renderer.hasTiersUnknownToLiveCapture
             let reusesRetainedContent =
                 isRetainedContentCurrent
                 && renderer.gridMatches(
@@ -3119,7 +3197,7 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
                     terminal,
                     rows: rows,
                     columns: Int(snapshot.columns),
-                    target: !grantsFullRebuild && reusesRetainedContent,
+                    target: !grantsFullRebuild && !owesTierRows && reusesRetainedContent,
                     hasBackdrop: backdropTexture != nil,
                     cellHeightInPixels: Int(metrics.cellHeight.rounded()),
                     originYInPixels: Int(options.originInPixels.y.rounded()),
@@ -3145,9 +3223,10 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
                 var terms: [String] = []
                 if skipsGridCapture { terms.append("letterbox") }
                 if grantsFullRebuild { terms.append("sheets") }
+                if owesTierRows { terms.append("tiers") }
                 if !isRetainedContentCurrent { terms.append("stamp") }
                 if !reusesRetainedContent && isRetainedContentCurrent { terms.append("grid") }
-                if !plan.shouldLoadRetainedTarget && !grantsFullRebuild && reusesRetainedContent {
+                if !plan.shouldLoadRetainedTarget && !grantsFullRebuild && !owesTierRows && reusesRetainedContent {
                     terms.append("core")
                 }
                 phaseLogReuseTerms = terms.joined(separator: "+")
@@ -3211,10 +3290,12 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
                 options: options
             ) { options in
                 var options = options
-                // The tiers this capture draws, resolved under its lock, are
-                // what the next frame's route reads.
+                // The tiers this capture draws, resolved under its lock: the
+                // search record is what the next frame's route reads.
                 surface.didLastFrameDrawSearch = options.searchMatchSpanCount > 0 || options.otherSearchMatchSpanCount > 0
-                guard Ubiquitty.Selection.hasSelection(selection.session.pointee), rows > 0 else {
+                let capturesSelection = Ubiquitty.Selection.hasSelection(selection.session.pointee) && rows > 0
+                liveFrameDrawsSelection = capturesSelection
+                guard capturesSelection else {
                     selection.visibleEnds = nil
                     return renderer.captureFrame(
                         terminal,
@@ -3349,6 +3430,7 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
             transactionally: presentsWithTransaction
         )
         notePresentedGeometry(for: surface, frame: pending, deviceScale: deviceScale, panOffset: presentation.panOffset)
+        surface.didLastFrameDrawSelection = liveFrameDrawsSelection
         if isPerfLogged {
             let finishedAt = CACurrentMediaTime()
             perfFrame.drawSeconds = finishedAt - modelTakenAt
