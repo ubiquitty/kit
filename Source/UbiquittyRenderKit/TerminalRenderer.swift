@@ -225,6 +225,13 @@ package final class TerminalRenderer {
         lastPresentedOverlay = nil
     }
 
+    /// Refuses the retained grid to the next build, which then draws every
+    /// row: the target's pixels were painted under something the frame no
+    /// longer carries.
+    package func requestFullRebuild() {
+        wantsFullRebuild = true
+    }
+
     /// Whether the retained target holds a view tier, or lacks one, where the
     /// live capture's own record of what it baked says otherwise.
     ///
