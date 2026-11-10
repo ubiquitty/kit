@@ -158,6 +158,92 @@ private func runTerminalRendererDriver() {
         "\(imageStore.offLockUploadCount) of \(repeatedUploadCount)"
     )
 
+    // The shape of what jotter, through ratatui-image's kitty arm, sends for a
+    // notebook figure at 160x48 with a 16x34 cell: image id 1 in a truecolor
+    // foreground, a 568x413 RGBA picture in chunks of 4096 base64 characters
+    // as one virtual placement with neither c nor r, then 13 rows of 36
+    // placeholder cells, each row naming its row, column 0 and the id's high
+    // byte on its first cell and leaving the rest to inherit. Every cell of
+    // the figure resolves to a quad on both routes a surface draws images by.
+    let figureColumns = 36
+    let figureRows = 13
+    let figureCellWidth = 16
+    let figureCellHeight = 34
+    let figureTerminal = Ubiquitty.Terminal()
+    Ubiquitty.resize(figureTerminal, 48, 160, .Reflow, .top, .Settled)
+    let figurePixels = [UInt8](
+        (0..<(568 * 413)).lazy.flatMap { _ in [UInt8](arrayLiteral: 255, 0, 0, 255) }
+    )
+    let figurePayload = Array(Data(figurePixels).base64EncodedString().utf8)
+    var figureStream = "\u{1b}[11;1H\u{1b}[38;2;0;0;1;49m"
+    let chunkLength = 4096
+    for offset in stride(from: 0, to: figurePayload.count, by: chunkLength) {
+        let end = min(offset + chunkLength, figurePayload.count)
+        figureStream += "\u{1b}_Gq=2,"
+        if offset == 0 {
+            figureStream += "i=1,a=T,U=1,f=32,t=d,s=568,v=413,"
+        }
+        figureStream += end < figurePayload.count ? "m=1;" : "m=0;"
+        figureStream += String(decoding: figurePayload[offset..<end], as: UTF8.self)
+        figureStream += "\u{1b}\\"
+    }
+    let rowDiacritics: [UInt32] = [
+        0x305, 0x30D, 0x30E, 0x310, 0x312, 0x33D, 0x33E, 0x33F, 0x346, 0x34A, 0x34B, 0x34C, 0x350,
+    ]
+    let placeholder = "\u{10EEEE}"
+    for row in 0..<figureRows {
+        if row > 0 {
+            figureStream += "\u{1b}[\(12 + row);1H"
+        }
+        figureStream += placeholder
+        for mark in [rowDiacritics[row], rowDiacritics[0], rowDiacritics[0]] {
+            figureStream.unicodeScalars.append(Unicode.Scalar(mark)!)
+        }
+        figureStream += String(repeating: placeholder, count: figureColumns - 1)
+    }
+    figureStream += "\u{1b}[0m\u{1b}[?25l"
+    figureStream.withCString { bytes in
+        Ubiquitty.processBytes(figureTerminal, std.string_view(bytes))
+    }
+    let figureStore = SurfaceImageStore(device: device)
+    let liveFigure = figureStore.layer(
+        for: figureTerminal,
+        cellSizeInPixels: Ubiquitty.FloatSize(width: Float(figureCellWidth), height: Float(figureCellHeight)),
+        origin: Ubiquitty.FloatPoint(x: 0, y: 0),
+        scale: 1,
+        viewOffset: 0,
+        drawableSizeInPixels: Ubiquitty.FloatSize(width: Float(160 * figureCellWidth), height: Float(48 * figureCellHeight)),
+        isHoldingForResize: false
+    )
+    check(
+        "a placeholder figure draws every cell on the live route",
+        liveFigure?.quadCount == figureColumns * figureRows,
+        "\(liveFigure?.quadCount ?? 0) of \(figureColumns * figureRows)"
+    )
+    var figureMetrics = Ubiquitty.Rendering.CellMetrics()
+    figureMetrics.cellWidth = Float(figureCellWidth)
+    figureMetrics.cellHeight = Float(figureCellHeight)
+    figureMetrics.deviceScale = 1.0
+    figureMetrics.atlasToDevicePixels = 1.0
+    guard let figureCapture = Ubiquitty.Rendering.FrameCapture.make(),
+        figureCapture.capture(
+            figureTerminal,
+            Ubiquitty.Rendering.TerminalSnapshotOptions(),
+            figureMetrics,
+            Ubiquitty.Rendering.GlyphSlotGeometry(),
+            Ubiquitty.Rendering.ChromeLayers()
+        )
+    else {
+        print("drive-terminal-renderer: the figure did not capture")
+        exit(2)
+    }
+    let capturedFigure = SurfaceImageStore(device: device).layer(for: figureCapture)
+    check(
+        "a placeholder figure draws every cell on the capture route",
+        capturedFigure?.quadCount == figureColumns * figureRows,
+        "\(capturedFigure?.quadCount ?? 0) of \(figureColumns * figureRows)"
+    )
+
     let maximumImageBytes = Int(Ubiquitty.Image.maxDecodedImageBytes)
     check(
         "empty RGB24 staging is refused",
