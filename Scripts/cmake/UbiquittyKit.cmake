@@ -444,7 +444,7 @@ function(ubiquitty_kit_swift_flags)
 endfunction()
 
 # Whole-module in every configuration, spelled the way each generator honours,
-# for a Swift target of the iOS arm.
+# for a Swift target the Kit builds alone: the iOS arm's, and the layout probe.
 #
 # `Swift_COMPILATION_MODE` is inert under the including tree's policy level:
 # CMake compiles the optimised configurations whole-module and Debug
@@ -462,7 +462,7 @@ endfunction()
 # failure from the Kit to the shell, which imports them the same way — so the
 # mode belongs to every Swift target of the arm, the shell's included.
 #
-# - Parameter target: A Swift target of the iOS arm.
+# - Parameter target: A Swift target the Kit builds alone.
 function(ubiquitty_kit_swift_whole_module target)
     if(CMAKE_GENERATOR MATCHES "Xcode")
         set_target_properties(${target} PROPERTIES
@@ -545,6 +545,7 @@ function(ubiquitty_kit_add_layout_probe)
     ubiquitty_kit_forward_definitions(${target} CXX_TARGETS ${_ubq_probe_CXX_TARGETS})
     target_link_options(${target} PRIVATE -cxx-interoperability-mode=default)
     ubiquitty_kit_swift_language_mode(${target})
+    ubiquitty_kit_swift_whole_module(${target})
 endfunction()
 
 # Holds a Kit Swift target to the Swift 6 language mode, whose data-race
