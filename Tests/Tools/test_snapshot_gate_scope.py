@@ -13,6 +13,13 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def gate_library_function(name):
+    """A function of Core's gate library, as the hook defines it."""
+    source = (ROOT / "Libraries/ubiquitty-core/Scripts/pre-push-gates-lib.sh").read_text()
+    start = source.index(name + "() {\n")
+    return source[start:source.index("\n}\n", start) + 3]
+
+
 class SwiftSnapshotScope(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="ubiquitty-swift-snapshot-scope-")
@@ -30,7 +37,7 @@ class SwiftSnapshotScope(unittest.TestCase):
         start = source.index("kit_swift_arm_reached() {\n")
         self.function = source[start:source.index("\n}\n", start) + 3]
 
-    def reached(self, changed, *, status=0):
+    def reached(self, changed, *, status=0, select_all=False):
         diff = self.directory / "diff"
         diff.write_text(changed)
         script = '''set -euo pipefail
@@ -39,6 +46,7 @@ ubq_changed_with_libraries() {
     return "$SCOPE_DIFF_STATUS"
 }
 '''
+        script += gate_library_function("ubq_select_all")
         script += self.function
         script += '''
 if kit_swift_arm_reached "$(cat "$SCOPE_DIFF")"; then
@@ -49,6 +57,9 @@ fi
 '''
         environment = dict(os.environ, SCOPE_DIFF=str(diff), SCOPE_DIFF_STATUS=str(status),
                            UBQ_KIT_ROOT=str(self.kit), UBQ_CORE_ROOT=str(self.core))
+        environment.pop("UBQ_PREPUSH_SELECT", None)
+        if select_all:
+            environment["UBQ_PREPUSH_SELECT"] = "all"
         checked = subprocess.run(["bash", "-c", script], env=environment, text=True,
                                  capture_output=True, timeout=20)
         self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
@@ -82,6 +93,11 @@ fi
 
     def test_unread_changed_list_preserves_the_existing_refusal(self):
         self.assertFalse(self.reached("", status=128))
+
+    def test_a_run_that_selects_every_gate_reaches_the_arm_whatever_the_diff(self):
+        for path, status in (("", 0), ("Docs/guide.md", 0), ("", 128)):
+            with self.subTest(path=path, status=status):
+                self.assertTrue(self.reached(path, status=status, select_all=True))
 
 
 if __name__ == "__main__":
