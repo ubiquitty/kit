@@ -50,10 +50,43 @@ hosts use [Core's C++23 embedding API](https://github.com/ubiquitty/core/blob/ma
 
 ## Embed `TerminalSurface`
 
-Build `UbiquittyKit.framework` (below), add it to the app and import it. The host
-sizes its `CAMetalLayer` and calls this function on the main actor to feed bytes
-and draw a frame. `Scripts/check-ubiquittykit.sh` exercises these public entry
-points from a separate host linked to the built framework:
+`TerminalSurface` is the view: an `NSView` on macOS and a `UIView` on iOS. Built
+with a font, it creates its own Metal device and renderer, and in a window it
+owns its Metal layer and its display link, takes the keyboard and the pointer,
+and keeps its selection and accessibility. Build `UbiquittyKit.framework`
+(below), add it to the app, import it, and put the view where the terminal goes:
+
+```swift
+import AppKit
+import UbiquittyKit
+
+@MainActor
+func addTerminal(to container: NSView) -> TerminalSurface? {
+    guard let terminal = TerminalSurface(rows: 24, columns: 80, fontFamily: "Menlo", pointSize: 13) else {
+        return nil
+    }
+    terminal.frame = container.bounds
+    terminal.autoresizingMask = [.width, .height]
+    container.addSubview(terminal)
+    terminal.launchShell()
+    return terminal
+}
+```
+
+Naming the font is what makes the view ready to draw: `TerminalSurface(rows:columns:)`
+alone is a complete terminal with no renderer, which paints nothing. The grid
+follows the view's size, and `terminalSurface(_:didResizeGridTo:columns:)` on the
+view's observer reports each change. `launchShell()` runs the user's login shell
+on the view's pseudo-terminal; `feed(_:)` writes bytes to the screen for a host
+that supplies its own; `attachRemote` shows a session a host daemon keeps.
+
+### Draw into your own layer
+
+A host that presents the terminal in a layer or texture of its own skips the
+view's presentation and drives the renderer itself. It sizes its
+`CAMetalLayer` and calls this function on the main actor to feed bytes and draw
+a frame. `Scripts/check-ubiquittykit.sh` exercises these public entry points
+from a separate host linked to the built framework:
 
 ```swift
 import Foundation
