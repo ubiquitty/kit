@@ -2321,6 +2321,9 @@ enum SurfaceSmoke {
             return "the view holding its rows under output registered the capture geometry again "
                 + "(\(String(describing: registeredViewOffset)) to \(String(describing: surface.registeredSyncViewOffset)))"
         }
+        if let failure = liveReadAlignmentFailure(surface, renderer: renderer, layer: layer, selectedText: inHistory) {
+            return failure
+        }
 
         surface.clearSelection()
         surface.setViewOffset(absolute: 0)
@@ -2441,6 +2444,58 @@ enum SurfaceSmoke {
         }
         guard encodeAfterFontPreparation(renderer, for: surface, into: layer) else {
             return "the frame after the search ended declined: decline=\(renderer.lastFrameDecline.rawValue)"
+        }
+        return nil
+    }
+
+    /// Reads the model live between the drain appending history and the view
+    /// taking it, right after a boundary frame drew the view held back over
+    /// its history with a selection there.
+    ///
+    /// Rows fed straight into the model reach no delivery, so the view's
+    /// offset still stands against the history before them. The live frame
+    /// must show the rows the boundary frame showed, and the selection where
+    /// that frame drew it. No row is evicted at this depth, so one absolute
+    /// row number names one line in both frames.
+    ///
+    /// - Parameters:
+    ///   - surface: The surface, scrolled back, its last frame a boundary
+    ///     frame drawing its selection.
+    ///   - renderer: The surface renderer.
+    ///   - layer: The layer to present into.
+    ///   - selectedText: The selection's text.
+    /// - Returns: Why the leg failed, or nil.
+    private static func liveReadAlignmentFailure(
+        _ surface: TerminalSurface,
+        renderer: SurfaceRenderer,
+        layer: CAMetalLayer,
+        selectedText: String
+    ) -> String? {
+        let boundaryFirstRow = renderer.lastFrameFirstAbsoluteRow
+        guard let boundaryEnds = surface.selectionModel.visibleEnds else {
+            return "the boundary frame over the history selection showed none of it"
+        }
+        let viewOffsetBeforeOutput = surface.viewOffset
+        let boundaryFrames = renderer.selectedBoundaryFrameCount
+        feed(surface.drive, String(repeating: "arrived below the held rows\r\n", count: 3))
+        guard encodeAfterFontPreparation(renderer, for: surface, into: layer) else {
+            return "the live frame after rows the view had not taken declined: decline=\(renderer.lastFrameDecline.rawValue)"
+        }
+        guard surface.viewOffset == viewOffsetBeforeOutput, renderer.selectedBoundaryFrameCount == boundaryFrames else {
+            return "the view took the arrived rows, or a boundary frame presented them, before a live read could"
+        }
+        guard renderer.lastFrameFirstAbsoluteRow == boundaryFirstRow else {
+            return "the live read showed row \(renderer.lastFrameFirstAbsoluteRow) at the top"
+                + " where the boundary frame showed row \(boundaryFirstRow)"
+        }
+        guard let liveEnds = surface.selectionModel.visibleEnds,
+            liveEnds.start == boundaryEnds.start, liveEnds.end == boundaryEnds.end
+        else {
+            return "the live read drew the selection at \(String(describing: surface.selectionModel.visibleEnds))"
+                + " where the boundary frame drew it at \(boundaryEnds)"
+        }
+        guard surface.selectedText == selectedText else {
+            return "the history selection left its text under rows the view had not taken"
         }
         return nil
     }
