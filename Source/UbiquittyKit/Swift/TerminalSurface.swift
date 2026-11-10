@@ -3149,9 +3149,27 @@ public final class TerminalSurface: PlatformView {
             } else {
                 drive.launchLoginShell()
             }
-        guard hasLaunched else {
-            return false
-        }
+        return hasLaunched && startReadingLaunchedProgram()
+    }
+
+    /// Launches one command line in this surface's session.
+    ///
+    /// `/bin/sh -c` runs the line, so it is parsed as a shell parses it, and
+    /// ``TerminalSurfaceObserver/terminalSurfaceDidExit(_:)`` fires when it
+    /// exits. The surface keeps what the command wrote.
+    ///
+    /// - Parameter commandLine: The command line to run.
+    /// - Returns: Whether the command launched and its output is being read;
+    ///   false on iOS, which starts no local program.
+    @discardableResult
+    public func launchCommand(_ commandLine: String) -> Bool {
+        drive.launchShellCommand(commandLine) && startReadingLaunchedProgram()
+    }
+
+    /// Starts reading the program a launch just opened.
+    ///
+    /// - Returns: Whether its output is being read.
+    private func startReadingLaunchedProgram() -> Bool {
         guard drive.startIngest() else {
             return false
         }
