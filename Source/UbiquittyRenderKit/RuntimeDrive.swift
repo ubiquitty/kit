@@ -2244,6 +2244,29 @@ public final class RuntimeDrive {
         session.publishSelectionForCaptures(&selection)
     }
 
+    /// The view's own selection over a frame it holds, without the model lock.
+    ///
+    /// For a frame whose selection answer says the view is ahead of it: the
+    /// view moved its selection after the hand-off the frame resolved, so a
+    /// refill draws the selection as the view holds it, and leaves the
+    /// view's session as it is.
+    ///
+    /// - Parameters:
+    ///   - selection: The view's selection session.
+    ///   - capture: A frame from ``takeFrame(_:_:)``, still held.
+    ///   - spans: Receives the spans, in the frame's visible rows.
+    ///   - ends: Receives where the selection begins and ends on the frame.
+    /// - Returns: How many spans were written and how many the buffer needs.
+    // swift-only: the printer cannot represent the selection pointer, and the only callers are in-package Swift
+    package func viewSelectionOverCapture(
+        _ selection: inout Ubiquitty.Selection.Session,
+        _ capture: Ubiquitty.Rendering.FrameCapture,
+        _ spans: Ubiquitty.Selection.ViewportSpans,
+        _ ends: inout Ubiquitty.Selection.ViewportEnds
+    ) -> Ubiquitty.Selection.CaptureSpans {
+        session.viewSelectionOverCapture(&selection, capture, spans, &ends)
+    }
+
     /// The selection a taken boundary frame shows, resolved when the drain
     /// captured it, without the model lock.
     ///

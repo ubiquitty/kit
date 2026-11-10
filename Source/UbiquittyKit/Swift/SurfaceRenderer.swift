@@ -626,14 +626,19 @@ extension SurfaceSelectionModel {
         }
         // A capture taken at a grid larger than the snapshot's left spans past
         // the room: resolved again over the held capture, which copies the
-        // same spans and takes back nothing the first call took.
+        // same spans and takes back nothing the first call took. A view that
+        // moved its selection past the frame's resolution was answered with
+        // its own, and refills its own.
         let needed = Int(supply.selection.needed)
         if needed > spanScratch.count {
             spansNeeded = needed
             spanScratch = Array(repeating: Ubiquitty.Rendering.SelectionRowSpan(), count: needed)
+            let isViewAhead = supply.selection.isViewAhead
             var ends = Ubiquitty.Selection.ViewportEnds()
             supply.selection = spanScratch.withUnsafeMutableBufferPointer { spans in
-                drive.selectionOverCapture(&session.pointee, capture, Ubiquitty.Selection.ViewportSpans(spans), &ends)
+                isViewAhead
+                    ? drive.viewSelectionOverCapture(&session.pointee, capture, Ubiquitty.Selection.ViewportSpans(spans), &ends)
+                    : drive.selectionOverCapture(&session.pointee, capture, Ubiquitty.Selection.ViewportSpans(spans), &ends)
             }
             supply.selectionEnds = ends
         }
