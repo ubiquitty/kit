@@ -52,9 +52,9 @@ hosts use [Core's C++23 embedding API](https://github.com/ubiquitty/core/blob/ma
 ## Embed `TerminalView`
 
 `TerminalView` is the view: an `NSView` on macOS and a `UIView` on iOS that sets
-itself up. It builds its own session and Metal renderer in the configured font
-and theme, fits its grid to its bounds, and in a window takes the keyboard and
-the pointer and keeps its selection and accessibility. Build
+itself up. It builds its own session and Metal renderer in Core's font and
+theme, fits its grid to its bounds, and in a window takes the pointer and the
+keyboard and keeps its selection and accessibility. Build
 `UbiquittyKit.framework` (below), add it to the app, import it, and put the view
 where the terminal goes:
 
@@ -68,14 +68,16 @@ func addTerminal(to container: NSView) -> TerminalView {
     terminal.autoresizingMask = [.width, .height]
     container.addSubview(terminal)
     terminal.launchShell()
+    container.window?.makeFirstResponder(terminal)
     return terminal
 }
 ```
 
 On iOS it is the same view, a `UIView`. An iOS app starts no local program, so
 it shows a session that arrives over a connection: it feeds the bytes its own
-connection receives, and hears what the person types as
-`terminalSurface(_:didTransmit:count:)` on the view's observer:
+connection receives, and sends on what the person types, which the view's
+observer hears as `terminalSurface(_:didTransmit:count:)`. A tap raises the
+view's own keyboard, and so does `becomeFirstResponder()`:
 
 ```swift
 import UIKit
@@ -88,12 +90,13 @@ func addTerminal(to container: UIView, observer: TerminalSurfaceObserver) -> Ter
     terminal.observer = observer
     container.addSubview(terminal)
     terminal.feed(Data("Connected.\r\n".utf8))
+    terminal.becomeFirstResponder()
     return terminal
 }
 ```
 
 In SwiftUI it is `Terminal`, with the font, the theme and the callbacks as
-modifiers:
+modifiers. `Terminal()` runs the login shell on macOS:
 
 ```swift
 import SwiftUI
@@ -111,21 +114,41 @@ struct ContentView: View {
 }
 ```
 
-The font, its size and the theme are Core's configuration unless the host names
-others; the theme follows the light or dark appearance as Ubiquitty's own
-windows do. On macOS `launchShell()` runs the user's login shell and
-`launchCommand(_:)` one command line; `feed(_:)` writes bytes to the screen for
-a host that supplies its own, and `attachRemote` shows a session a host daemon
-keeps. `Terminal()`, `Terminal(command:)` and `Terminal(feeding:)` are the
-first three in SwiftUI. The
-view's `surface` is the `TerminalSurface` underneath, for everything else: the
-selection, the scrollback, search, the program it runs and the colors it draws.
+A SwiftUI app that keeps the session itself, as an iOS app feeding its own
+connection does, owns a `TerminalView`, feeds it what the connection receives,
+and shows it with `Terminal(_:)`; the session then outlives the view's
+identity. Here `Connection` stands for the app's own:
+
+```swift
+struct RemoteTerminal: View {
+    let terminal: TerminalView
+    let connection: Connection
+
+    var body: some View {
+        Terminal(terminal)
+            .onTerminalInput { connection.send($0) }
+    }
+}
+```
+
+The font, its size and the theme are Core's defaults unless the host names
+others, and in an app that configures Core, as the Ubiquitty app does, they are
+that configuration's. The theme follows the light or dark appearance as
+Ubiquitty's own windows do. On macOS `launchShell()` runs the user's login
+shell, `launchCommand(_:)` one command line under `/bin/sh -c`, and
+`launch(executableURL:arguments:environment:currentDirectoryURL:)` one program
+with no shell between; `Terminal()`, `Terminal(command:)` and
+`Terminal(executableURL:…)` are the same three in SwiftUI. `feed(_:)` writes
+bytes to the screen for a host that supplies its own. The view's `surface` is
+the `TerminalSurface` underneath, for everything else: attaching to a session a
+host daemon keeps, the selection, the scrollback, search, the program it runs
+and the colors it draws.
 
 `TerminalSurface` is the lower-level view `TerminalView` holds, for a host that
-names its own font and grid or shares one renderer between panes.
-`TerminalSurface(rows:columns:fontFamily:pointSize:)` builds one ready to draw,
-and `terminalSurface(_:didResizeGridTo:columns:)` on its observer reports each
-grid its bounds give it.
+names its own font and grid, brings its own keyboard or shares one renderer
+between panes. `TerminalSurface(rows:columns:fontFamily:pointSize:)` builds one
+ready to draw, and `terminalSurface(_:didResizeGridTo:columns:)` on its observer
+reports each grid its bounds give it.
 
 ### Draw into your own layer
 

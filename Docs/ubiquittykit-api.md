@@ -5,7 +5,7 @@
 
 An Apple app embeds a terminal as `TerminalView`, or as `Terminal` in SwiftUI.
 Either sets itself up: it builds its own session and Metal renderer in Core's
-configured font and theme, and fits its grid to its bounds. Beneath both,
+font and theme, and fits its grid to its bounds. Beneath both,
 `TerminalSurface` is the view that holds the session, for a host that names its
 own font and grid or shares one renderer between panes, and the
 [C++ session facade](#the-c-session-facade) drives a terminal for a host with
@@ -18,55 +18,67 @@ shells built on them are all [Apache-2.0](../LICENSES/Apache-2.0.txt); see
 ## The terminal view
 
 `TerminalView` is an `NSView` on macOS and a `UIView` on iOS. `TerminalView()`,
-`TerminalView(frame:)` and a view in a storyboard or nib whose custom class is
-`TerminalView` each build the same view: a session; a Metal renderer in Core's
-configured font, size, typography and frame style; the terminal settings the
-configuration names, among them the bell, the cursor, the clipboard policy and
-the input encoding; and Core's configured theme. The view holds one
-`TerminalSurface`, `surface`, over its bounds. The grid has as many rows and
-columns as the bounds hold and follows them, as a surface's grid follows its
-own bounds ([Resizing in code](#resizing-in-code)).
+`TerminalView(frame:)`, a view in a storyboard or nib whose custom class is
+`TerminalView`, and a view decoded from an archive each build the same view: a
+session; a Metal renderer in Core's font, size, typography and frame style; the
+terminal settings Core names, among them the bell, the cursor, the clipboard
+policy and the input encoding; and Core's theme. Those are Core's defaults in
+a host that never configures Core, and the configuration in an app that does,
+as the Ubiquitty app does. The view holds one `TerminalSurface`, `surface`, over
+its bounds. The grid has as many rows and columns as the bounds hold and
+follows them, as a surface's grid follows its own bounds
+([Resizing in code](#resizing-in-code)).
 
 The view keeps no fact of the terminal. Its grid, title, colors and font are
 the surface's, and what the view reads it reads from the surface or from Core.
 It keeps only what a host asked of it, the theme and font it named, each nil
-for what the configuration says, and forwards the calls most hosts make:
+for Core's, and forwards the calls most hosts make:
 
 | Member | Does |
 | --- | --- |
-| `launchShell(initialDirectory:)` | Runs the user's login shell; false on iOS |
-| `launchCommand(_:)` | Runs one command line under `/bin/sh -c`; false on iOS |
+| `launchShell(initialDirectory:)` | Runs the user's login shell |
+| `launchCommand(_:)` | Runs one command line under `/bin/sh -c` |
+| `launch(executableURL:arguments:environment:currentDirectoryURL:)` | Runs one program, with no shell between |
 | `feed(_:)` | Writes bytes to the screen as a program's output |
 | `send(_:)` | Sends text to the program as typed input |
-| `attachRemote(shellCommand:…)` | Attaches to a session a host keeps |
 | `observer` | The surface's observer, held weakly |
 | `title`, `currentDirectory` | The surface's |
-| `themeName` | The theme by name; nil for the configured one |
-| `fontFamily`, `fontSize` | The family and em size; nil for the configured ones |
-| `surface` | The `TerminalSurface`, for everything else; nil when Core refused a session |
+| `themeName` | The theme by name; nil for Core's |
+| `fontFamily`, `fontSize`, `setFont(family:size:)` | The family and em size; nil for Core's |
+| `surface` | The `TerminalSurface`, for everything else, attaching to a host's session among it; nil when Core refused a session |
 | `rendererRefusal` | Why the surface has no renderer; nil while it has one |
 
-`TerminalSurface.launchCommand(_:)` is the surface's own, beside
-`launchShell(initialDirectory:)`. The command's session outlives it: the
-observer hears `terminalSurfaceDidExit(_:)` and the screen keeps what the
-command wrote.
+The three launches are the surface's own. A session runs one program: each
+answers false for a view that already runs one, and on iOS, which starts no
+local program. `launchCommand(_:)` runs the line in the user's home directory,
+with the app's environment and its `PATH`, and refuses a line holding a NUL.
+`launch(executableURL:arguments:environment:currentDirectoryURL:)` takes
+`Process`'s parameters: each argument reaches the program as given, unsplit
+and unexpanded, the program reads its path as its `argv[0]`, and `environment`
+names the variables it reads in place of the ones it inherits from the app,
+the rest of the app's environment standing. It refuses a URL that is not a file
+URL, a string holding a NUL and a variable name holding `=`. A session outlives
+its program: the observer hears `terminalSurfaceDidExit(_:)` and the screen
+keeps what the program wrote.
 
-While `themeName` is nil the view draws the configured theme. While the
-configuration follows the system appearance, which it does unless it says
-otherwise, that is the dark or light theme of Core's pair for the view's
-appearance, resolved again whenever the appearance changes. A theme is applied
-only when the resolution moves, because applying one resets the colors programs
-set, and a change that resolves to the same theme must keep them. Otherwise it
-is the theme the configuration names, or Core's default. A name applies at once,
-as `applyTheme(named:)` does, and holds whatever the appearance does; a name
-Core does not know leaves the colors as they were. A theme applied through
-`surface` stands until the appearance next changes while `themeName` is nil.
+While `themeName` is nil the view draws Core's theme. While Core follows the
+system appearance, which it does by default, that is the dark or light theme of
+Core's pair for the view's appearance, resolved again whenever the appearance
+changes. A theme is applied only when the resolution moves, because applying
+one resets the colors programs set, and a change that resolves to the same
+theme must keep them. Otherwise it is the theme Core names. Assigning a name
+applies it at once, as `applyTheme(named:)` does, and it holds whatever the
+appearance does; a name Core does not know leaves the colors as they were.
+Assigning the value `themeName` already holds does nothing. A theme applied
+through `surface` stands until the appearance next changes while `themeName`
+is nil.
 
-Assigning `fontFamily` or `fontSize` applies the font as
-`applyFont(familyName:pointSize:)` does, with the configured family or size for
-the one that is nil: the grid refits and any zoom clears. Each assignment
-refits once, so a host assigning both refits twice; SwiftUI's modifier applies
-both in one.
+`setFont(family:size:)` applies a family and a size together as
+`applyFont(familyName:pointSize:)` does, with Core's family or size for the one
+that is nil: the grid refits once and any zoom clears. Assigning `fontFamily` or
+`fontSize` is that call with the other kept. Naming what the view already holds
+does nothing. A family that cannot be found is drawn in a substitute, which
+`surface.resolvedFontFamily` names.
 
 The view is created whatever Core and the system can give it. Core refuses a
 session only when it cannot allocate one; then `surface` is nil, the view
@@ -75,39 +87,73 @@ could not make takes the process down. A renderer the view cannot build leaves
 `surface.renderer` nil and `rendererRefusal` naming what was missing: a Metal
 device, the framework's shader library, or a font that can be measured.
 
-The surface takes the keyboard and the pointer. A click on the view gives the
-surface the keyboard, as it fills the view. On macOS a host that gives it the
-keyboard in code makes `surface` the window's first responder; on iOS
-`becomeFirstResponder()` on the view passes to the surface.
+An archive of a live view holds no session: the view's surface leaves itself
+out, and decoding the archive builds a view with a session of its own, as a
+nib does, in its place among the views archived with it. A surface archived
+with no `TerminalView` holding it leaves an empty view of its frame in its
+place, and decoding builds no surface there.
 
-An iOS app starts no local program, so `launchShell` and `launchCommand` answer
-false there. It feeds the bytes its own connection receives and hears what the
-person types as the observer's `terminalSurface(_:didTransmit:count:)`, or
-attaches the surface over a carrier it builds with `attachRemoteOverCarrier`.
+The surface takes the pointer. On macOS it takes the keyboard too: a click
+gives it the keyboard, and so does `makeFirstResponder(_:)` with the view,
+which hands first responder to the surface as a text field hands it to its
+field editor.
+
+On iOS a surface leaves its typing to the host, and the view is that host. A
+tap that asks for a keyboard raises the view's own, as does
+`becomeFirstResponder()`; `resignFirstResponder()` lowers it and
+`isFirstResponder` answers for it and the surface, as `UISearchBar` answers
+for its text field. A click from a hardware keyboard gives the view's keyboard
+the keys. The view's keyboard types committed text, Return and Delete into the
+surface, which hands each run to the observer's
+`terminalSurface(_:didTransmit:count:)`. An input method's marked text and a
+hardware keyboard's arrows, Escape and chords are a host's own keyboard's to
+carry. The view follows the trait collection's light or dark style, from the
+moment it joins a window.
+
+An iOS app starts no local program, so the launches answer false there. It
+feeds the bytes its own connection receives and sends on what the observer is
+handed, or attaches the surface over a carrier it builds with
+`attachRemoteOverCarrier`.
 
 ### SwiftUI
 
-`Terminal` is `TerminalView` in SwiftUI. What it runs is its initializer, and
+`Terminal` is `TerminalView` in SwiftUI. What it shows is its initializer, and
 the font, the theme and the callbacks are modifiers:
 
 | API | Use |
 | --- | --- |
-| `Terminal(initialDirectory:)` | The login shell, in a directory or the home one |
-| `Terminal(command:)` | One command line under `/bin/sh -c` |
-| `Terminal(feeding:)` | The bytes a host writes to an `AsyncStream<Data>`, with no program |
-| `terminalFont(_:size:)` | The family and size; nil for the configured ones |
-| `terminalTheme(_:)` | The theme by name; nil for the configured one |
-| `onTerminalTitleChange(_:)` | Called with each title, empty once the program that set it exits |
-| `onTerminalExit(_:)` | Called once the shell or command exits |
+| `Terminal(initialDirectory:)` | The login shell, in a directory or the home one; macOS |
+| `Terminal(command:)` | One command line under `/bin/sh -c`; macOS |
+| `Terminal(executableURL:arguments:environment:currentDirectoryURL:)` | One program, with no shell between; macOS |
+| `Terminal(_:)` | A `TerminalView` the host owns, with whatever session it holds |
+| `terminalFont(_:size:)` | The family and size; nil for Core's |
+| `terminalTheme(_:)` | The theme by name; nil for Core's |
+| `onTerminalTitleChange(_:)` | Called with the title standing and each one after; empty once the program that set it exits |
+| `onTerminalExit(_:)` | Called once the program exits |
+| `onTerminalInput(_:)` | Called with the bytes what the person types encodes to |
+| `onTerminalLaunchFailure(_:)` | Called when the shell, command or program could not start; macOS |
+
+The first three own their session: what they run starts once, when SwiftUI
+makes the view, and the session ends when SwiftUI drops the view's identity, as
+a view's `@State` does, so `id(_:)` with a new value runs it anew. They start a
+local program and so are macOS only. `Terminal(_:)` shows a view the host
+keeps, whose session outlives every identity, as `WebView(_:)` shows a
+`WebPage` and `VideoPlayer(player:)` an `AVPlayer`: each identity hosts the
+view in a container of its own, and the view moves to the next identity's
+whichever SwiftUI makes or tears down first. A host that feeds bytes owns the
+view and feeds it, rather than handing a terminal a stream: a stream has one
+reader and ends with it, so it could not outlive an identity.
 
 The modifiers ride the environment, as `font` and `mapStyle` do, so one serves
-every terminal beneath it. What a terminal runs is read once, when SwiftUI
-makes its view; a terminal given a new identity with `id(_:)` runs anew. A font
-or theme is applied when it differs from what the view was last asked for, so
-an unrelated update neither refits the grid nor resets the colors a program
-set. The terminal asks for its title only while a title action is set, and
-for no process facts. A stream has one reader, so it feeds one terminal, until
-it finishes or the terminal goes away.
+every terminal beneath it, and the innermost wins. A font or theme is applied
+only when the environment's differs from what the terminal last applied from
+it, so an unrelated update neither refits the grid nor resets the colors a
+program set, and a host's own choice on its view stands until a modifier names
+another. The action modifiers reach a terminal the host owns while the host has
+given it no observer of its own; one that observes its view hears everything
+there. Every action runs on the main actor after the update that raised it, so
+it may write state. The terminal asks for its title only while a title action
+is set, and for no process facts.
 
 ## The C++ session facade
 
@@ -614,12 +660,22 @@ headers are not a separate compatibility promise.
 - `Scripts/check-ubiquittykit.sh` places `TerminalView()`, given nothing, in a
   window from a consumer compiled with `-F` alone: its grid must hold as many
   cells as its bounds as the window resizes, the frame it draws must ink the
-  row its shell printed and leave a blank row blank, a size must shrink the
-  grid and nil restore it, and the configured theme must follow the window's
-  appearance until a theme is named. A view decoded as a nib decodes it must
-  come up drawing. A SwiftUI consumer hosts two `Terminal`s: a command's title
-  and exit must reach the modifiers, a stream's bytes the screen, and a font and
-  theme the host's state names must be drawn and given back.
+  row its shell printed and leave a blank row blank, and making the view first
+  responder must give the surface the keyboard. A size must shrink the grid and
+  nil restore it, a family and size set together refit it once, and an unknown
+  family is drawn in a substitute. Core's theme must follow the
+  window's appearance until a theme is named, an unknown name and the theme
+  already held move nothing, and a colour a program set must stand through an
+  appearance change that resolves to the same theme. A command line and a
+  program with arguments, a variable and a directory must run, a second launch
+  and a malformed one must be refused, and a live view archived and decoded
+  must come back with a session of its own, as a nib's view must. A SwiftUI
+  consumer hosts several `Terminal`s: titles, an exit, typing and a failed
+  launch reach their modifiers, a title action given late hears the title
+  standing, an owned terminal starts afresh under a new identity and lets the
+  old session go, a hosted view keeps its session through one, a font and a
+  container's theme reach the terminals they are given to and no other, and a
+  colour a program set stands through an unrelated update.
 - `Scripts/check-ubiquittykit.sh` builds `UbiquittyKit.framework` and runs a
   Swift consumer compiled with `-F` alone: it draws a frame, looks programs'
   icons up by catalog key, a drawn one with Core's plate decision and a
