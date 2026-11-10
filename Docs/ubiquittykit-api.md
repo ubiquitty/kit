@@ -56,10 +56,24 @@ with the app's environment and its `PATH`, and refuses a line holding a NUL.
 `Process`'s parameters: each argument reaches the program as given, unsplit
 and unexpanded, the program reads its path as its `argv[0]`, and `environment`
 names the variables it reads in place of the ones it inherits from the app,
-the rest of the app's environment standing. It refuses a URL that is not a file
-URL, a string holding a NUL and a variable name holding `=`. A session outlives
+the rest of the app's environment standing. As `Process` does, it refuses
+before anything starts what it cannot run as asked, answering false:
+
+| Refused | Because |
+| --- | --- |
+| An executable URL that is not a file URL, names nothing or a directory, or names a file that is not executable | There is no program to run; `Process` throws for the same |
+| A working directory URL that is not a file URL, names nothing or no directory, cannot be entered, or has a path longer than 1023 bytes | Core's spawn would start the program in the home directory instead |
+| More than 255 arguments | Core's spawn takes at most 255 after the program's path |
+| More than 128 variables | Core's spawn takes at most 128 |
+| A variable name that is empty, holds anything but ASCII letters, digits and `_`, or starts with a digit | Core's spawn takes no other name |
+| `TERM`, `COLORTERM`, `TERM_PROGRAM`, `TERM_PROGRAM_VERSION`, `LC_CTYPE` or `LC_ALL` | The terminal sets them for the program itself |
+| A NUL in the path, an argument, a name, a value or the directory | No C string carries one |
+
+A file can still change between that answer and the spawn. A session outlives
 its program: the observer hears `terminalSurfaceDidExit(_:)` and the screen
-keeps what the program wrote.
+keeps what the program wrote. What a started program or shell fails at, such
+as a command `/bin/sh -c` cannot find, it reports by exiting, which the
+observer hears as the exit.
 
 While `themeName` is nil the view draws Core's theme. While Core follows the
 system appearance, which it does by default, that is the dark or light theme of
@@ -105,10 +119,12 @@ tap that asks for a keyboard raises the view's own, as does
 for its text field. A click from a hardware keyboard gives the view's keyboard
 the keys. The view's keyboard types committed text, Return and Delete into the
 surface, which hands each run to the observer's
-`terminalSurface(_:didTransmit:count:)`. An input method's marked text and a
-hardware keyboard's arrows, Escape and chords are a host's own keyboard's to
-carry. The view follows the trait collection's light or dark style, from the
-moment it joins a window.
+`terminalSurface(_:didTransmit:count:)`, and nothing else: it carries no
+arrows, Escape, Tab or Control chords, from the software keyboard or a
+hardware one, and no input method's marked text. An iOS host that needs them
+brings its own keyboard over a `TerminalSurface`, as the Ubiquitty app does.
+The view follows the trait collection's light or dark style while it is in a
+window.
 
 An iOS app starts no local program, so the launches answer false there. It
 feeds the bytes its own connection receives and sends on what the observer is
@@ -131,18 +147,23 @@ the font, the theme and the callbacks are modifiers:
 | `onTerminalTitleChange(_:)` | Called with the title standing and each one after; empty once the program that set it exits |
 | `onTerminalExit(_:)` | Called once the program exits |
 | `onTerminalInput(_:)` | Called with the bytes what the person types encodes to |
-| `onTerminalLaunchFailure(_:)` | Called when the shell, command or program could not start; macOS |
+| `onTerminalLaunchFailure(_:)` | Called when the shell, command or program could not start, a refused program launch among them; macOS |
 
 The first three own their session: what they run starts once, when SwiftUI
-makes the view, and the session ends when SwiftUI drops the view's identity, as
-a view's `@State` does, so `id(_:)` with a new value runs it anew. They start a
+makes the view, and the session ends when SwiftUI tears the view's identity
+down, whenever SwiftUI frees the view, so `id(_:)` with a new value runs it
+anew. They start a
 local program and so are macOS only. `Terminal(_:)` shows a view the host
 keeps, whose session outlives every identity, as `WebView(_:)` shows a
 `WebPage` and `VideoPlayer(player:)` an `AVPlayer`: each identity hosts the
 view in a container of its own, and the view moves to the next identity's
-whichever SwiftUI makes or tears down first. A host that feeds bytes owns the
-view and feeds it, rather than handing a terminal a stream: a stream has one
-reader and ends with it, so it could not outlive an identity.
+whichever SwiftUI makes or tears down first; only the identity showing the view
+dresses and observes it. A host that feeds bytes owns the view and feeds it,
+rather than handing a terminal a stream: a stream has one reader and ends with
+it, so it could not outlive an identity. The host creates the view once, in a
+model it keeps, and not as `@State private var terminal = TerminalView()` in a
+view: SwiftUI evaluates that initializer each time it rebuilds the view's
+parent, building and dropping a session and a Metal renderer each time.
 
 The modifiers ride the environment, as `font` and `mapStyle` do, so one serves
 every terminal beneath it, and the innermost wins. A font or theme is applied
@@ -666,16 +687,20 @@ headers are not a separate compatibility promise.
   family is drawn in a substitute. Core's theme must follow the
   window's appearance until a theme is named, an unknown name and the theme
   already held move nothing, and a colour a program set must stand through an
-  appearance change that resolves to the same theme. A command line and a
-  program with arguments, a variable and a directory must run, a second launch
-  and a malformed one must be refused, and a live view archived and decoded
-  must come back with a session of its own, as a nib's view must. A SwiftUI
-  consumer hosts several `Terminal`s: titles, an exit, typing and a failed
-  launch reach their modifiers, a title action given late hears the title
-  standing, an owned terminal starts afresh under a new identity and lets the
-  old session go, a hosted view keeps its session through one, a font and a
-  container's theme reach the terminals they are given to and no other, and a
-  colour a program set stands through an unrelated update.
+  appearance change that resolves to the same theme and through leaving a
+  window that forces its own appearance and coming back. A command line and a
+  program with arguments, a variable and a directory must run, 255 arguments
+  must launch, and a second launch and each refusal the table above names must
+  start nothing, and a live view archived and decoded must come back with a
+  session of its own, as a nib's view must. A SwiftUI
+  consumer hosts several `Terminal`s: titles, an exit, typing and two failed
+  launches reach their modifiers, a title action given late, or taken away and
+  given again, hears the title standing, an owned terminal starts afresh under
+  a new identity and its old program's process ends, a hosted view keeps its
+  session through one, a view two identities name is observed by the one that
+  shows it, a font and a container's theme reach the terminals they are given
+  to and no other, and a colour a program set stands through an unrelated
+  update.
 - `Scripts/check-ubiquittykit.sh` builds `UbiquittyKit.framework` and runs a
   Swift consumer compiled with `-F` alone: it draws a frame, looks programs'
   icons up by catalog key, a drawn one with Core's plate decision and a
