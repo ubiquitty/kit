@@ -21,6 +21,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD="$UBQ_BUILD_ROOT/metallib"
 
 cmake -S "$ROOT" -B "$BUILD" -G Ninja \
+    -DUBIQUITTY_CORE_SOURCE_DIR="$UBQ_CORE_ROOT" \
     -DUBIQUITTY_FRONTEND=macOS \
     -DCMAKE_BUILD_TYPE=Debug
 cmake --build "$BUILD" --target UbiquittyMetalLib
