@@ -168,9 +168,12 @@ final class SurfaceSnapshot {
         guard rows > 0, rows <= Int(Ubiquitty.maxRows), columns > 0, columns <= Int(Ubiquitty.maxColumns),
             contentScale.isFinite, contentScale > 0,
             let device = SystemMetalDevice.resolve(), let queue = device.makeCommandQueue(),
+            // A golden is the render with translucency allowed, as on iOS: the
+            // machine's Reduce Transparency switch would draw every opacity
+            // case opaque on a host that sets it, as GitHub's macOS images do.
             let renderer = TerminalSurface.makeRenderer(
                 configuration: Ubiquitty.Preferences.Effective.renderConfiguration(configuration),
-                systemTransparency: TerminalSurface.systemTransparency
+                systemTransparency: .Allowed
             ) as? SurfaceRenderer,
             let surface = TerminalSurface(rows: rows, columns: columns)
         else { return nil }
