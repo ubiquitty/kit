@@ -4472,6 +4472,36 @@ public final class RuntimeDrive {
         session.launchShellCommand(std.string(command))
     }
 
+    /// Launches one program with its arguments, environment and working
+    /// directory, with no shell between.
+    ///
+    /// The program reads its path as its `argv[0]`, as a program named on a
+    /// command line does, rather than a login shell's `-name`.
+    ///
+    /// - Parameters:
+    ///   - arguments: The program's path, then each argument as it is passed.
+    ///   - environmentOverrides: `NAME=value` entries the program reads in
+    ///     place of an inherited value of the same name.
+    ///   - initialDirectory: The working directory, or empty for the home one.
+    /// - Returns: Whether the PTY opened.
+    public func launchProgram(arguments: [String], environmentOverrides: [String], initialDirectory: String) -> Bool {
+        // Core's `std::vector<std::string>`, spelled through an alias the
+        // interop module already names; every alias of it is the same type.
+        var words = Ubiquitty.Input.DroppedPaths()
+        for argument in arguments {
+            words.push_back(std.string(argument))
+        }
+        var overrides = Ubiquitty.Input.DroppedPaths()
+        for entry in environmentOverrides {
+            overrides.push_back(std.string(entry))
+        }
+        var command = Ubiquitty.Runtime.LaunchCommand.fromArguments(words)
+        command.setArgument0Style(.ProgramPath)
+        command.setEnvironmentOverrides(overrides)
+        command.setInitialDirectory(std.string(initialDirectory))
+        return session.launch(command)
+    }
+
     /// Starts the session's ingest thread over its transport.
     ///
     /// The loop is Core's extracted one; the session owns the thread. Events

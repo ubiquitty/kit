@@ -3154,16 +3154,60 @@ public final class TerminalSurface: PlatformView {
 
     /// Launches one command line in this surface's session.
     ///
-    /// `/bin/sh -c` runs the line, so it is parsed as a shell parses it, and
-    /// ``TerminalSurfaceObserver/terminalSurfaceDidExit(_:)`` fires when it
-    /// exits. The surface keeps what the command wrote.
+    /// `/bin/sh -c` runs the line, so it is parsed as a shell parses it. It
+    /// starts in the user's home directory, with the app's environment and its
+    /// `PATH`, and ``TerminalSurfaceObserver/terminalSurfaceDidExit(_:)`` fires
+    /// when it exits. The surface keeps what the command wrote. A session runs
+    /// one program, so a surface that has launched one launches no other.
+    /// ``launch(executableURL:arguments:environment:currentDirectoryURL:)``
+    /// runs a program with no shell between.
     ///
     /// - Parameter commandLine: The command line to run.
     /// - Returns: Whether the command launched and its output is being read;
-    ///   false on iOS, which starts no local program.
+    ///   false for a line holding a NUL, which no command line can carry, for
+    ///   a surface that already runs a program, and on iOS, which starts no
+    ///   local program.
     @discardableResult
     public func launchCommand(_ commandLine: String) -> Bool {
-        drive.launchShellCommand(commandLine) && startReadingLaunchedProgram()
+        guard !commandLine.utf8.contains(0) else { return false }
+        return drive.launchShellCommand(commandLine) && startReadingLaunchedProgram()
+    }
+
+    /// Launches one program in this surface's session, with no shell between.
+    ///
+    /// The parameters are `Process`'s: each argument reaches the program as
+    /// given, unsplit and unexpanded, and the program reads its path as its
+    /// `argv[0]`. A session runs one program, so a surface that has launched
+    /// one launches no other.
+    ///
+    /// - Parameters:
+    ///   - executableURL: The program, as a file URL.
+    ///   - arguments: Its arguments, after its own path.
+    ///   - environment: Variables the program reads in place of the ones it
+    ///     inherits from the app; the rest of the app's environment stands.
+    ///   - currentDirectoryURL: The working directory, as a file URL, or nil
+    ///     for the user's home directory.
+    /// - Returns: Whether the program launched and its output is being read;
+    ///   false for a URL that is not a file URL, for a string holding a NUL or
+    ///   a variable name holding `=`, for a surface that already runs a
+    ///   program, and on iOS, which starts no local program.
+    @discardableResult
+    public func launch(
+        executableURL: URL,
+        arguments: [String] = [],
+        environment: [String: String] = [:],
+        currentDirectoryURL: URL? = nil
+    ) -> Bool {
+        guard executableURL.isFileURL, currentDirectoryURL?.isFileURL ?? true else { return false }
+        let words = [executableURL.path] + arguments
+        let entries = environment.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }
+        let directory = currentDirectoryURL?.path ?? ""
+        let hasMalformedName = environment.keys.contains { $0.isEmpty || $0.contains("=") }
+        guard !hasMalformedName, !(words + entries + [directory]).contains(where: { $0.utf8.contains(0) }) else {
+            return false
+        }
+        return drive.launchProgram(arguments: words, environmentOverrides: entries, initialDirectory: directory)
+            && startReadingLaunchedProgram()
     }
 
     /// Starts reading the program a launch just opened.
