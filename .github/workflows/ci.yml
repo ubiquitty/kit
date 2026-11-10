@@ -388,6 +388,10 @@ jobs:
     name: App against this Kit (macOS)
     needs: preflight
     if: needs.preflight.outputs.builds == 'true'
+    # The pairing line is read from the pull request through the API.
+    permissions:
+      contents: read
+      pull-requests: read
     runs-on: xcode-27
     timeout-minutes: 180
     env:
@@ -460,6 +464,10 @@ jobs:
     name: App against this Kit (Linux)
     needs: preflight
     if: needs.preflight.outputs.builds == 'true'
+    # The pairing line is read from the pull request through the API.
+    permissions:
+      contents: read
+      pull-requests: read
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
