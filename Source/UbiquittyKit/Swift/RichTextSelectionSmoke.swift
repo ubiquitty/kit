@@ -52,7 +52,7 @@ enum RichTextSelectionSmoke {
 
         let bytes = "\u{1b}]7404;w=40:h=3;{\\rtf1\\fs28 alpha beta gamma\\par delta}\u{1b}\\"
         let blocks =
-            surface.drive.withTerminal { terminal -> Int in
+            surface.drive.withWritableTerminal { terminal -> Int in
                 bytes.withCString { Ubiquitty.processBytes(terminal, std.string_view($0)) }
                 return Int(terminal.richTextBlocks.blocks(.Primary).size())
             } ?? 0

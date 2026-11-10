@@ -4571,6 +4571,28 @@ public final class RuntimeDrive {
         return try body(terminal)
     }
 
+    /// Borrows the terminal for one scoped write outside a drain pass, under
+    /// the model lock, and publishes the write when the lock is let go.
+    ///
+    /// The writing counterpart of ``withTerminal(_:)``. Core's lock-free
+    /// readers — the frame clock, the snapshot, the colours — read what the
+    /// session last published, so a write made under a reader's lock leaves
+    /// them on the model from before it.
+    ///
+    /// - Parameter body: The write to run against the borrowed terminal.
+    /// - Returns: The body's result, or nil when the session lends no
+    ///   terminal.
+    @discardableResult
+    // swift-only: the printer cannot represent the signature, and the only callers are in-package Swift
+    package func withWritableTerminal<Result>(_ body: (Ubiquitty.Terminal) throws -> Result) rethrows -> Result? {
+        session.lockForWrite()
+        defer { session.unlockAfterWrite() }
+        guard let terminal = session.terminal() else {
+            return nil
+        }
+        return try body(terminal)
+    }
+
     /// The non-blocking twin of ``withTerminal(_:)``: a busy lock answers
     /// absent rather than waiting, which is what a read racing a flood wants.
     ///

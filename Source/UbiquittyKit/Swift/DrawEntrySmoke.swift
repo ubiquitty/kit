@@ -815,14 +815,16 @@ enum DrawEntrySmoke {
         }
         // A remote or forced frame has already passed output admission. Mutating
         // this isolated model reaches that renderer seam without opening a PTY
-        // redraw bracket that would withhold the hidden frame under test.
+        // redraw bracket that would withhold the hidden frame under test. The
+        // writes are published at their release, as any write outside a drain
+        // is: the frame clock reads the cursor from the publication.
         func inject(_ text: String) {
-            _ = cursorSurface.drive.withTerminal { terminal in
+            _ = cursorSurface.drive.withWritableTerminal { terminal in
                 text.withCString { Ubiquitty.processBytes(terminal, std.string_view($0)) }
             }
         }
         inject(String(repeating: "history\r\n", count: 200) + "\u{1b}[2 q\u{1b}[?25h\u{1b}[3;4H")
-        _ = cursorSurface.drive.withTerminal { terminal in
+        _ = cursorSurface.drive.withWritableTerminal { terminal in
             terminal.cursorBlinkPref = true
             terminal.cursorHoldFrames = 40
             terminal.cursorBlinkPeriodMilliseconds = 1000
