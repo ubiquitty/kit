@@ -3136,7 +3136,7 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
             case .AwaitingCapture:
                 lastFrameDecline = .drainSaturated
             default:
-                surface.deferHeldPresentation()
+                surface.deferHeldPresentation(askAgainTicks: supply.askAgainTicks)
                 lastFrameDecline = .withheld
             }
             return false
@@ -3158,15 +3158,16 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
             var lockedDemand = Ubiquitty.Runtime.FrameDemand()
             lockedDemand.nowTicks = Ubiquitty.Ticks(TerminalSurface.monotonicTicksNow())
             lockedDemand.isResizing = isResizing
-            switch surface.drive.liveReadDecline(terminal, lockedDemand).decline {
+            let answer = surface.drive.liveReadDecline(terminal, lockedDemand)
+            switch answer.decline {
             case .BlockOpenUnderLock:
                 surface.drive.unlockForRead()
-                surface.deferHeldPresentation()
+                surface.deferHeldPresentation(askAgainTicks: answer.askAgainTicks)
                 lastFrameDecline = .blockOpenUnderLock
                 return false
             case .RedrawArriving:
                 surface.drive.unlockForRead()
-                surface.deferPresentationForArrivingRedraw()
+                surface.deferPresentationForArrivingRedraw(askAgainTicks: answer.askAgainTicks)
                 lastFrameDecline = .redrawArriving
                 return false
             default:
