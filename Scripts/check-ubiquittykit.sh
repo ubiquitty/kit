@@ -897,6 +897,10 @@ func run(_ step: String, arguments: [String], shipped: [URL]) -> Bool {
         return true
     case "icons":
         return ShippedIconsSmokeEntry.run() || refuse("an icon was not drawn from the framework's own files")
+    case "surface":
+        // The framework's own battery over a surface, its renderer and a
+        // shell, with no window shell: the host's legs are the host's.
+        return SurfaceSmokeEntry.run() || refuse("the surface smoke failed (its reason is above)")
     case "program-icons":
         return looksUpProgramIcons()
     case "program-icons-off-main":
@@ -1131,6 +1135,8 @@ run_consumer "$consumer" program-colors "$HOST_DIR/writer"
 echo "check-ubiquittykit: ok (a program on the surface's pseudo-terminal moves the colors without one reported from inside a synchronized update)"
 run_consumer "$consumer" back-to-back "$HOST_DIR/back-to-back-writer"
 echo "check-ubiquittykit: ok (a color set before back-to-back synchronized updates is reported while they run)"
+run_consumer "$consumer" surface
+echo "check-ubiquittykit: ok (the framework's surface smoke drew every frame it asserts through the embedded framework)"
 
 cat > "$HOST_DIR/window.swift" <<'EOF'
 import AppKit
