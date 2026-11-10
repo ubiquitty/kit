@@ -2,11 +2,11 @@
 # Copyright (C) 2026 Stanislav Yaglo
 # SPDX-License-Identifier: Apache-2.0
 
-"""Require adopted Swift surfaces to seed cursor preferences before presenting.
+"""Require hosted Swift surfaces to seed cursor preferences before presenting.
 
 All surface construction funnels through init(drive:rows:columns:). The guard
-pins both the adopting route and the cursor seed in that initializer; runtime
-cursor and tmux scenarios exercise the result.
+pins both the hosted-pane route and the cursor seed in that initializer;
+runtime cursor and tmux scenarios exercise the result.
 """
 
 import re
@@ -32,9 +32,9 @@ def body(source, declaration):
 
 def findings(source):
     failures = []
-    adopted = body(source, "package static func makeAdopting(terminal: Ubiquitty.Terminal")
-    if not re.search(r"return TerminalSurface\(drive: drive, rows: rows, columns: columns\)", adopted):
-        failures.append("the adopting route must use the shared surface initializer")
+    hosted = body(source, "public static func makeHostingPane(_ paneID: Int32, ofSource sourceAddress: UInt")
+    if not re.search(r"return TerminalSurface\(drive: drive, rows: rows, columns: columns\)", hosted):
+        failures.append("the hosted-pane route must use the shared surface initializer")
     initializer = body(source, "package init(drive: RuntimeDrive, rows: Int, columns: Int)")
     if not re.search(r"drive\.withTerminal\s*\{[^}]*applyCursorPreferences\(terminal, Ubiquitty\.Preferences\.values\(\)\.pointee\)", initializer):
         failures.append("the shared initializer must seed cursor policy under the model lock")

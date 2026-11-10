@@ -1578,21 +1578,22 @@ public final class RuntimeDrive {
         #endif
     }
 
-    /// Builds a drive that renders an externally owned terminal — the tmux
-    /// render-only pane, whose model the Session writes and disposes.
+    /// Builds a drive that renders one pane a hosting session's source owns —
+    /// the tmux render-only pane, whose model the source writes and disposes.
     ///
     /// The drive's own session still starts, because its runtime is the
-    /// publish anchor the read-snapshot rides; every model accessor then
-    /// reads the adopted terminal under the adopted lock, and this drive
+    /// publish anchor the read-snapshot rides. Every model accessor then reads
+    /// the pane's model under the pane's lock, the per-tick reads come from
+    /// the pane's publication, a resize goes to the source, and this drive
     /// never starts ingest.
     ///
     /// - Parameters:
-    ///   - terminal: The externally owned terminal to render.
-    ///   - lockAddress: The owner's model lock address, from the seam that
-    ///     hands a mutex across interop as a number.
+    ///   - paneID: The pane this drive renders.
+    ///   - sourceAddress: ``hostedWindowSourceAddress`` of the hosting drive.
     ///   - rows: The grid's rows, for the anchor's initial publish.
     ///   - columns: The grid's columns, likewise.
-    public init?(adopting terminal: Ubiquitty.Terminal, lockAddress: UInt, rows: Int, columns: Int) {
+    /// - Returns: Nil when Core declines a session or the pane is not live.
+    public init?(hostingPane paneID: Int32, ofSource sourceAddress: UInt, rows: Int, columns: Int) {
         guard let session = Ubiquitty.Runtime.TerminalSession.make() else {
             return nil
         }
@@ -1602,7 +1603,7 @@ public final class RuntimeDrive {
         #endif
         guard session.canClose() else { return nil }
         session.start(Int32(rows), Int32(columns), .SizedAndProportional)
-        session.adoptExternalTerminal(terminal, UInt(lockAddress))
+        guard session.adoptHostedPane(sourceAddress, paneID) else { return nil }
         Ubiquitty.Runtime.WorkspaceSession.installDefaultClientsForAdoptedSession(session)
     }
 
@@ -2562,20 +2563,9 @@ public final class RuntimeDrive {
     }
 
     /// The hosting source's address: one value for all of a hosting session's
-    /// panes, and what an adopted pane routes its resize through.
+    /// panes, and what a drive presenting one of them is built over.
     public var hostedWindowSourceAddress: UInt {
         UInt(session.hostedWindowSourceAddress())
-    }
-
-    /// Routes this adopted pane's resize and client-size report through the
-    /// source that hosts it.
-    ///
-    /// - Parameters:
-    ///   - sourceAddress: ``hostedWindowSourceAddress`` of the hosting drive.
-    ///   - paneID: The pane this drive renders.
-    public func routeResizeThroughHostedSource(_ sourceAddress: UInt, paneID: Int32) {
-        guard canClose else { return }
-        session.routeResizeThroughHostedSource(sourceAddress, paneID)
     }
 
     /// Asks the session's backend to perform a pane verb; the caller never
@@ -4391,17 +4381,6 @@ public final class RuntimeDrive {
         session.unlockForRead()
     }
 
-    /// The model lock's address, for the ObjC++ adoption seam.
-    ///
-    /// A render adapter over this session's Terminal brackets with the same
-    /// mutex the drain bites; the address crosses as a number because Swift
-    /// has no business dereferencing or retyping it — the one consumer is
-    /// the bridge's adopt call, which casts it back on the side where the
-    /// type lives. Valid as long as the drive.
-    public func modelLockAddress() -> UInt {
-        UInt(session.modelLockAddressForAdoption())
-    }
-
     /// Tries the model lock without waiting.
     ///
     /// For the per-drain and per-move paths where blocking starves the main
@@ -4517,6 +4496,26 @@ public final class RuntimeDrive {
         command.setEnvironmentOverrides(overrides)
         command.setInitialDirectory(std.string(initialDirectory))
         return session.launch(command)
+    }
+
+    /// Launches a tmux control-mode client — a local `tmux -CC`, or any
+    /// program that speaks its protocol — and hosts the windows it states.
+    ///
+    /// A pane of them is presented by a surface built over
+    /// ``hostedWindowSourceAddress`` with
+    /// `TerminalSurface.makeHostingPane(_:ofSource:rows:columns:)`; the
+    /// panes' events arrive through ``takeHostedWindowEvent()``. Hosting needs
+    /// ``enableHostedWindows(factoryAddress:)`` first.
+    ///
+    /// - Parameter arguments: The client's arguments; the first is its path.
+    /// - Returns: Whether the PTY opened and the session hosts its windows.
+    public func launchTmuxControlClient(arguments: [String]) -> Bool {
+        var draft = Ubiquitty.Runtime.LaunchCommandDraft()
+        for argument in arguments {
+            draft.addArgument(std.string(argument))
+        }
+        draft.setTmuxControlHost(std.string(""))
+        return session.launch(draft.build())
     }
 
     /// Starts the session's ingest thread over its transport.

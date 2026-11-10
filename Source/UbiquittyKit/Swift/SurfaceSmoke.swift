@@ -50,6 +50,19 @@ public final class SurfaceSmokeEntry: NSObject {
 /// The smoke's scenario, kept as a type so its pieces stay named.
 @MainActor
 enum SurfaceSmoke {
+    /// What a tmux server says to a control client attaching to one pane.
+    ///
+    /// The attach's empty answer, which the client enters control mode on,
+    /// the pane listing it asks for, and the pane's first `%output` line.
+    /// Echo is off so the client's commands do not come back as text. Core's
+    /// ingest tests run the same program.
+    static let controlModeProgram =
+        "stty -echo; "
+        + "printf '%%begin 1 1 0\\n%%end 1 1 0\\n"
+        + "%%begin 2 2 1\\n@1 %%1 80 24 1 ef01,80x24,0,0,1 work editor\\n%%end 2 2 1\\n"
+        + "%%output %%1 adoption-leg-content\\\\015\\\\012\\n'; "
+        + "exec sleep 30"
+
     /// Builds a surface and its renderer, then draws two frames into an
     /// offscreen layer.
     ///
@@ -631,28 +644,39 @@ enum SurfaceSmoke {
         }
         surface.clearSearch()
 
-        // The adoption leg — the tmux render-only pane's seam, driven with
-        // two local sessions so no tmux server is needed: one surface owns a
-        // model, a second adopts that model under the first one's lock, and
-        // the adopted surface must read and render the owner's content. The
-        // projection is the oracle because it walks the visible grid through
-        // the same borrow the frame path takes.
-        feed(surface.drive, "adoption-leg-content\r\n")
-        guard let ownedTerminal = surface.drive.borrowTerminal() else {
-            return failed("the owning drive lends no terminal")
+        // The adoption leg — the tmux render-only pane's seam, driven with no
+        // tmux server: a program that speaks the control protocol is launched
+        // as a local `tmux -CC` is, its session hosts the one pane the program
+        // lists, and a second surface presents that pane through the hosting
+        // source. The adopted surface must read and render the pane's content.
+        // The projection is the oracle because it walks the visible grid
+        // through the same borrow the frame path takes.
+        RuntimeDrive.enableHostedWindows(factoryAddress: UInt(Ubiquitty.Runtime.tmuxControlHostFactoryAddress()))
+        guard let hosting = TerminalSurface(rows: 24, columns: 80) else {
+            return failed("the hosting surface declined to build")
         }
-        let adopting = TerminalSurface.makeAdopting(
-            terminal: unsafeBitCast(ownedTerminal, to: UnsafeMutableRawPointer.self),
-            lockAddress: surface.drive.modelLockAddress(),
-            rows: 24,
-            columns: 80
-        )
-        guard let adopting else {
-            return failed("the adopting surface declined to build")
+        guard hosting.drive.launchTmuxControlClient(arguments: ["/bin/sh", "-c", controlModeProgram]), hosting.drive.startIngest() else {
+            return failed("the control-mode program did not launch")
         }
-        adopting.noteAccessibilityContentChanged()
-        guard adopting.accessibilityRebuiltText().contains("adoption-leg-content") else {
-            return failed("the adopted surface reads its own anchor, not the owner's model")
+        let hostingDeadline = Date(timeIntervalSinceNow: 10)
+        var hostedPane: TerminalSurface?
+        while hostedPane == nil, Date() < hostingDeadline {
+            RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.05))
+            if hosting.drive.hostedPaneFacts(1) != nil {
+                hostedPane = TerminalSurface.makeHostingPane(1, ofSource: hosting.drive.hostedWindowSourceAddress, rows: 24, columns: 80)
+            }
+        }
+        guard let adopting = hostedPane else {
+            return failed("the control-mode program hosted no pane a surface could present")
+        }
+        var isPaneContentRead = false
+        while !isPaneContentRead, Date() < hostingDeadline {
+            RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.05))
+            adopting.noteAccessibilityContentChanged()
+            isPaneContentRead = adopting.accessibilityRebuiltText().contains("adoption-leg-content")
+        }
+        guard isPaneContentRead else {
+            return failed("the adopted surface reads its own anchor, not the pane's model")
         }
         adopting.renderer = renderer
         let adoptedLayer = CAMetalLayer()
@@ -664,6 +688,11 @@ enum SurfaceSmoke {
         guard renderer.encodeFrame(for: adopting, into: adoptedLayer) else {
             return failed("the adopted surface's frame declined")
         }
+        // Unbound as a window unbinds a pane: the view lets go of the pane's
+        // model before its source frees it.
+        adopting.drive.endAdoption()
+        hosting.drive.releaseHostedPane(1)
+        hosting.drive.endHostedWindows()
 
         // The Tektronix leg. DECSET 38 hands the frame to the storage tube;
         // ESC ETX hands it back. The gate is the observable — no headless
