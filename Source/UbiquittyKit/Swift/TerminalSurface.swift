@@ -1355,6 +1355,21 @@ private func surfaceDrainSignal(_ context: UInt) {
     }
 }
 
+/// What an archive holds in a ``TerminalSurface``'s place when nothing holds
+/// the surface that rebuilds one: an empty view of its frame.
+@objc(UBQArchivedTerminalSurface)
+final class ArchivedTerminalSurface: PlatformView {
+    /// Carries what a surface is archived as, made on the main actor, out to
+    /// the archiver that asked for it on the same thread.
+    final class Handoff: @unchecked Sendable {
+        let placeholder: ArchivedTerminalSurface?
+
+        init(_ placeholder: ArchivedTerminalSurface?) {
+            self.placeholder = placeholder
+        }
+    }
+}
+
 /// A terminal that owns its session and reports what a host needs to draw around it.
 ///
 /// The unit a host embeds: one object carrying the Core session, the render
@@ -1787,6 +1802,14 @@ public final class TerminalSurface: PlatformView {
     /// Whether the host is showing a keyboard, which decides what a tap means.
     /// See ``TerminalSurface/installPointerGestures()``.
     public var isKeyboardPresented = false
+    /// The responder that takes the keyboard for this surface's typing, when
+    /// the view holding the surface brings one; nil leaves the keyboard to the
+    /// host, which hears a tap's ask as
+    /// ``TerminalSurfaceObserver/terminalSurfaceDidRequestKeyboard(_:)``.
+    ///
+    /// A tap that asks for a keyboard makes it the first responder, and so
+    /// does a click from a hardware keyboard, whose keys it then carries.
+    package weak var keyboardResponder: UIResponder?
     /// The pan's cumulative translation at the last callback, so each one
     /// reports the change rather than the total.
     internal var lastScrollTranslation = CGPoint.zero
@@ -3135,6 +3158,29 @@ public final class TerminalSurface: PlatformView {
     public required init?(coder: NSCoder) {
         fatalError("TerminalSurface is created in code, never from a nib")
     }
+
+    /// Leaves the surface's session out of an archive.
+    ///
+    /// A surface is a live session and is never decoded. A surface whose
+    /// holder builds its own when it is decoded, as ``TerminalView`` does, is
+    /// archived as nothing, and the holder decodes with no subview for it. An
+    /// archive of other views around a surface holds an empty view of its
+    /// frame in its place, and decoding that archive builds no surface.
+    ///
+    /// Views are archived on the main thread, where the placeholder is made;
+    /// the override is nonisolated because the method it overrides is.
+    ///
+    /// - Parameter archiver: The archiver encoding the surface.
+    /// - Returns: Nothing, or the placeholder.
+    nonisolated override public func replacementObject(for archiver: NSKeyedArchiver) -> Any? {
+        MainActor.assumeIsolated {
+            ArchivedTerminalSurface.Handoff(isOmittedFromArchives ? nil : ArchivedTerminalSurface(frame: frame))
+        }.placeholder
+    }
+
+    /// Whether the view holding the surface builds a surface of its own when it
+    /// is decoded, so an archive holds nothing in this one's place.
+    package var isOmittedFromArchives = false
 
     /// Launches the user's login shell in this surface's session.
     ///
