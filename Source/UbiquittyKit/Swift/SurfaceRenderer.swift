@@ -1116,6 +1116,11 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
 
     /// Boundary frames committed, with or without a selection over them.
     package private(set) var presentedBoundaryFrameCount = 0
+
+    /// The absolute row at the top of the last presented frame, on either
+    /// route: a view held back over its history shows the same rows in a
+    /// live read as in a boundary frame.
+    package private(set) var lastFrameFirstAbsoluteRow = 0
     private var phaseLogRowSignature = ""
 
     /// The rows of the live grid as Core's one-line signature (see
@@ -3054,6 +3059,7 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
                 transactionally: presentsWithTransaction
             )
             notePresentedGeometry(for: surface, frame: pending, deviceScale: deviceScale, panOffset: presentation.panOffset)
+            lastFrameFirstAbsoluteRow = Int(syncFrame.firstAbsoluteRow())
             surface.didLastFrameDrawSelection = spanCount > 0
             presentedBoundaryFrameCount += 1
             if spanCount > 0 {
@@ -3124,6 +3130,17 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
                 lastFrameDecline = .redrawArriving
                 return false
             }
+            // The rows the frame shows, read under the lock the capture reads
+            // under and by the rule the drain's captures stand by: a view held
+            // back stands over the rows the drain appended since the view last
+            // took output, so this frame and a captured one show the same
+            // rows. The cells, the damage plan, the links, the status row, the
+            // images, the overlay tiers and the selection all read it.
+            options.viewOffset = Ubiquitty.Selection.frameViewOffset(
+                surface.selectionModel.session.pointee,
+                terminal,
+                Int32(surface.viewOffset)
+            )
             // The frame's origin is Core's. Under DECSET 7402's colour
             // letterbox the padding is absent, and the capture zeroes whatever
             // origin it is handed; read here, under the lock the capture reads
@@ -3136,7 +3153,7 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
             }
             // Link addresses and captured cells must use the same history depth.
             frameLinks.scrollbackCount = terminal.scrollbackCount
-            frameLinks.viewOffset = Ubiquitty.Screen.resolvedViewOffset(terminal, options.viewOffset)
+            frameLinks.viewOffset = options.viewOffset
             applyFrameLinks(to: &options, frameLinks)
             surface.noteFrameHoverRun(
                 isActive: options.isHoverLinkActive,
@@ -3217,12 +3234,18 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
             let plan: Ubiquitty.Rendering.RetainedFramePlan
             if skipsGridCapture {
                 gridCaptureSkipCount += 1
-                plan = surface.planSkippedGridFrame(terminal, rows: rows, columns: Int(snapshot.columns))
+                plan = surface.planSkippedGridFrame(
+                    terminal,
+                    rows: rows,
+                    columns: Int(snapshot.columns),
+                    viewOffset: options.viewOffset
+                )
             } else {
                 plan = surface.planRetainedFrame(
                     terminal,
                     rows: rows,
                     columns: Int(snapshot.columns),
+                    viewOffset: options.viewOffset,
                     target: !grantsFullRebuild && !owesTierRows && reusesRetainedContent,
                     hasBackdrop: backdropTexture != nil,
                     cellHeightInPixels: Int(metrics.cellHeight.rounded()),
@@ -3282,7 +3305,7 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
                     terminal,
                     Int32(rows),
                     Int32(columns),
-                    Int32(surface.viewOffset),
+                    options.viewOffset,
                     Ubiquitty.Rendering.StatusRowCells(scratch)
                 ) {
                     options.statusRowCells = UnsafePointer(scratch.baseAddress)
@@ -3311,7 +3334,7 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
             // than for the copy.
             didCaptureFrame = selection.withOverlayTiers(
                 terminal,
-                viewOffset: Int32(surface.viewOffset),
+                viewOffset: options.viewOffset,
                 rows: rows,
                 options: options
             ) { options in
@@ -3349,7 +3372,7 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
                     let count = Ubiquitty.Selection.viewportSpansAndEnds(
                         &selection.session.pointee,
                         terminal,
-                        Int32(surface.viewOffset),
+                        options.viewOffset,
                         Ubiquitty.Selection.ViewportSpans(spans),
                         &ends
                     )
@@ -3456,6 +3479,7 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
             transactionally: presentsWithTransaction
         )
         notePresentedGeometry(for: surface, frame: pending, deviceScale: deviceScale, panOffset: presentation.panOffset)
+        lastFrameFirstAbsoluteRow = renderer.capturedFirstAbsoluteRow
         surface.didLastFrameDrawSelection = liveFrameDrawsSelection
         if isPerfLogged {
             let finishedAt = CACurrentMediaTime()

@@ -2459,11 +2459,14 @@ public final class TerminalSurface: PlatformView {
     ///   - terminal: The borrowed terminal, under the lock.
     ///   - rows: The visible row count.
     ///   - columns: The column count.
+    ///   - viewOffset: The offset the frame shows the view at
+    ///     (Core's `Selection::frameViewOffset`).
     /// - Returns: The plan.
     package func planSkippedGridFrame(
         _ terminal: Ubiquitty.Terminal,
         rows: Int,
-        columns: Int
+        columns: Int,
+        viewOffset: Int32
     ) -> Ubiquitty.Rendering.RetainedFramePlan {
         guard rows > 0, columns > 0 else {
             return Ubiquitty.Rendering.makeFullRebuildPlan()
@@ -2474,7 +2477,7 @@ public final class TerminalSurface: PlatformView {
         var request = Ubiquitty.Rendering.makeRetainedFrameRequest()
         request.rows = Int32(rows)
         request.columns = Int32(columns)
-        request.viewOffset = Int32(viewOffset)
+        request.viewOffset = viewOffset
         return rowDirtyScratch.withUnsafeMutableBufferPointer { dirty in
             drive.planSkippedGridFrame(
                 terminal,
@@ -2498,6 +2501,8 @@ public final class TerminalSurface: PlatformView {
     ///   - terminal: The borrowed terminal, under the lock.
     ///   - rows: This frame's row count.
     ///   - columns: This frame's column count.
+    ///   - viewOffset: The offset the frame shows the view at
+    ///     (Core's `Selection::frameViewOffset`).
     ///   - target: Whether the retained texture survived at this frame's size —
     ///     a render-side fact Core cannot read for itself.
     ///   - hasBackdrop: Whether the frame composites the window's backdrop
@@ -2510,6 +2515,7 @@ public final class TerminalSurface: PlatformView {
         _ terminal: Ubiquitty.Terminal,
         rows: Int,
         columns: Int,
+        viewOffset: Int32,
         target: Bool,
         hasBackdrop: Bool,
         cellHeightInPixels: Int,
@@ -2525,7 +2531,7 @@ public final class TerminalSurface: PlatformView {
         var request = Ubiquitty.Rendering.makeRetainedFrameRequest()
         request.rows = Int32(rows)
         request.columns = Int32(columns)
-        request.viewOffset = Int32(viewOffset)
+        request.viewOffset = viewOffset
         request.isTargetMatching = target
         request.hasBackdrop = hasBackdrop
         request.cellHeightInPixels = Int32(cellHeightInPixels)

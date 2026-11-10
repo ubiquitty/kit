@@ -368,6 +368,9 @@ package final class TerminalRenderer {
     /// accessors cannot return one.
     private let capture: Ubiquitty.Rendering.FrameCapture
 
+    /// The absolute row at the top of the frame the last capture took.
+    package var capturedFirstAbsoluteRow: Int { Int(capture.firstAbsoluteRow()) }
+
     /// The mono coverage sheet, for the comparison harness's slot dump.
     var monoSheetTexture: MTLTexture { atlas.texture }
     /// The ligature strip sheet, exposed for the comparison harness's dump only.
