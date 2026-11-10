@@ -152,7 +152,10 @@ extension TerminalSurface {
 }
 
 /// What a renderer could not be built without.
-package enum RendererRefusal: Error, Equatable {
+///
+/// What ``TerminalView/rendererRefusal`` reports, so a host can tell a person
+/// why the terminal draws nothing.
+public enum RendererRefusal: Error, Equatable, Sendable {
     /// The system offered no Metal device.
     case noGraphicsDevice
     /// The module's compiled shaders did not load from its bundle.
