@@ -3224,19 +3224,31 @@ public final class TerminalSurface: PlatformView {
     /// The parameters are `Process`'s: each argument reaches the program as
     /// given, unsplit and unexpanded, and the program reads its path as its
     /// `argv[0]`. A session runs one program, so a surface that has launched
-    /// one launches no other.
+    /// one launches no other. What is refused is refused here, before any
+    /// process starts, as `Process` refuses it: the program never runs
+    /// somewhere it was not asked to, such as the home directory in place of
+    /// a working directory it cannot enter.
     ///
     /// - Parameters:
     ///   - executableURL: The program, as a file URL.
-    ///   - arguments: Its arguments, after its own path.
+    ///   - arguments: Its arguments, after its own path; at most 255.
     ///   - environment: Variables the program reads in place of the ones it
     ///     inherits from the app; the rest of the app's environment stands.
+    ///     At most 128, each named with ASCII letters, digits and `_`, not
+    ///     starting with a digit, and none of `TERM`, `COLORTERM`,
+    ///     `TERM_PROGRAM`, `TERM_PROGRAM_VERSION`, `LC_CTYPE` and `LC_ALL`,
+    ///     which the terminal sets for the program itself.
     ///   - currentDirectoryURL: The working directory, as a file URL, or nil
     ///     for the user's home directory.
-    /// - Returns: Whether the program launched and its output is being read;
-    ///   false for a URL that is not a file URL, for a string holding a NUL or
-    ///   a variable name holding `=`, for a surface that already runs a
-    ///   program, and on iOS, which starts no local program.
+    /// - Returns: Whether the program launched and its output is being read.
+    ///   False, with nothing started, for an executable URL that is not a file
+    ///   URL or names nothing, a directory or a file that is not executable;
+    ///   for a working directory URL that is not a file URL, names nothing or
+    ///   no directory, names one that cannot be entered, or has a path longer
+    ///   than 1023 bytes; for arguments or variables past the limits above or
+    ///   a variable named otherwise; for a NUL in any string; for a surface
+    ///   that already runs a program; and on iOS, which starts no local
+    ///   program.
     @discardableResult
     public func launch(
         executableURL: URL,
@@ -3245,15 +3257,83 @@ public final class TerminalSurface: PlatformView {
         currentDirectoryURL: URL? = nil
     ) -> Bool {
         guard executableURL.isFileURL, currentDirectoryURL?.isFileURL ?? true else { return false }
-        let words = [executableURL.path] + arguments
-        let entries = environment.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }
-        let directory = currentDirectoryURL?.path ?? ""
-        let hasMalformedName = environment.keys.contains { $0.isEmpty || $0.contains("=") }
-        guard !hasMalformedName, !(words + entries + [directory]).contains(where: { $0.utf8.contains(0) }) else {
+        let executable = executableURL.path
+        let directory = currentDirectoryURL?.path
+        guard Self.canLaunch(executable: executable, arguments: arguments, environment: environment, currentDirectory: directory) else {
             return false
         }
-        return drive.launchProgram(arguments: words, environmentOverrides: entries, initialDirectory: directory)
+        let entries = environment.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }
+        return drive.launchProgram(arguments: [executable] + arguments, environmentOverrides: entries, initialDirectory: directory ?? "")
             && startReadingLaunchedProgram()
+    }
+
+    /// The most arguments a program is launched with after its own path, the
+    /// most variables it is given and the longest working directory path:
+    /// the bounds Core's spawn holds a launch to.
+    private static let maxArgumentCount = 255
+    private static let maxEnvironmentCount = 128
+    private static let maxDirectoryPathLength = 1023
+
+    /// The variables the terminal sets for a program itself, which a launch
+    /// may not set.
+    private static let reservedEnvironmentNames: Set<String> = [
+        "TERM", "COLORTERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "LC_CTYPE", "LC_ALL",
+    ]
+
+    /// Whether a program launch is one Core's spawn takes as asked.
+    ///
+    /// Core refuses the malformed with no reason given, and starts a program
+    /// whose working directory it cannot enter in the home directory instead,
+    /// so both are answered here. A file can still change between this answer
+    /// and the spawn.
+    ///
+    /// - Parameters:
+    ///   - executable: The program's path.
+    ///   - arguments: Its arguments, after its own path.
+    ///   - environment: The variables it is given.
+    ///   - currentDirectory: Its working directory, or nil for the home one.
+    /// - Returns: Whether the launch may go ahead.
+    private static func canLaunch(
+        executable: String,
+        arguments: [String],
+        environment: [String: String],
+        currentDirectory: String?
+    ) -> Bool {
+        let strings = [executable] + arguments + environment.keys + environment.values + [currentDirectory ?? ""]
+        guard !strings.contains(where: { $0.utf8.contains(0) }),
+            arguments.count <= maxArgumentCount,
+            environment.count <= maxEnvironmentCount,
+            environment.keys.allSatisfy(isSettableEnvironmentName)
+        else {
+            return false
+        }
+        let files = FileManager.default
+        var isDirectory: ObjCBool = false
+        guard files.fileExists(atPath: executable, isDirectory: &isDirectory), !isDirectory.boolValue,
+            files.isExecutableFile(atPath: executable)
+        else {
+            return false
+        }
+        guard let currentDirectory else { return true }
+        return currentDirectory.utf8.count <= maxDirectoryPathLength
+            && files.fileExists(atPath: currentDirectory, isDirectory: &isDirectory) && isDirectory.boolValue
+            && files.isExecutableFile(atPath: currentDirectory)
+    }
+
+    /// Whether a launch may set a variable of this name: ASCII letters,
+    /// digits and `_`, not starting with a digit, and not one the terminal
+    /// sets itself.
+    ///
+    /// - Parameter name: The variable's name.
+    /// - Returns: Whether the name may be set.
+    private static func isSettableEnvironmentName(_ name: String) -> Bool {
+        let bytes = Array(name.utf8)
+        guard let first = bytes.first, !(UInt8(ascii: "0")...UInt8(ascii: "9")).contains(first) else { return false }
+        let isNameByte: (UInt8) -> Bool = { byte in
+            (UInt8(ascii: "a")...UInt8(ascii: "z")).contains(byte) || (UInt8(ascii: "A")...UInt8(ascii: "Z")).contains(byte)
+                || (UInt8(ascii: "0")...UInt8(ascii: "9")).contains(byte) || byte == UInt8(ascii: "_")
+        }
+        return bytes.allSatisfy(isNameByte) && !reservedEnvironmentNames.contains(name)
     }
 
     /// Starts reading the program a launch just opened.
