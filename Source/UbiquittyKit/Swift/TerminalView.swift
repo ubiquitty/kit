@@ -20,14 +20,15 @@
 // host there, because on a phone which view holds the keyboard is the host's
 // arrangement; here the arrangement is this view, so it holds one.
 
+import Foundation
+internal import UbiquittyCore
+internal import UbiquittyRenderKit
+
 #if canImport(AppKit)
 import AppKit
 #else
 import UIKit
 #endif
-import Foundation
-internal import UbiquittyCore
-internal import UbiquittyRenderKit
 
 /// A terminal view that sets itself up: it builds its own session and Metal
 /// renderer in Core's font and theme, and fits its grid to its bounds.
@@ -246,12 +247,13 @@ public final class TerminalView: PlatformView {
         environment: [String: String] = [:],
         currentDirectoryURL: URL? = nil
     ) -> Bool {
-        surface?.launch(
-            executableURL: executableURL,
-            arguments: arguments,
-            environment: environment,
-            currentDirectoryURL: currentDirectoryURL
-        ) ?? false
+        surface?
+            .launch(
+                executableURL: executableURL,
+                arguments: arguments,
+                environment: environment,
+                currentDirectoryURL: currentDirectoryURL
+            ) ?? false
     }
 
     /// Writes bytes to the screen as if the session produced them, as
@@ -385,7 +387,8 @@ public final class TerminalView: PlatformView {
     }
 
     /// Follows the light or dark appearance the trait collection moved to.
-    @objc private func appearanceDidChange() {
+    @objc
+    private func appearanceDidChange() {
         followAppearance()
     }
 

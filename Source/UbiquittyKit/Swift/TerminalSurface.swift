@@ -3167,7 +3167,8 @@ public final class TerminalSurface: PlatformView {
     nonisolated override public func replacementObject(for archiver: NSKeyedArchiver) -> Any? {
         MainActor.assumeIsolated {
             ArchivedTerminalSurface.Handoff(isOmittedFromArchives ? nil : ArchivedTerminalSurface(frame: frame))
-        }.placeholder
+        }
+        .placeholder
     }
 
     /// Whether the view holding the surface builds a surface of its own when it
