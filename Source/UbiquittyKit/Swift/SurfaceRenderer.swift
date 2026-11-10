@@ -3001,7 +3001,11 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
         // throughout the drag; an open synchronized update and a repaint still
         // arriving behind its erase hold it, both judged under the read's
         // lock below.
-        let keepsSearchLive = surface.didLastFrameDrawSearch
+        //
+        // A capture is built without the search tiers, and Core serves a view
+        // a capture whenever none waits, so a search with matches keeps the
+        // live read from its first frame, not only once a frame drew them.
+        let keepsSearchLive = surface.didLastFrameDrawSearch || surface.drive.searchStatus.foundCount > 0
         let isResizing = surface.isInLiveResizeGesture || surface.isDrawingResizeStep
         var supply = Ubiquitty.Runtime.FrameSupply()
         let taken = surface.selectionModel.takeFrame(
