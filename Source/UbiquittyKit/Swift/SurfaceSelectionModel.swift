@@ -50,10 +50,10 @@ final class SurfaceSelectionModel {
     /// the same reason as ``spanScratch``: they are read on the frame path, and
     /// a per-frame array would allocate four times a frame for tiers that are
     /// empty most of the time.
-    private var focusedSearchScratch: [Ubiquitty.Rendering.SelectionRowSpan] = []
-    private var otherSearchScratch: [Ubiquitty.Rendering.SelectionRowSpan] = []
-    private var triggerHighlightScratch: [Ubiquitty.Rendering.SelectionRowSpan] = []
-    private var hiliteRegionScratch: [Ubiquitty.Rendering.SelectionRowSpan] = []
+    private(set) var focusedSearchScratch: [Ubiquitty.Rendering.SelectionRowSpan] = []
+    private(set) var otherSearchScratch: [Ubiquitty.Rendering.SelectionRowSpan] = []
+    private(set) var triggerHighlightScratch: [Ubiquitty.Rendering.SelectionRowSpan] = []
+    private(set) var hiliteRegionScratch: [Ubiquitty.Rendering.SelectionRowSpan] = []
 
     /// Borrows the frame's overlay tiers while `body` captures and encodes them.
     ///
@@ -144,6 +144,51 @@ final class SurfaceSelectionModel {
                         options.hiliteRegionSpans = hiliteCount > 0 ? UnsafePointer(hilite.baseAddress) : nil
                         options.hiliteRegionSpanCount = hiliteCount
                         return body(options)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Lends the overlay tiers' buffers to `body` to fill, each with room for
+    /// at least its capacity.
+    ///
+    /// For a frame built over a capture, whose tiers are read from the pane's
+    /// publications rather than collected from the live terminal. The frame
+    /// reads what `body` wrote from ``focusedSearchScratch`` and its siblings.
+    ///
+    /// - Parameters:
+    ///   - searchCapacity: The room each search tier needs.
+    ///   - triggerCapacity: The room the trigger tier needs.
+    ///   - hiliteCapacity: The room the hilite tier needs.
+    ///   - body: Receives the focused search, other search, trigger and hilite
+    ///     buffers, in that order.
+    /// - Returns: The consumer's result.
+    func withTierBuffers<Result>(
+        searchCapacity: Int,
+        triggerCapacity: Int,
+        hiliteCapacity: Int,
+        _ body: (
+            Ubiquitty.Rendering.OverlayRowSpans,
+            Ubiquitty.Rendering.OverlayRowSpans,
+            Ubiquitty.Rendering.OverlayRowSpans,
+            Ubiquitty.Rendering.OverlayRowSpans
+        ) -> Result
+    ) -> Result {
+        Self.growScratch(&focusedSearchScratch, capacity: searchCapacity)
+        Self.growScratch(&otherSearchScratch, capacity: searchCapacity)
+        Self.growScratch(&triggerHighlightScratch, capacity: triggerCapacity)
+        Self.growScratch(&hiliteRegionScratch, capacity: hiliteCapacity)
+        return focusedSearchScratch.withUnsafeMutableBufferPointer { focused in
+            otherSearchScratch.withUnsafeMutableBufferPointer { other in
+                triggerHighlightScratch.withUnsafeMutableBufferPointer { trigger in
+                    hiliteRegionScratch.withUnsafeMutableBufferPointer { hilite in
+                        body(
+                            Ubiquitty.Rendering.OverlayRowSpans(focused),
+                            Ubiquitty.Rendering.OverlayRowSpans(other),
+                            Ubiquitty.Rendering.OverlayRowSpans(trigger),
+                            Ubiquitty.Rendering.OverlayRowSpans(hilite)
+                        )
                     }
                 }
             }

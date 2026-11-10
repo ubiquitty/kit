@@ -2268,6 +2268,31 @@ public final class RuntimeDrive {
         session.selectionOverCapture(&selection, capture, spans, &ends)
     }
 
+    /// The search, trigger and hilite tiers over a captured frame, from the
+    /// pane's publications, without the model lock.
+    ///
+    /// - Parameters:
+    ///   - capture: A frame from ``takeFrame(_:_:)``, still held.
+    ///   - focusedSearch: Receives the focused match's spans;
+    ///     `Rendering.maxSearchOverlaySpans` always has room.
+    ///   - otherSearch: Receives every other match's spans, of the same bound.
+    ///   - triggers: Receives the trigger highlights' spans;
+    ///     `Rendering.maxTriggerOverlaySpans` always has room.
+    ///   - hilite: Receives the hilite band's spans; the capture's row count
+    ///     always has room.
+    /// - Returns: How many spans each tier wrote, and the publication
+    ///   generations they were read from.
+    // swift-only: the only callers are in-package Swift
+    package func overlaySpansOverCapture(
+        _ capture: Ubiquitty.Rendering.FrameCapture,
+        focusedSearch: Ubiquitty.Rendering.OverlayRowSpans,
+        otherSearch: Ubiquitty.Rendering.OverlayRowSpans,
+        triggers: Ubiquitty.Rendering.OverlayRowSpans,
+        hilite: Ubiquitty.Rendering.OverlayRowSpans
+    ) -> Ubiquitty.Rendering.OverlaySpanCounts {
+        session.overlaySpansOverCapture(capture, focusedSearch, otherSearch, triggers, hilite)
+    }
+
     /// Runs one scroll fact through Core's wheel ladder — report,
     /// alternate-scroll fold, or local view — and answers what remains.
     ///

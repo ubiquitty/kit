@@ -598,7 +598,6 @@ extension SurfaceSelectionModel {
     ///   - columns: The grid's columns as the snapshot names them.
     ///   - nowTicks: Now, on the 60 Hz monotonic clock.
     ///   - isResizing: Whether the view is in a live resize.
-    ///   - keepsSearchLive: Whether the view's last frame drew search matches.
     ///   - supply: Receives Core's answer.
     /// - Returns: The captured frame, retained, on the captured route; nil
     ///   otherwise.
@@ -608,7 +607,6 @@ extension SurfaceSelectionModel {
         columns: Int,
         nowTicks: UInt32,
         isResizing: Bool,
-        keepsSearchLive: Bool,
         supply: inout Ubiquitty.Runtime.FrameSupply
     ) -> Ubiquitty.Rendering.FrameCapture? {
         let capacity = max(Int(Ubiquitty.Selection.viewportSpanCapacity(Int32(rows), Int32(columns))), spansNeeded)
@@ -621,7 +619,6 @@ extension SurfaceSelectionModel {
             demand.selection = session
             demand.selectionSpans = Ubiquitty.Selection.ViewportSpans(spans)
             demand.isResizing = isResizing
-            demand.keepsSearchLive = keepsSearchLive
             return drive.takeFrame(demand, &supply)
         }
         guard supply.route == .Captured, let capture else {
@@ -1151,6 +1148,10 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
 
     /// Boundary frames committed, with or without a selection over them.
     package private(set) var presentedBoundaryFrameCount = 0
+
+    /// The search, trigger and hilite spans the last committed boundary frame
+    /// drew over its captured rows, and the publications they were read from.
+    private(set) var lastCapturedFrameTiers = Ubiquitty.Rendering.OverlaySpanCounts()
 
     /// The absolute row at the top of the last presented frame, on either
     /// route: a view held back over its history shows the same rows in a
@@ -2162,6 +2163,81 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
         frameRenderer(for: surface)?.lastFrameHadNetChange ?? false
     }
 
+    /// Builds a captured frame with the view's tiers over it.
+    ///
+    /// The selection is drawn in the fill and ink the capture resolved from
+    /// its own style and the host's colours. The search, trigger and hilite
+    /// tiers are the pane's published ones over the capture's rows, read
+    /// without the model lock.
+    ///
+    /// - Parameters:
+    ///   - capture: The captured frame.
+    ///   - selectionSpans: The selection over it, in its visible rows.
+    ///   - surface: The surface whose pane published the tiers.
+    ///   - renderer: The surface's frame renderer.
+    ///   - tiers: Receives what each published tier drew.
+    /// - Returns: The frame to encode, or nil when nothing is to be presented.
+    private func buildFrameOverCapture(
+        _ capture: Ubiquitty.Rendering.FrameCapture,
+        selectionSpans: ArraySlice<Ubiquitty.Rendering.SelectionRowSpan>,
+        for surface: TerminalSurface,
+        renderer: TerminalRenderer,
+        tiers: inout Ubiquitty.Rendering.OverlaySpanCounts
+    ) -> TerminalRenderer.PendingFrame? {
+        let selection = surface.selectionModel
+        let counts = selection.withTierBuffers(
+            searchCapacity: Int(Ubiquitty.Rendering.maxSearchOverlaySpans),
+            triggerCapacity: Int(Ubiquitty.Rendering.maxTriggerOverlaySpans),
+            hiliteCapacity: Int(capture.rows())
+        ) { focused, other, triggers, hilite in
+            surface.drive.overlaySpansOverCapture(capture, focusedSearch: focused, otherSearch: other, triggers: triggers, hilite: hilite)
+        }
+        tiers = counts
+        return selectionSpans.withUnsafeBufferPointer { spans in
+            selection.focusedSearchScratch.withUnsafeBufferPointer { focused in
+                selection.otherSearchScratch.withUnsafeBufferPointer { other in
+                    selection.triggerHighlightScratch.withUnsafeBufferPointer { triggers in
+                        selection.hiliteRegionScratch.withUnsafeBufferPointer { hilite in
+                            var view = Ubiquitty.Rendering.FrameCapture.ViewTierOverrides()
+                            if !spans.isEmpty {
+                                view.selectionSpans = spans.baseAddress
+                                view.selectionSpanCount = Int32(spans.count)
+                                view.selectionColor = capture.selectionFillColor()
+                                view.isSelectionBehindText = capture.isSelectionFillBehindText()
+                                view.hasSelectionForegroundOverride = capture.hasSelectionForegroundOverride()
+                                view.selectionForeground = capture.selectionForeground()
+                            }
+                            if counts.focusedSearch > 0 {
+                                view.searchMatchSpans = focused.baseAddress
+                                view.searchMatchSpanCount = counts.focusedSearch
+                                let highlight = Ubiquitty.Rendering.focusedSearchMatchColor()
+                                view.searchMatchHighlight = Ubiquitty.Rendering.Vec4(
+                                    x: highlight.red,
+                                    y: highlight.green,
+                                    z: highlight.blue,
+                                    w: highlight.alpha
+                                )
+                            }
+                            if counts.otherSearch > 0 {
+                                view.otherSearchMatchSpans = other.baseAddress
+                                view.otherSearchMatchSpanCount = counts.otherSearch
+                            }
+                            if counts.triggers > 0 {
+                                view.triggerHighlightSpans = triggers.baseAddress
+                                view.triggerHighlightSpanCount = counts.triggers
+                            }
+                            if counts.hilite > 0 {
+                                view.hiliteRegionSpans = hilite.baseAddress
+                                view.hiliteRegionSpanCount = counts.hilite
+                            }
+                            return renderer.buildFrame(captured: capture, view: view)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Records that a frame was built and not shown.
     ///
     /// The build consumed the rows the capture owed and set the glass
@@ -2988,12 +3064,9 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
         // it captured the frame, against the terminal the frame froze, by the
         // evaluation the live read runs; nothing here reads the model for it.
         // The selection is handed over first, so a capture taken from here on
-        // resolves it as it stands now.
-        //
-        // A surface showing search matches keeps the live path, saturated or
-        // not: a boundary frame is built without the search tiers, so the
-        // frame it presents drops every match and leaves the focused match's
-        // cells in the retained grid unfilled.
+        // resolves it as it stands now. The search, trigger and hilite tiers
+        // are drawn over it from the pane's publications, which the writer
+        // brings up to date at each release of the model.
         //
         // Core decides the route, as it does for every frontend: the newest
         // capture, a read of the model, or nothing and why. Resizing does not
@@ -3001,11 +3074,6 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
         // throughout the drag; an open synchronized update and a repaint still
         // arriving behind its erase hold it, both judged under the read's
         // lock below.
-        //
-        // A capture is built without the search tiers, and Core serves a view
-        // a capture whenever none waits, so a search with matches keeps the
-        // live read from its first frame, not only once a frame drew them.
-        let keepsSearchLive = surface.didLastFrameDrawSearch || surface.drive.searchStatus.foundCount > 0
         let isResizing = surface.isInLiveResizeGesture || surface.isDrawingResizeStep
         var supply = Ubiquitty.Runtime.FrameSupply()
         let taken = surface.selectionModel.takeFrame(
@@ -3014,13 +3082,11 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
             columns: Int(snapshot.columns),
             nowTicks: TerminalSurface.monotonicTicksNow(),
             isResizing: isResizing,
-            keepsSearchLive: keepsSearchLive,
             supply: &supply
         )
         if let syncFrame = taken {
             let selection = surface.selectionModel
             let spanCount = Int(supply.selection.count)
-            surface.didLastFrameDrawSearch = false
             // Live changes can follow the captured boundary before this display
             // request is consumed. On-demand presentation needs another pass
             // to observe them even when no further output arrives.
@@ -3054,20 +3120,14 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
             if !isBoundaryTargetCurrent {
                 renderer.requestFullRebuild()
             }
-            // The selection is a tier over the frozen rows, in the fill and ink
-            // the capture resolved from its own style and the host's colours.
-            let built = selection.spanScratch.withUnsafeBufferPointer { spans -> TerminalRenderer.PendingFrame? in
-                var view = Ubiquitty.Rendering.FrameCapture.ViewTierOverrides()
-                if spanCount > 0 {
-                    view.selectionSpans = spans.baseAddress
-                    view.selectionSpanCount = Int32(spanCount)
-                    view.selectionColor = syncFrame.selectionFillColor()
-                    view.isSelectionBehindText = syncFrame.isSelectionFillBehindText()
-                    view.hasSelectionForegroundOverride = syncFrame.hasSelectionForegroundOverride()
-                    view.selectionForeground = syncFrame.selectionForeground()
-                }
-                return renderer.buildFrame(captured: syncFrame, view: view)
-            }
+            var tiers = Ubiquitty.Rendering.OverlaySpanCounts()
+            let built = buildFrameOverCapture(
+                syncFrame,
+                selectionSpans: selection.spanScratch.prefix(spanCount),
+                for: surface,
+                renderer: renderer,
+                tiers: &tiers
+            )
             guard var pending = built
             else {
                 // A frame that reproduced the glass was consumed and not
@@ -3144,6 +3204,8 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
             notePresentedGeometry(for: surface, frame: pending, deviceScale: deviceScale, panOffset: presentation.panOffset)
             lastFrameFirstAbsoluteRow = Int(syncFrame.firstAbsoluteRow())
             surface.didLastFrameDrawSelection = spanCount > 0
+            surface.didLastFrameDrawSearch = tiers.focusedSearch > 0 || tiers.otherSearch > 0
+            lastCapturedFrameTiers = tiers
             presentedBoundaryFrameCount += 1
             if spanCount > 0 {
                 selectedBoundaryFrameCount += 1
