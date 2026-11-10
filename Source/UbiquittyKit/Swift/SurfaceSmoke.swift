@@ -971,6 +971,12 @@ enum SurfaceSmoke {
             return failed(failure)
         }
 
+        // The route leg: which way each tick goes, before the decision moves
+        // into Core's frame supply.
+        if let failure = frameRouteFailure(surface, renderer: renderer, layer: layer) {
+            return failed(failure)
+        }
+
         // The style leg. A host's styling must be the styling the frame
         // derives its uniforms from. The live route shares the assembled
         // options with the registration by construction, so the assertion
@@ -2348,6 +2354,137 @@ enum SurfaceSmoke {
         return nil
     }
 
+    /// Takes each route a tick can take on a live shell, and checks it is the
+    /// one taken.
+    ///
+    /// - A capture waiting in the slot is presented, with no selection over it.
+    /// - A tick inside an open synchronized update draws nothing and arms the
+    ///   recheck of the hold, whichever check, published or under the model
+    ///   lock, finds the update open.
+    /// - A resize step is held only under the model lock: the published hold
+    ///   does not wait for it.
+    /// - A view drawing search matches reads the model while a capture
+    ///   waits, and leaves the capture in the slot.
+    ///
+    /// - Parameters:
+    ///   - surface: The surface, its shell awake.
+    ///   - renderer: The surface renderer.
+    ///   - layer: The layer to present into.
+    /// - Returns: Why the leg failed, or nil.
+    private static func frameRouteFailure(
+        _ surface: TerminalSurface,
+        renderer: SurfaceRenderer,
+        layer: CAMetalLayer
+    ) -> String? {
+        surface.clearSelection()
+        let selectedBefore = renderer.selectedBoundaryFrameCount
+        guard presentsBoundaryFrame(surface, renderer: renderer, layer: layer) else {
+            return "no captured frame was presented while one waited (decline=\(renderer.lastFrameDecline.rawValue))"
+        }
+        guard renderer.lastFrameDecline == .none, renderer.selectedBoundaryFrameCount == selectedBefore else {
+            return "the captured frame with no selection recorded decline=\(renderer.lastFrameDecline.rawValue)"
+                + " or drew a selection"
+        }
+
+        waitForAdmittedFrame(surface)
+        feed(surface.drive, "\u{1b}[?2026h")
+        let drewInsideUpdate = renderer.encodeFrame(for: surface, into: layer)
+        let updateDecline = renderer.lastFrameDecline
+        let isRecheckArmed = surface.isSyncOutputRecheckScheduledForTesting
+        feed(surface.drive, "\u{1b}[?2026l")
+        guard !drewInsideUpdate, updateDecline == .withheld || updateDecline == .blockOpenUnderLock else {
+            return "a tick inside an open synchronized update drew=\(drewInsideUpdate), decline=\(updateDecline.rawValue)"
+        }
+        guard isRecheckArmed else {
+            return "a tick held by an open synchronized update armed no recheck of the hold"
+        }
+        guard encodeAfterFontPreparation(renderer, for: surface, into: layer) else {
+            return "the frame after the synchronized update closed declined: decline=\(renderer.lastFrameDecline.rawValue)"
+        }
+
+        waitForAdmittedFrame(surface)
+        feed(surface.drive, "\u{1b}[?2026h")
+        surface.isDrawingResizeStep = true
+        let drewResizeStep = renderer.encodeFrame(for: surface, into: layer)
+        let resizeDecline = renderer.lastFrameDecline
+        surface.isDrawingResizeStep = false
+        feed(surface.drive, "\u{1b}[?2026l")
+        guard !drewResizeStep, resizeDecline == .blockOpenUnderLock else {
+            return "a resize step inside an open synchronized update drew=\(drewResizeStep), decline=\(resizeDecline.rawValue);"
+                + " it is held under the model lock and nowhere else"
+        }
+        guard encodeAfterFontPreparation(renderer, for: surface, into: layer) else {
+            return "the frame after the resize step's update closed declined: decline=\(renderer.lastFrameDecline.rawValue)"
+        }
+
+        let found = surface.searchScrollbackAndWait("boundary-selection-frame", timeoutMilliseconds: 5_000)
+        guard found.totalMatches > 0 else {
+            return "the search for the boundary frames' text found nothing"
+        }
+        waitForAdmittedFrame(surface)
+        guard encodeAfterFontPreparation(renderer, for: surface, into: layer), surface.didLastFrameDrawSearch else {
+            return "the frame over the search matches drew none: decline=\(renderer.lastFrameDecline.rawValue)"
+        }
+        let presentedBefore = renderer.presentedBoundaryFrameCount
+        let publishedBefore = surface.drive.syncFramePublicationCount
+        guard publishesBoundaryFrame(surface), surface.drive.syncFramePublicationCount > publishedBefore else {
+            return "no capture was published for the search leg"
+        }
+        waitForAdmittedFrame(surface)
+        let drewOverSearch = encodeAfterFontPreparation(renderer, for: surface, into: layer)
+        let tookCapture = renderer.presentedBoundaryFrameCount != presentedBefore
+        let isCaptureWaiting = surface.drive.takeSyncFrame() != nil
+        surface.clearSearch()
+        guard drewOverSearch, !tookCapture, isCaptureWaiting else {
+            return "a view drawing search matches drew=\(drewOverSearch), took the capture=\(tookCapture),"
+                + " left it waiting=\(isCaptureWaiting): it reads the model and leaves the capture"
+        }
+        guard encodeAfterFontPreparation(renderer, for: surface, into: layer) else {
+            return "the frame after the search ended declined: decline=\(renderer.lastFrameDecline.rawValue)"
+        }
+        return nil
+    }
+
+    /// Publishes one capture through the shell: a synchronized update whose
+    /// close the drain captures.
+    ///
+    /// - Parameter surface: The surface, its shell awake.
+    /// - Returns: Whether the shell's update closed within two seconds.
+    private static func publishesBoundaryFrame(_ surface: TerminalSurface) -> Bool {
+        let seenBefore = surface.drive.syncClearSeenCount
+        surface.send("printf '\\033[?2026hboundary-selection-frame\\033[?2026l\\n'\n")
+        let deadline = Date(timeIntervalSinceNow: 2)
+        while surface.drive.syncClearSeenCount == seenBefore, Date() < deadline {
+            RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.02))
+        }
+        return surface.drive.syncClearSeenCount != seenBefore
+    }
+
+    /// Drives synchronized updates through the shell until a boundary frame
+    /// is presented, for up to ten seconds.
+    ///
+    /// - Parameters:
+    ///   - surface: The surface, its shell awake.
+    ///   - renderer: The surface renderer.
+    ///   - layer: The layer to present into.
+    /// - Returns: Whether a boundary frame was presented.
+    private static func presentsBoundaryFrame(
+        _ surface: TerminalSurface,
+        renderer: SurfaceRenderer,
+        layer: CAMetalLayer
+    ) -> Bool {
+        let deadline = Date(timeIntervalSinceNow: 10)
+        while Date() < deadline {
+            _ = publishesBoundaryFrame(surface)
+            let presentedBefore = renderer.presentedBoundaryFrameCount
+            _ = renderer.encodeFrame(for: surface, into: layer)
+            if renderer.presentedBoundaryFrameCount > presentedBefore {
+                return true
+            }
+        }
+        return false
+    }
+
     /// Selects the word under column 2 of a visible row, as a double click
     /// there does.
     ///
@@ -2386,12 +2523,7 @@ enum SurfaceSmoke {
     ) -> Bool {
         let deadline = Date(timeIntervalSinceNow: 10)
         while Date() < deadline {
-            let seenBefore = surface.drive.syncClearSeenCount
-            surface.send("printf '\\033[?2026hboundary-selection-frame\\033[?2026l\\n'\n")
-            let blockDeadline = Date(timeIntervalSinceNow: 2)
-            while surface.drive.syncClearSeenCount == seenBefore, Date() < blockDeadline {
-                RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.02))
-            }
+            _ = publishesBoundaryFrame(surface)
             let selectedBefore = renderer.selectedBoundaryFrameCount
             _ = renderer.encodeFrame(for: surface, into: layer)
             if renderer.selectedBoundaryFrameCount > selectedBefore {
