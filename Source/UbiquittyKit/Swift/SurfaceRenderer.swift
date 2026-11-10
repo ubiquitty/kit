@@ -2126,7 +2126,12 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
         /// A block opened, or the screen was erased, between the published
         /// check and the capture's lock.
         case blockOpenUnderLock
-        case drainSaturated
+        /// No capture was ready; Core serves the view's demand with one, and
+        /// its publication wakes the view.
+        case awaitingCapture
+        /// The view's demand went unserved with no owner turn since it was
+        /// raised; the owner serves it when it turns again.
+        case ownerStalled
         /// A live resize's capture met a whole-screen erase whose redraw the
         /// drain had not yet parsed whole.
         case redrawArriving
@@ -3128,13 +3133,19 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
             return true
         }
 
-        // A hold the coherence rule or an open update puts on the frame is
-        // rechecked when it may release. A saturated drain's next capture is
-        // due inside the publish window, and the link fires again regardless.
+        // A hold the coherence rule, an open update or an arriving redraw puts
+        // on the frame is rechecked when Core says it may release. A frame
+        // awaiting its capture, or an owner that has not turned since the
+        // demand, arms nothing: the capture's publication wakes the view.
         if supply.route == .Declined {
             switch supply.decline {
             case .AwaitingCapture:
-                lastFrameDecline = .drainSaturated
+                lastFrameDecline = .awaitingCapture
+            case .OwnerStalled:
+                lastFrameDecline = .ownerStalled
+            case .RedrawArriving:
+                surface.deferPresentationForArrivingRedraw(askAgainTicks: supply.askAgainTicks)
+                lastFrameDecline = .redrawArriving
             default:
                 surface.deferHeldPresentation(askAgainTicks: supply.askAgainTicks)
                 lastFrameDecline = .withheld
