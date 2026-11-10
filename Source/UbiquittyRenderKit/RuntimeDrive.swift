@@ -1790,6 +1790,44 @@ public final class RuntimeDrive {
         session.takeSyncFrame()
     }
 
+    /// Decides which frame the view presents at this tick, as every frontend
+    /// decides it: the newest frame the drain captured, a read of the model,
+    /// or nothing, and why.
+    ///
+    /// The view's selection is handed to the frames the drain captures from
+    /// here on, and a captured frame's selection is written to the demand's
+    /// spans.
+    ///
+    /// - Parameters:
+    ///   - demand: The view's facts at this tick.
+    ///   - supply: Receives the route, the reason for a decline, when to ask
+    ///     again, and a captured frame's selection.
+    /// - Returns: The captured frame, retained, on the captured route; nil
+    ///   otherwise.
+    // swift-only: the demand carries the selection pointer, which the printer cannot represent
+    package func takeFrame(
+        _ demand: Ubiquitty.Runtime.FrameDemand,
+        _ supply: inout Ubiquitty.Runtime.FrameSupply
+    ) -> Ubiquitty.Rendering.FrameCapture? {
+        session.takeFrame(demand, &supply)
+    }
+
+    /// The live read's own check, under the model lock the caller holds for
+    /// it, after ``takeFrame(_:_:)`` answered the live route: an update the
+    /// parser opened, or a screen it erased, since the published check.
+    ///
+    /// - Parameters:
+    ///   - terminal: The model, borrowed under the caller's lock.
+    ///   - demand: The view's facts at this tick.
+    /// - Returns: Why the read presents nothing, and when to ask again.
+    // swift-only: the demand carries the selection pointer, which the printer cannot represent
+    package func liveReadDecline(
+        _ terminal: Ubiquitty.Terminal,
+        _ demand: Ubiquitty.Runtime.FrameDemand
+    ) -> Ubiquitty.Runtime.LiveReadAnswer {
+        session.liveReadDecline(terminal, demand)
+    }
+
     /// Boundary frames retired before the display promoted them.
     public var syncFrameOverwriteCount: UInt64 { session.syncFrameOverwriteCount() }
 

@@ -581,36 +581,71 @@ extension SurfaceStyle {
     }
 }
 
-// The selection a boundary capture shows. It lives here and not beside the
-// selection model because it reads the drive, and the model compiles apart
-// from RenderKit.
+// The frame decision, with the selection a captured frame shows. It lives here
+// and not beside the selection model because it reads the drive, and the model
+// compiles apart from RenderKit.
 extension SurfaceSelectionModel {
-    /// The selection a boundary capture shows, drawn into ``spanScratch``
-    /// without the model lock.
+    /// Asks Core which frame the view presents at this tick.
     ///
-    /// The drain resolved it when it captured the frame, against the
-    /// terminal the frame froze, by the evaluation the live read runs; Core
-    /// brings the session up to it unless the view moved its selection since
-    /// handing it over. ``visibleEnds`` follows the frame.
+    /// The view's selection is handed over, and a captured frame's selection,
+    /// which the drain resolved when it captured the frame, is written to
+    /// ``spanScratch`` without the model lock. ``visibleEnds`` follows a
+    /// captured frame.
     ///
     /// - Parameters:
-    ///   - capture: The boundary capture the frame presents, still held.
-    ///   - drive: The drive whose slot handed the capture out.
-    /// - Returns: How many spans the frame draws.
-    func spansOverCapture(_ capture: Ubiquitty.Rendering.FrameCapture, drive: RuntimeDrive) -> Int {
-        let capacity = Int(Ubiquitty.Selection.viewportSpanCapacity(capture.rows(), capture.columns()))
+    ///   - drive: The view's drive.
+    ///   - rows: The grid's rows as the published snapshot names them.
+    ///   - columns: The grid's columns as the snapshot names them.
+    ///   - nowTicks: Now, on the 60 Hz monotonic clock.
+    ///   - isResizing: Whether the view is in a live resize.
+    ///   - keepsSearchLive: Whether the view's last frame drew search matches.
+    ///   - supply: Receives Core's answer.
+    /// - Returns: The captured frame, retained, on the captured route; nil
+    ///   otherwise.
+    func takeFrame(
+        drive: RuntimeDrive,
+        rows: Int,
+        columns: Int,
+        nowTicks: UInt32,
+        isResizing: Bool,
+        keepsSearchLive: Bool,
+        supply: inout Ubiquitty.Runtime.FrameSupply
+    ) -> Ubiquitty.Rendering.FrameCapture? {
+        let capacity = max(Int(Ubiquitty.Selection.viewportSpanCapacity(Int32(rows), Int32(columns))), spansNeeded)
         if spanScratch.count < capacity {
             spanScratch = Array(repeating: Ubiquitty.Rendering.SelectionRowSpan(), count: capacity)
         }
-        var ends = Ubiquitty.Selection.ViewportEnds()
-        let answer = spanScratch.withUnsafeMutableBufferPointer { spans in
-            drive.selectionOverCapture(&session.pointee, capture, Ubiquitty.Selection.ViewportSpans(spans), &ends)
+        let capture = spanScratch.withUnsafeMutableBufferPointer { spans in
+            var demand = Ubiquitty.Runtime.FrameDemand()
+            demand.nowTicks = Ubiquitty.Ticks(nowTicks)
+            demand.selection = session
+            demand.selectionSpans = Ubiquitty.Selection.ViewportSpans(spans)
+            demand.isResizing = isResizing
+            demand.keepsSearchLive = keepsSearchLive
+            return drive.takeFrame(demand, &supply)
         }
+        guard supply.route == .Captured, let capture else {
+            return nil
+        }
+        // A capture taken at a grid larger than the snapshot's left spans past
+        // the room: resolved again over the held capture, which copies the
+        // same spans and takes back nothing the first call took.
+        let needed = Int(supply.selection.needed)
+        if needed > spanScratch.count {
+            spansNeeded = needed
+            spanScratch = Array(repeating: Ubiquitty.Rendering.SelectionRowSpan(), count: needed)
+            var ends = Ubiquitty.Selection.ViewportEnds()
+            supply.selection = spanScratch.withUnsafeMutableBufferPointer { spans in
+                drive.selectionOverCapture(&session.pointee, capture, Ubiquitty.Selection.ViewportSpans(spans), &ends)
+            }
+            supply.selectionEnds = ends
+        }
+        let ends = supply.selectionEnds
         visibleEnds =
             ends.isVisible
             ? ((Int(ends.startRow), Int(ends.startColumn)), (Int(ends.endRow), Int(ends.endColumn)))
             : nil
-        return Int(answer.count)
+        return capture
     }
 }
 
@@ -2954,11 +2989,28 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
         // not: a boundary frame is built without the search tiers, so the
         // frame it presents drops every match and leaves the focused match's
         // cells in the retained grid unfilled.
-        surface.selectionModel.withSession { surface.drive.publishSelectionForCaptures(&$0) }
+        //
+        // Core decides the route, as it does for every frontend: the newest
+        // capture, a read of the model, or nothing and why. Resizing does not
+        // wait for quiet output, since a busy program can keep repainting
+        // throughout the drag; an open synchronized update and a repaint still
+        // arriving behind its erase hold it, both judged under the read's
+        // lock below.
         let keepsSearchLive = surface.didLastFrameDrawSearch
-        if !keepsSearchLive, let syncFrame = surface.drive.takeSyncFrame() {
+        let isResizing = surface.isInLiveResizeGesture || surface.isDrawingResizeStep
+        var supply = Ubiquitty.Runtime.FrameSupply()
+        let taken = surface.selectionModel.takeFrame(
+            drive: surface.drive,
+            rows: Int(snapshot.rows),
+            columns: Int(snapshot.columns),
+            nowTicks: TerminalSurface.monotonicTicksNow(),
+            isResizing: isResizing,
+            keepsSearchLive: keepsSearchLive,
+            supply: &supply
+        )
+        if let syncFrame = taken {
             let selection = surface.selectionModel
-            let spanCount = selection.spansOverCapture(syncFrame, drive: surface.drive)
+            let spanCount = Int(supply.selection.count)
             surface.didLastFrameDrawSearch = false
             // Live changes can follow the captured boundary before this display
             // request is consumed. On-demand presentation needs another pass
@@ -3076,26 +3128,17 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
             return true
         }
 
-        // Resizing must not wait for quiet output: a busy program can keep
-        // repainting throughout the drag. Explicit synchronized-output blocks
-        // still hold the live capture, and so does a repaint still arriving
-        // behind its erase, both checked under its model lock below.
-        let isResizing = surface.isInLiveResizeGesture || surface.isDrawingResizeStep
-        if !isResizing, surface.drive.shouldWithholdFrame(nowTicks: TerminalSurface.monotonicTicksNow()) {
-            surface.deferHeldPresentation()
-            lastFrameDecline = .withheld
-            return false
-        }
-
-        // Under a saturated flood the drain publishes each full pass's frame
-        // and the route above presents it. Core says when a tick that found
-        // the slot empty may wait for the next capture instead of reading the
-        // model; the link fires again regardless. A tick holding search
-        // tiers always takes the live capture below: the slot route never
-        // serves it, and skipping it would present nothing for the whole
-        // flood.
-        if !keepsSearchLive, surface.drive.shouldSkipLiveReadForSaturation {
-            lastFrameDecline = .drainSaturated
+        // A hold the coherence rule or an open update puts on the frame is
+        // rechecked when it may release. A saturated drain's next capture is
+        // due inside the publish window, and the link fires again regardless.
+        if supply.route == .Declined {
+            switch supply.decline {
+            case .AwaitingCapture:
+                lastFrameDecline = .drainSaturated
+            default:
+                surface.deferHeldPresentation()
+                lastFrameDecline = .withheld
+            }
             return false
         }
 
@@ -3105,30 +3148,29 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
         var liveFrameDrawsSelection = false
         var lockedStamp: RetainedStamp?
         if let terminal = surface.drive.borrowTerminal() {
-            // The parser can open a block or erase the screen after the
-            // published snapshot check. Recheck under the capture's lock before
-            // consuming damage or cursor state.
-            let nowTicks = TerminalSurface.monotonicTicksNow()
-            let shouldWithhold =
-                isResizing
-                ? Ubiquitty.Modes.SyncOutput.shouldWithholdFrame(terminal, Ubiquitty.Ticks(nowTicks))
-                : surface.drive.shouldWithholdCapture(terminal, nowTicks: nowTicks)
-            if shouldWithhold {
+            // The parser can open an update or erase the screen after the
+            // published check. Core rechecks under the read's lock before it
+            // consumes damage or cursor state. A full-screen program answers
+            // each resize step with an erase and a repaint that reaches the
+            // parser over many reads; a step drawn between them would present
+            // the erased screen, so the previous frame stays on the glass until
+            // the drain has caught up with the repaint.
+            var lockedDemand = Ubiquitty.Runtime.FrameDemand()
+            lockedDemand.nowTicks = Ubiquitty.Ticks(TerminalSurface.monotonicTicksNow())
+            lockedDemand.isResizing = isResizing
+            switch surface.drive.liveReadDecline(terminal, lockedDemand).decline {
+            case .BlockOpenUnderLock:
                 surface.drive.unlockForRead()
                 surface.deferHeldPresentation()
                 lastFrameDecline = .blockOpenUnderLock
                 return false
-            }
-            // A full-screen program answers each step's size with an erase and
-            // a repaint that reaches the parser over many reads. A step drawn
-            // between them would present the erased screen, so the previous
-            // frame stays on the glass until the drain has caught up with the
-            // repaint, which waits for no quiet output.
-            if isResizing, surface.drive.isEraseRedrawArriving(terminal) {
+            case .RedrawArriving:
                 surface.drive.unlockForRead()
                 surface.deferPresentationForArrivingRedraw()
                 lastFrameDecline = .redrawArriving
                 return false
+            default:
+                break
             }
             // The rows the frame shows, read under the lock the capture reads
             // under and by the rule the drain's captures stand by: a view held
