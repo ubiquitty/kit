@@ -439,6 +439,11 @@ jobs:
       - name: App's Apple stages
         working-directory: app
         run: python3 "$CORE_CHECKOUT/Scripts/ci_batteries.py" run apple --source-root "$APP_CHECKOUT" --only setup --only quic --only macos-build --only macos-smokes --only ui-scenarios --only core-frames --only portable-build --only snapshots --only ios-build --only ios-smokes --only ios-sync --only ios-ui
+      # Every tree the app built here compiled against this Kit and its Core
+      # with Apple Clang's ownership analyses on.
+      - name: App compiled with the ownership analysis
+        working-directory: app
+        run: python3 "$CORE_CHECKOUT/Scripts/check-ownership-analysis-on.py" "$(python3 "$CORE_CHECKOUT/Scripts/build_root.py" "$APP_CHECKOUT")"
       - name: Report the app's Apple stages
         if: always()
         working-directory: app
