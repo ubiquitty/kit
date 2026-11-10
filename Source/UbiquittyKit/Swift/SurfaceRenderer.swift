@@ -1113,6 +1113,9 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
     /// Boundary frames committed with a selection drawn over the captured
     /// rows.
     package private(set) var selectedBoundaryFrameCount = 0
+
+    /// Boundary frames committed, with or without a selection over them.
+    package private(set) var presentedBoundaryFrameCount = 0
     private var phaseLogRowSignature = ""
 
     /// The rows of the live grid as Core's one-line signature (see
@@ -3052,6 +3055,7 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
             )
             notePresentedGeometry(for: surface, frame: pending, deviceScale: deviceScale, panOffset: presentation.panOffset)
             surface.didLastFrameDrawSelection = spanCount > 0
+            presentedBoundaryFrameCount += 1
             if spanCount > 0 {
                 selectedBoundaryFrameCount += 1
             }

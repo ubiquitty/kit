@@ -4154,6 +4154,9 @@ public final class TerminalSurface: PlatformView {
     /// checks the change it could not show is still waiting for the reveal.
     package var isFrameOwedForTesting: Bool { isFrameOwed }
 
+    /// Whether a recheck of a held presentation is armed.
+    package var isSyncOutputRecheckScheduledForTesting: Bool { isSyncOutputRecheckScheduled }
+
     /// Whether this pane's frames are being withheld, for a diagnostic.
     package var isFrameDeliveryWithheldForTesting: Bool { frameDelivery == .Withhold }
 
