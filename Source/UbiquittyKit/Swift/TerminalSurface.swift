@@ -4606,11 +4606,12 @@ public final class TerminalSurface: PlatformView {
 
     /// Keeps a withheld live frame owed until output settles or its watchdog expires.
     ///
-    /// Called after releasing the model lock because scheduling reads the hold budget.
-    internal func deferHeldPresentation() {
+    /// - Parameter askAgainTicks: When Core said to ask again, in ticks from
+    ///   now; zero when Core wakes the view itself.
+    internal func deferHeldPresentation(askAgainTicks: UInt32) {
         withheldForSyncOutputCount += 1
         isFrameOwed = true
-        scheduleSyncOutputRecheck()
+        scheduleSyncOutputRecheck(afterTicks: askAgainTicks)
     }
 
     /// Keeps a live resize's frame owed while the redraw behind a
@@ -4618,12 +4619,14 @@ public final class TerminalSurface: PlatformView {
     ///
     /// The drain's delivery of the rest of the redraw asks for the frame; the
     /// recheck stands in for a redraw that stops short, which the erase hold's
-    /// settle or watchdog then releases. Called after releasing the model lock
-    /// because scheduling reads the hold budget.
-    internal func deferPresentationForArrivingRedraw() {
+    /// settle or watchdog then releases.
+    ///
+    /// - Parameter askAgainTicks: When Core said to ask again, in ticks from
+    ///   now; zero when Core wakes the view itself.
+    internal func deferPresentationForArrivingRedraw(askAgainTicks: UInt32) {
         deferredForArrivingRedrawCount += 1
         isFrameOwed = true
-        scheduleSyncOutputRecheck()
+        scheduleSyncOutputRecheck(afterTicks: askAgainTicks)
     }
 
     /// Ages the held block once its budget can have run out, and re-marks
@@ -4637,11 +4640,15 @@ public final class TerminalSurface: PlatformView {
     /// nothing, and a hold that only a draw could expire would outlive the
     /// display. Core names the delay, so one shot lands exactly when the
     /// budget is spent instead of polling towards it.
-    private func scheduleSyncOutputRecheck() {
+    ///
+    /// - Parameter afterTicks: The delay Core named with the frame it
+    ///   declined, in ticks from now, or nil to ask Core for the hold's
+    ///   remaining budget. Zero arms nothing: Core wakes the view itself.
+    private func scheduleSyncOutputRecheck(afterTicks: UInt32? = nil) {
         guard !isSyncOutputRecheckScheduled else {
             return
         }
-        let ticks = drive.presentationHoldTicksRemaining(nowTicks: TerminalSurface.monotonicTicksNow())
+        let ticks = afterTicks ?? drive.presentationHoldTicksRemaining(nowTicks: TerminalSurface.monotonicTicksNow())
         guard ticks > 0 else {
             return
         }
