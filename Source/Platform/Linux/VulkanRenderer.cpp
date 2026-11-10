@@ -14,6 +14,7 @@
 #include "Core/Preferences/RenderStyle.h"
 #include "Core/Rendering/CellInstanceBuilder.h"
 #include "Core/Rendering/FrameDamage.h"
+#include "Core/Rendering/ImageQuads.h"
 #include "Core/Rendering/OverlayBatching.h"
 #include "Core/Screen/Addressing.h"
 #include "Core/Screen/ScrollSearch.h"
@@ -2642,10 +2643,14 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
     // SoftwareRenderer::resolveImageQuads resolves: the placements through the
     // shared helper (origin 0,0, the renderer's cell, this viewOffset), then a
     // quad for each placeholder cell this frame captured, in the capacity the
-    // capture and the macOS arm resolve into, ordered once with a STABLE sort
-    // (ties keep resolve order). The instances before `imageUnderCount` draw
-    // beneath the text and the rest over it; no instance means no image pass.
-    Image::ImageQuad quads[Image::maxTerminalImagePlacementCount];
+    // capture and the macOS arm resolve into (`Rendering::imageQuadCapacity`),
+    // ordered once with a STABLE sort (ties keep resolve order). The instances
+    // before `imageUnderCount` draw beneath the text and the rest over it; no
+    // instance means no image pass.
+    const std::size_t quadCapacity = Rendering::imageQuadCapacity({ columns, rows });
+    if (m_imageQuads.size() < quadCapacity)
+        m_imageQuads.resize(quadCapacity);
+    const std::span<Image::ImageQuad> quads { m_imageQuads.data(), quadCapacity };
     const int imageCount = Image::maxTerminalImageCount; // the Terminal's image table is a fixed-size array
     const std::span<const Image::TerminalImage> storedImages { term->images.stored.data(), static_cast<std::size_t>(imageCount) };
     const FloatSize imageCell { static_cast<float>(m_cellWidth), static_cast<float>(m_cellHeight) };
@@ -2654,7 +2659,7 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
         { columns, rows }, imageCell,
         /*origin=*/ {}, viewOffset, quads, /*fitOptions=*/ {},
         term->screens.isUsingAlternateScreen);
-    if (quadCount < Image::maxTerminalImagePlacementCount) {
+    if (static_cast<std::size_t>(quadCount) < quads.size()) {
         const Kitty::PlaceholderGrid placeholderGrid {
             .cells = { in.cells, static_cast<std::size_t>(rows) * static_cast<std::size_t>(columns) },
             .size = { columns, rows },
@@ -2663,7 +2668,7 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
             .publishedCellPixels = { term->cellPixelWidth, term->cellPixelHeight },
         };
         quadCount += Kitty::resolvePlaceholders(placeholderGrid, storedImages, imageCell, /*origin=*/ {},
-            std::span { quads }.subspan(static_cast<std::size_t>(quadCount)));
+            quads.subspan(static_cast<std::size_t>(quadCount)));
     }
 
     std::vector<ImageInstance> imageInstances;
@@ -2672,7 +2677,7 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
     if (quadCount > 0) {
         // The split is counted below in instances rather than taken from the
         // order: a quad whose texture is missing drops out of the instances.
-        (void)Ubiquitty::Image::orderImageQuadsForDrawing({ quads, static_cast<std::size_t>(quadCount) });
+        (void)Ubiquitty::Image::orderImageQuadsForDrawing(quads.first(static_cast<std::size_t>(quadCount)));
 
         if (!ensureImagePipeline())
             return false;
@@ -2685,11 +2690,17 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
         // waits on the queue before returning, so nothing is executing here.
         // The eviction can destroy at once rather than idling the device to
         // find out.
-        std::array<std::uint32_t, Image::maxTerminalImagePlacementCount> filteredImageIDs {};
+        // Each filtered image once: a quad names one of the stored images, so
+        // the distinct ids fit the image table however many quads draw them.
+        std::array<std::uint32_t, Image::maxTerminalImageCount> filteredImageIDs {};
         std::size_t filteredCount = 0;
         for (int i = 0; i < quadCount; ++i) {
-            if (quads[i].filter == Image::ImageFilter::Smooth)
-                filteredImageIDs[filteredCount++] = quads[i].imageID;
+            const Image::ImageQuad& quad = quads[static_cast<std::size_t>(i)];
+            if (quad.filter != Image::ImageFilter::Smooth)
+                continue;
+            const auto listed = std::span { filteredImageIDs }.first(filteredCount);
+            if (std::ranges::find(listed, quad.imageID) == listed.end() && filteredCount < filteredImageIDs.size())
+                filteredImageIDs[filteredCount++] = quad.imageID;
         }
         if (!m_imageTextures.sync(m_device, m_physical, m_queue, m_commandPool, term->images.stored.data(), imageCount,
                 VulkanImageTextures::QueueState::Idle, { filteredImageIDs.data(), filteredCount }))
@@ -2698,7 +2709,7 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
         imageInstances.reserve(static_cast<std::size_t>(quadCount));
         imageDrawIDs.reserve(static_cast<std::size_t>(quadCount));
         for (int i = 0; i < quadCount; ++i) {
-            const Image::ImageQuad& q = quads[i];
+            const Image::ImageQuad& q = quads[static_cast<std::size_t>(i)];
             // Skip a quad whose source texture failed to upload (no descriptor).
             if (m_imageTextures.descriptorFor(q.imageID) == VK_NULL_HANDLE)
                 continue;

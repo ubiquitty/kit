@@ -40,7 +40,9 @@ package final class SurfaceImageStore {
 
     private let device: MTLDevice
     private var entries: [UInt32: Entry] = [:]
-    private var quadScratch: [Ubiquitty.Image.ImageQuad]
+    /// The quads a frame resolves into, grown to the largest frame's need
+    /// and never shrunk.
+    private var quadScratch: [Ubiquitty.Image.ImageQuad] = []
     private var quads: GrowableBuffer
     private var textures: [MTLTexture?] = []
     private var isFiltered: [Bool] = []
@@ -75,9 +77,15 @@ package final class SurfaceImageStore {
             growth: .geometric,
             stride: MemoryLayout<Ubiquitty.Rendering.ImageInstance>.stride
         )
-        self.quadScratch = [Ubiquitty.Image.ImageQuad](
-            repeating: Ubiquitty.Image.ImageQuad(),
-            count: Int(Ubiquitty.Image.maxTerminalImagePlacementCount)
+    }
+
+    /// Grows the scratch to hold `count` quads.
+    ///
+    /// - Parameter count: The quads the frame may resolve.
+    private func reserveQuadScratch(_ count: Int) {
+        guard quadScratch.count < count else { return }
+        quadScratch.append(
+            contentsOf: repeatElement(Ubiquitty.Image.ImageQuad(), count: count - quadScratch.count)
         )
     }
 
@@ -119,6 +127,7 @@ package final class SurfaceImageStore {
     package func layer(for capture: Ubiquitty.Rendering.FrameCapture) -> ImageLayer? {
         let capturedQuads = capture.imageQuads()
         let count = capturedQuads.count
+        reserveQuadScratch(count)
         for (index, quad) in capturedQuads.enumerated() {
             quadScratch[index] = quad
         }
@@ -366,6 +375,14 @@ package final class SurfaceImageStore {
         // which images the frame filters decides which textures carry levels.
         var resolved = 0
         if frame.hasPlacements, hasCell {
+            // Every placement and every placeholder cell the grid shows.
+            reserveQuadScratch(
+                Int(
+                    Ubiquitty.Rendering.imageQuadCapacity(
+                        Ubiquitty.GridSize(columns: terminal.columns, rows: terminal.rows)
+                    )
+                )
+            )
             resolved = quadScratch.withUnsafeMutableBufferPointer { scratch in
                 Int(
                     Ubiquitty.Rendering.collectImageQuadsOrdered(

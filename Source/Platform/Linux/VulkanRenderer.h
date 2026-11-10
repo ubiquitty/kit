@@ -10,6 +10,7 @@
 // composites, drawing it with instanced pipelines over a VulkanGlyphAtlas — the
 // CPU<->GPU oracle.
 
+#include "Core/Image/ImagePlacement.h"
 #include "Core/Rendering/CellInstance.h"
 #include "Core/Rendering/FocusedMatchBounce.h"
 #include "Core/Rendering/FrameDamage.h"
@@ -518,6 +519,9 @@ private:
     std::size_t m_imageInstanceCapacity = 0; // ImageInstance slots
     VulkanImageTextures m_imageTextures;
     bool m_imageTexturesCreated = false;
+    // The quads a frame resolves into, grown to the largest grid's
+    // `Rendering::imageQuadCapacity` and never shrunk.
+    std::vector<Image::ImageQuad> m_imageQuads;
 
     // Overlay pass (cursor + translucent selection), drawn in m_imageRenderPass
     // with the grid result bound as input attachment 0 (set 0) so the shader
