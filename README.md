@@ -5,7 +5,7 @@
 
 | You are building | Reach for | Repository |
 |---|---|---|
-| A terminal view to drop into a macOS or iOS app | UbiquittyKit's Swift `TerminalSurface` and Metal renderer | [ubiquitty-kit](https://github.com/ubiquitty/kit) |
+| A terminal view to drop into a macOS or iOS app | UbiquittyKit's `TerminalView`, or `Terminal` in SwiftUI | [ubiquitty-kit](https://github.com/ubiquitty/kit) |
 | Linux rendering, font rasterization or GTK integration | the Vulkan, FreeType and software renderers and the GTK platform libraries | [ubiquitty-kit](https://github.com/ubiquitty/kit) |
 | A renderer for a texture or layer your UI presents | UbiquittyRenderKit (Metal) or the Vulkan renderer's exportable frames | [ubiquitty-kit](https://github.com/ubiquitty/kit) |
 | Your own UI, drawing from the portable terminal model | Core's C++23 API, session facade and render plan | [ubiquitty-core](https://github.com/ubiquitty/core) |
@@ -17,10 +17,11 @@ Ubiquitty is three repositories. Each depends only on the ones below it:
 
 ## What this repository holds
 
-**UbiquittyKit** is the terminal view for Apple platforms. `TerminalSurface`
-owns a terminal session's input, selection, accessibility and presentation, and
-draws it with the Metal renderer, **UbiquittyRenderKit** (Swift, with the shader
-library `UBShaders.metal`). It ships as `UbiquittyKit.framework`: a consumer
+**UbiquittyKit** is the terminal view for Apple platforms. `TerminalView` is
+the view an app drops in, and `Terminal` the same view in SwiftUI. Beneath them,
+`TerminalSurface` owns a terminal session's input, selection, accessibility and
+presentation, and draws it with the Metal renderer, **UbiquittyRenderKit**
+(Swift, with the shader library `UBShaders.metal`). It ships as `UbiquittyKit.framework`: a consumer
 imports one Swift module and needs no C++ interoperability flag, module map or
 include path, because the module imports Core internally and exposes no C++
 type. The static modules an application links are the same sources.
@@ -48,24 +49,22 @@ Apple hosts use the Swift view API. Linux hosts link the C++ rendering and
 platform libraries above and supply their own application shell. Portable
 hosts use [Core's C++23 embedding API](https://github.com/ubiquitty/core/blob/main/Docs/libubiquittycore.md).
 
-## Embed `TerminalSurface`
+## Embed `TerminalView`
 
-`TerminalSurface` is the view: an `NSView` on macOS and a `UIView` on iOS. Built
-with a font, it creates its own Metal device and renderer, and in a window it
-owns its Metal layer and its display link, takes the keyboard and the pointer,
-and keeps its selection and accessibility. Build `UbiquittyKit.framework`
-(below), add it to the app, import it, and put the view where the terminal goes:
+`TerminalView` is the view: an `NSView` on macOS and a `UIView` on iOS that sets
+itself up. It builds its own session and Metal renderer in the configured font
+and theme, fits its grid to its bounds, and in a window takes the keyboard and
+the pointer and keeps its selection and accessibility. Build
+`UbiquittyKit.framework` (below), add it to the app, import it, and put the view
+where the terminal goes:
 
 ```swift
 import AppKit
 import UbiquittyKit
 
 @MainActor
-func addTerminal(to container: NSView) -> TerminalSurface? {
-    guard let terminal = TerminalSurface(rows: 24, columns: 80, fontFamily: "Menlo", pointSize: 13) else {
-        return nil
-    }
-    terminal.frame = container.bounds
+func addTerminal(to container: NSView) -> TerminalView {
+    let terminal = TerminalView(frame: container.bounds)
     terminal.autoresizingMask = [.width, .height]
     container.addSubview(terminal)
     terminal.launchShell()
@@ -73,12 +72,60 @@ func addTerminal(to container: NSView) -> TerminalSurface? {
 }
 ```
 
-Naming the font is what makes the view ready to draw: `TerminalSurface(rows:columns:)`
-alone is a complete terminal with no renderer, which paints nothing. The grid
-follows the view's size, and `terminalSurface(_:didResizeGridTo:columns:)` on the
-view's observer reports each change. `launchShell()` runs the user's login shell
-on the view's pseudo-terminal; `feed(_:)` writes bytes to the screen for a host
-that supplies its own; `attachRemote` shows a session a host daemon keeps.
+On iOS it is the same view, a `UIView`. An iOS app starts no local program, so
+it shows a session that arrives over a connection: it feeds the bytes its own
+connection receives, and hears what the person types as
+`terminalSurface(_:didTransmit:count:)` on the view's observer:
+
+```swift
+import UIKit
+import UbiquittyKit
+
+@MainActor
+func addTerminal(to container: UIView, observer: TerminalSurfaceObserver) -> TerminalView {
+    let terminal = TerminalView(frame: container.bounds)
+    terminal.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+    terminal.observer = observer
+    container.addSubview(terminal)
+    terminal.feed(Data("Connected.\r\n".utf8))
+    return terminal
+}
+```
+
+In SwiftUI it is `Terminal`, with the font, the theme and the callbacks as
+modifiers:
+
+```swift
+import SwiftUI
+import UbiquittyKit
+
+struct ContentView: View {
+    @State private var title = ""
+
+    var body: some View {
+        Terminal()
+            .terminalFont("Menlo", size: 13)
+            .onTerminalTitleChange { title = $0 }
+            .navigationTitle(title)
+    }
+}
+```
+
+The font, its size and the theme are Core's configuration unless the host names
+others; the theme follows the light or dark appearance as Ubiquitty's own
+windows do. On macOS `launchShell()` runs the user's login shell and
+`launchCommand(_:)` one command line; `feed(_:)` writes bytes to the screen for
+a host that supplies its own, and `attachRemote` shows a session a host daemon
+keeps. `Terminal()`, `Terminal(command:)` and `Terminal(feeding:)` are the
+first three in SwiftUI. The
+view's `surface` is the `TerminalSurface` underneath, for everything else: the
+selection, the scrollback, search, the program it runs and the colors it draws.
+
+`TerminalSurface` is the lower-level view `TerminalView` holds, for a host that
+names its own font and grid or shares one renderer between panes.
+`TerminalSurface(rows:columns:fontFamily:pointSize:)` builds one ready to draw,
+and `terminalSurface(_:didResizeGridTo:columns:)` on its observer reports each
+grid its bounds give it.
 
 ### Draw into your own layer
 
@@ -109,6 +156,8 @@ func drawHello(in layer: CAMetalLayer) -> Bool {
 ```
 
 The Swift API is documented on
+[`TerminalView`](Source/UbiquittyKit/Swift/TerminalView.swift),
+[`Terminal`](Source/UbiquittyKit/Swift/Terminal.swift),
 [`TerminalSurface`](Source/UbiquittyKit/Swift/TerminalSurface.swift) and its
 [renderer factory](Source/UbiquittyKit/Swift/TerminalSurface+Factory.swift).
 [The Swift renderer](Docs/swift-renderer.md) describes the rendering backend;
