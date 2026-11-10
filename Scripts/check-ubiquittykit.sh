@@ -1535,6 +1535,43 @@ func decodedFromArchive(frame: CGRect) -> TerminalView? {
     return unarchiver.decodeObject(forKey: NSKeyedArchiveRootObjectKey) as? TerminalView
 }
 
+/// The default background a surface draws, as its channels.
+@MainActor
+func background(_ surface: TerminalSurface) -> [UInt8] {
+    let color = surface.colors.background
+    return [color.red, color.green, color.blue]
+}
+
+/// A live view archived whole and read back, as a host that archives its
+/// window's views does.
+@MainActor
+func roundTripped<View: NSView>(_ view: View) -> View? {
+    guard let data = try? NSKeyedArchiver.archivedData(withRootObject: view, requiringSecureCoding: false),
+        let unarchiver = try? NSKeyedUnarchiver(forReadingFrom: data)
+    else {
+        return nil
+    }
+    unarchiver.requiresSecureCoding = false
+    return unarchiver.decodeObject(forKey: NSKeyedArchiveRootObjectKey) as? View
+}
+
+/// Whether `view` holds exactly its own surface, linked to it.
+@MainActor
+func holdsOnlyItsSurface(_ view: TerminalView) -> Bool {
+    view.surface?.renderer != nil && view.subviews.count == 1 && view.subviews.first === view.surface
+        && view.surface?.superview === view
+}
+
+/// Launches what `launch` starts in a view out of any window, where nothing
+/// holds what arrives, and waits for `line` on its screen.
+///
+/// - Returns: Whether the launch started and the line arrived.
+@MainActor
+func showsLine(_ line: String, in view: TerminalView, after launch: (TerminalView) -> Bool) -> Bool {
+    guard let surface = view.surface, launch(view) else { return false }
+    return spin(seconds: 10) { screenLines(surface).contains(line) }
+}
+
 let passed = MainActor.assumeIsolated { () -> Bool in
     let application = NSApplication.shared
     application.setActivationPolicy(.accessory)
@@ -1570,6 +1607,10 @@ let passed = MainActor.assumeIsolated { () -> Bool in
         return refuse("the grid does not fill the view's \(view.bounds.size); the observer heard \(heard)")
     }
     let configuredGrid = report.grid ?? (0, 0)
+
+    guard window.makeFirstResponder(view), window.firstResponder === surface else {
+        return refuse("making the view first responder left \(String(describing: window.firstResponder)) holding the keyboard")
+    }
 
     guard view.launchShell() else {
         return refuse("no shell")
@@ -1640,9 +1681,114 @@ let passed = MainActor.assumeIsolated { () -> Bool in
         return refuse("nil did not return a light window to the configured light theme")
     }
 
+    // A colour a program sets stands through an appearance change that
+    // resolves to the theme already drawn, and through assigning the theme
+    // the view already holds; a change to the other theme resets it.
+    let programBackground: [UInt8] = [0x12, 0x34, 0x56]
+    view.feed(Data("\u{1b}]11;rgb:12/34/56\u{7}".utf8))
+    guard spin(seconds: 2, until: { background(surface) == programBackground }) else {
+        return refuse("OSC 11 did not set the background: \(background(surface))")
+    }
+    window.appearance = NSAppearance(named: .vibrantLight)
+    _ = spin(seconds: 0.5) { false }
+    view.themeName = nil
+    guard background(surface) == programBackground else {
+        return refuse("a light-to-light appearance change or a nil theme over nil reset a program's background to \(background(surface))")
+    }
+    window.appearance = NSAppearance(named: .darkAqua)
+    guard spin(seconds: 2, until: { drawsDarkTheme(surface) == true && background(surface) != programBackground }) else {
+        return refuse("a light-to-dark appearance change kept \(surface.currentThemeName ?? "no theme") and \(background(surface))")
+    }
+    let followedTheme = surface.currentThemeName
+    let followedBackground = background(surface)
+    view.themeName = "Ubiquitty No Such Theme"
+    guard surface.currentThemeName == followedTheme, background(surface) == followedBackground else {
+        return refuse("an unknown theme moved the colours to \(surface.currentThemeName ?? "no theme")")
+    }
+    view.themeName = nil
+
+    // Families: a named one is drawn, an unknown one is drawn in a
+    // substitute, nil returns to Core's; a family and size set together
+    // refit the grid once.
+    let coreFamily = surface.resolvedFontFamily
+    view.fontFamily = "Menlo"
+    guard surface.resolvedFontFamily == "Menlo" else {
+        return refuse("fontFamily Menlo drew \(surface.resolvedFontFamily ?? "nothing")")
+    }
+    view.fontFamily = "Ubiquitty No Such Family"
+    guard surface.renderer != nil, let substitute = surface.resolvedFontFamily, substitute != "Ubiquitty No Such Family" else {
+        return refuse("an unknown family drew \(surface.resolvedFontFamily ?? "nothing")")
+    }
+    view.fontFamily = nil
+    guard surface.resolvedFontFamily == coreFamily else {
+        return refuse("a nil family drew \(surface.resolvedFontFamily ?? "nothing"), not Core's \(coreFamily ?? "nothing")")
+    }
+    let gridsBeforeFont = report.grids.count
+    view.setFont(family: "Menlo", size: configuredSize * 1.5)
+    view.setFont(family: "Menlo", size: configuredSize * 1.5)
+    _ = spin(seconds: 0.5) { false }
+    guard report.grids.count == gridsBeforeFont + 1, renderer.pointSize == configuredSize * 1.5 else {
+        return refuse("setFont(family:size:) twice over refit the grid \(report.grids.count - gridsBeforeFont) times at \(renderer.pointSize) points")
+    }
+    view.setFont(family: nil, size: nil)
+    guard spin(seconds: 2, until: { report.grid.map { $0 == fittedGrid } ?? false }) else {
+        return refuse("Core's font did not restore \(fittedGrid.rows)x\(fittedGrid.columns)")
+    }
+
     view.send("exit\r")
     guard spin(seconds: 10, until: { report.hasExited }) else {
         return refuse("the observer the view forwards never heard the shell exit")
+    }
+
+    // A command line and a program in views out of any window; each view runs
+    // one program, and a refused launch leaves a view free to run one.
+    let commandView = TerminalView()
+    guard showsLine("command-ran", in: commandView, after: { $0.launchCommand("printf 'command-%s\\n' ran; sleep 5") }) else {
+        return refuse("launchCommand showed no line: \(commandView.surface.map(screenLines) ?? [])")
+    }
+    guard !commandView.launchShell(), !commandView.launchCommand("true"),
+        !commandView.launch(executableURL: URL(fileURLWithPath: "/usr/bin/true"))
+    else {
+        return refuse("a view running a command launched a second program")
+    }
+    let programView = TerminalView()
+    let argumentScript = "printf 'argv:%s:%s:%s\\n' \"$1\" \"$UBQ_PROBE\" \"$(pwd -P)\""
+    guard showsLine("argv:one two:present:/usr/bin", in: programView, after: {
+            $0.launch(
+                executableURL: URL(fileURLWithPath: "/bin/sh"),
+                arguments: ["-c", argumentScript, "sh", "one two"],
+                environment: ["UBQ_PROBE": "present"],
+                currentDirectoryURL: URL(fileURLWithPath: "/usr/bin")
+            )
+        })
+    else {
+        return refuse("the program form showed \(programView.surface.map(screenLines) ?? []), not its arguments, variable and directory")
+    }
+    let refusingView = TerminalView()
+    guard !refusingView.launchCommand("printf a\u{0}b"),
+        !refusingView.launch(executableURL: URL(fileURLWithPath: "/bin/echo"), arguments: ["a\u{0}b"]),
+        !refusingView.launch(executableURL: URL(fileURLWithPath: "/bin/echo"), environment: ["A=B": "c"]),
+        !refusingView.launch(executableURL: URL(string: "https://example.com/echo")!),
+        refusingView.launchCommand("true")
+    else {
+        return refuse("a NUL, a name holding =, or a URL that is not a file was launched, or its refusal used the view up")
+    }
+
+    // A live view archived and read back comes back with a session of its
+    // own and no placeholder where the surface stood.
+    guard let restored = roundTripped(view), holdsOnlyItsSurface(restored), restored.frame.size == view.frame.size else {
+        return refuse("a live view archived and decoded did not come back with one surface of its own")
+    }
+    let container = NSView(frame: CGRect(x: 0, y: 0, width: 400, height: 300))
+    container.addSubview(NSTextField(labelWithString: "beside"))
+    container.addSubview(TerminalView(frame: CGRect(x: 0, y: 40, width: 400, height: 260)))
+    container.addSubview(NSButton(title: "after", target: nil, action: nil))
+    guard let restoredContainer = roundTripped(container), restoredContainer.subviews.count == 3,
+        restoredContainer.subviews.allSatisfy({ $0.superview === restoredContainer }),
+        let nested = restoredContainer.subviews.first(where: { $0 is TerminalView }) as? TerminalView,
+        holdsOnlyItsSurface(nested)
+    else {
+        return refuse("a view archived among others did not come back in its place with a surface of its own")
     }
 
     guard let decoded = decodedFromArchive(frame: CGRect(x: 0, y: 0, width: 320, height: 200)) else {
@@ -1655,7 +1801,8 @@ let passed = MainActor.assumeIsolated { () -> Bool in
     print(
         "terminal-view-consumer: TerminalView() filled \(configuredGrid.rows)x\(configuredGrid.columns) and then "
             + "\(fittedGrid.rows)x\(fittedGrid.columns) cells, drew \(textInk) inked pixels in the shell's line, "
-            + "followed the appearance and kept a chosen theme"
+            + "followed the appearance and kept a chosen theme and a program's colours, launched a command and "
+            + "a program, refused the malformed, and came back from an archive"
     )
     return true
 }
@@ -1672,13 +1819,18 @@ xcrun swiftc "$HOST_DIR/terminal-view.swift" \
 run_consumer "$HOST_DIR/terminal-view-consumer"
 echo "check-ubiquittykit: ok (TerminalView() in a window filled its bounds, drew its shell's line, followed the window's appearance and size, and decoded as a nib's view)"
 
-# The SwiftUI view, hosted in a window as an AppKit app hosts SwiftUI. One
-# Terminal runs a command that sets a title and prints a line, and must report
-# the title and the exit through its modifiers and keep the line on screen;
-# another runs nothing and must show what the host writes to its stream. Once
-# both are up, the host's state names a font size and a theme for the second
-# one, which must draw them while the first keeps the configured ones, and then
-# names neither, which must return the second to the configured ones.
+# The SwiftUI view, hosted in a window as an AppKit app hosts SwiftUI. A
+# command's title and exit must reach its modifiers, after the update that
+# raised them, and a title action given after the terminal was made must hear
+# the title standing. A command line holding a NUL must report a failed
+# launch. A view the host owns must keep its session, its screen and its
+# observer through a change of identity, show the bytes the host feeds it,
+# and hand what is typed into it to the input modifier; a terminal that owns
+# its session must start afresh under a new identity and let the old one go.
+# A font and theme the host's state names must be drawn by the terminal they
+# are given to and not its sibling, then given back; a theme given to a
+# container must reach both terminals in it; and a colour a program set must
+# stand through an update that names nothing new.
 cat > "$HOST_DIR/swiftui.swift" <<'EOF'
 import AppKit
 import Combine
@@ -1690,18 +1842,25 @@ import UbiquittyKit
 @MainActor
 final class Heard {
     var titles: [String] = []
+    var lateTitles: [String] = []
     var exits = 0
+    var launchFailures = 0
+    var input = Data()
 }
 
-/// The font size and theme the host's state names for the fed terminal.
+/// The state the host's view reads.
 final class Choice: ObservableObject {
     @Published var fontSize: CGFloat?
     @Published var themeName: String?
+    @Published var isListeningForLateTitle = false
+    @Published var ownedGeneration = 0
+    @Published var hostedGeneration = 0
+    @Published var unrelated = 0
 }
 
 struct Panes: View {
     let heard: Heard
-    let output: AsyncStream<Data>
+    let hosted: TerminalView
     @ObservedObject var choice: Choice
 
     var body: some View {
@@ -1709,9 +1868,20 @@ struct Panes: View {
             Terminal(command: "printf '\\033]0;swiftui-title\\007'; printf 'swiftui-%s\\n' command; sleep 1")
                 .onTerminalTitleChange { heard.titles.append($0) }
                 .onTerminalExit { heard.exits += 1 }
-            Terminal(feeding: output)
-                .terminalFont(size: choice.fontSize)
-                .terminalTheme(choice.themeName)
+            Terminal(command: "printf '\\033]0;late-title\\007'; printf 'late-%s\\n' set; sleep 30")
+                .onTerminalTitleChange(choice.isListeningForLateTitle ? { heard.lateTitles.append($0) } : nil)
+            Terminal(command: "printf a\u{0}b")
+                .onTerminalLaunchFailure { heard.launchFailures += 1 }
+            VStack(spacing: 0) {
+                Terminal(hosted)
+                    .id(choice.hostedGeneration)
+                    .terminalFont(size: choice.fontSize)
+                    .onTerminalInput { heard.input.append($0) }
+                Terminal(command: "printf 'owned-%s\\n' \"$$\"; sleep 30")
+                    .id(choice.ownedGeneration)
+                Text("unrelated \(choice.unrelated)")
+            }
+            .terminalTheme(choice.themeName)
         }
     }
 }
@@ -1732,30 +1902,51 @@ func spin(seconds: Double, until isDone: () -> Bool) -> Bool {
 }
 
 /// Every TerminalView under `view`.
+///
+/// In a pool of its own: the subview arrays AppKit hands back are autoreleased,
+/// and this program's top level never drains a pool, so without one every
+/// view a lookup passed over would stay alive to the end.
 @MainActor
 func terminalViews(in view: NSView) -> [TerminalView] {
-    (view as? TerminalView).map { [$0] } ?? view.subviews.flatMap { terminalViews(in: $0) }
+    autoreleasepool {
+        (view as? TerminalView).map { [$0] } ?? view.subviews.flatMap { terminalViews(in: $0) }
+    }
 }
 
 /// Turns the run loop until `isDone` answers true or the time runs out,
-/// hiding and showing the surface each half second that passes without.
+/// hiding and showing every terminal under `root` each half second that
+/// passes without.
 ///
 /// The window is off every screen, so the window system reports it covered,
 /// and a covered surface holds what arrives until an edge shows it. The edge
 /// is made here, as the window consumer makes it.
 @MainActor
-func spinRevealing(_ surface: TerminalSurface, seconds: Double, until isDone: () -> Bool) -> Bool {
+func spinRevealing(_ root: NSView, seconds: Double, until isDone: () -> Bool) -> Bool {
     let deadline = Date(timeIntervalSinceNow: seconds)
     while !spin(seconds: 0.5, until: isDone), Date() < deadline {
-        surface.isHidden = true
-        surface.isHidden = false
+        for terminal in terminalViews(in: root) {
+            terminal.surface?.isHidden = true
+            terminal.surface?.isHidden = false
+        }
     }
     return isDone()
+}
+
+/// The first terminal under `root` whose screen holds `text`.
+@MainActor
+func terminal(in root: NSView, showing text: String) -> TerminalView? {
+    terminalViews(in: root).first { screenText($0).contains(text) }
 }
 
 @MainActor
 func screenText(_ view: TerminalView) -> String {
     view.surface?.accessibilityValue() as? String ?? ""
+}
+
+@MainActor
+func background(_ view: TerminalView) -> [UInt8] {
+    guard let color = view.surface?.colors.background else { return [] }
+    return [color.red, color.green, color.blue]
 }
 
 let passed = MainActor.assumeIsolated { () -> Bool in
@@ -1765,10 +1956,13 @@ let passed = MainActor.assumeIsolated { () -> Bool in
 
     let heard = Heard()
     let choice = Choice()
-    let (output, continuation) = AsyncStream.makeStream(of: Data.self)
-    let hosting = NSHostingView(rootView: Panes(heard: heard, output: output, choice: choice))
+    let hosted = TerminalView()
+    guard let hostedSurface = hosted.surface, let hostedRenderer = hostedSurface.renderer else {
+        return refuse("no hosted view with a renderer")
+    }
+    let hosting = NSHostingView(rootView: Panes(heard: heard, hosted: hosted, choice: choice))
     let window = NSWindow(
-        contentRect: CGRect(x: -4000, y: -4000, width: 640, height: 480),
+        contentRect: CGRect(x: -4000, y: -4000, width: 640, height: 960),
         styleMask: [.borderless],
         backing: .buffered,
         defer: false
@@ -1778,56 +1972,130 @@ let passed = MainActor.assumeIsolated { () -> Bool in
     window.orderFrontRegardless()
     defer { window.orderOut(nil) }
 
-    guard spin(seconds: 5, until: { terminalViews(in: hosting).count == 2 }) else {
-        return refuse("SwiftUI made \(terminalViews(in: hosting).count) terminal views, not 2")
+    guard spin(seconds: 5, until: { terminalViews(in: hosting).count == 5 }) else {
+        return refuse("SwiftUI made \(terminalViews(in: hosting).count) terminal views, not 5")
     }
+
+    // A command's title and exit, and a failed launch.
     guard spin(seconds: 10, until: { heard.exits == 1 }) else {
         return refuse("the command's exit reached onTerminalExit \(heard.exits) times")
     }
     guard heard.titles.contains("swiftui-title") else {
         return refuse("onTerminalTitleChange heard \(heard.titles), not the command's title")
     }
-    let views = terminalViews(in: hosting)
-    guard let command = views.first(where: { screenText($0).contains("swiftui-command") }),
-        let commandSurface = command.surface, let commandRenderer = commandSurface.renderer,
-        commandRenderer.presentedGeometry(for: commandSurface) != nil
+    guard spinRevealing(hosting, seconds: 5, until: { terminal(in: hosting, showing: "swiftui-command") != nil }),
+        let command = terminal(in: hosting, showing: "swiftui-command"), let commandSurface = command.surface,
+        let commandRenderer = commandSurface.renderer, commandRenderer.presentedGeometry(for: commandSurface) != nil
     else {
-        return refuse("no terminal kept and drew the command's line: \(views.map(screenText))")
+        return refuse("no terminal kept and drew the command's line: \(terminalViews(in: hosting).map(screenText))")
     }
-    guard let fed = views.first(where: { $0 !== command }), let fedSurface = fed.surface,
-        let fedRenderer = fedSurface.renderer
-    else {
-        return refuse("no fed terminal with a renderer")
+    guard spin(seconds: 2, until: { heard.launchFailures == 1 }) else {
+        return refuse("a command line holding a NUL reached onTerminalLaunchFailure \(heard.launchFailures) times")
     }
 
-    continuation.yield(Data("swiftui-fed\r\n".utf8))
-    guard spinRevealing(fedSurface, seconds: 5, until: { screenText(fed).contains("swiftui-fed") }) else {
-        return refuse("the bytes written to the stream never reached the fed terminal")
+    // A title action given after the terminal was made hears the title standing.
+    guard spinRevealing(hosting, seconds: 10, until: { terminal(in: hosting, showing: "late-set") != nil }) else {
+        return refuse("the late-title command wrote nothing")
     }
-    continuation.finish()
+    choice.isListeningForLateTitle = true
+    guard spinRevealing(hosting, seconds: 5, until: { heard.lateTitles.contains("late-title") }) else {
+        return refuse("a title action given after the terminal was made heard \(heard.lateTitles)")
+    }
 
-    let configuredSize = fedRenderer.pointSize
-    let configuredTheme = fedSurface.currentThemeName
+    // A terminal that owns its session starts afresh under a new identity and
+    // lets the old one go.
+    guard spinRevealing(hosting, seconds: 10, until: { terminal(in: hosting, showing: "owned-") != nil }) else {
+        return refuse("the owned command wrote nothing")
+    }
+    weak var releasedOwned: TerminalView?
+    var firstLine = ""
+    if let firstOwned = terminal(in: hosting, showing: "owned-") {
+        firstLine = screenText(firstOwned).split(separator: "\n").first { $0.hasPrefix("owned-") }.map(String.init) ?? ""
+        releasedOwned = firstOwned
+    }
+    choice.ownedGeneration += 1
+    guard spinRevealing(hosting, seconds: 10, until: {
+            terminalViews(in: hosting).contains { $0 !== releasedOwned && screenText($0).contains("owned-") }
+        })
+    else {
+        return refuse("a new identity showed no fresh owned terminal")
+    }
+    guard let secondOwned = terminalViews(in: hosting).first(where: { $0 !== releasedOwned && screenText($0).contains("owned-") }),
+        !firstLine.isEmpty, !screenText(secondOwned).contains(firstLine)
+    else {
+        return refuse("the owned terminal under a new identity kept the old session's screen")
+    }
+    // SwiftUI keeps a dropped identity's platform views a while after it
+    // tears them down, a plain view among them, so what is asserted is the
+    // teardown: the old terminal has left its container and the window.
+    guard releasedOwned.map({ $0.superview == nil && $0.window == nil && $0.observer == nil }) ?? true else {
+        return refuse("the owned terminal of a dropped identity is still in place or still observed")
+    }
+
+    // A view the host owns keeps its session through a change of identity,
+    // shows what it is fed, and hands its typing to the input modifier.
+    hosted.feed(Data("hosted-fed\r\n".utf8))
+    guard spinRevealing(hosting, seconds: 5, until: { screenText(hosted).contains("hosted-fed") }) else {
+        return refuse("the bytes fed to the hosted view never reached its screen")
+    }
+    choice.hostedGeneration += 1
+    guard spin(seconds: 5, until: { terminalViews(in: hosting).contains { $0 === hosted } && hosted.window === window }),
+        hosted.surface === hostedSurface, screenText(hosted).contains("hosted-fed")
+    else {
+        return refuse("the hosted view lost its place, its surface or its screen through a change of identity")
+    }
+    hostedSurface.insertText("typed", replacementRange: NSRange(location: NSNotFound, length: 0))
+    guard spin(seconds: 2, until: { heard.input == Data("typed".utf8) }) else {
+        return refuse("onTerminalInput heard \(String(decoding: heard.input, as: UTF8.self)), not what was typed")
+    }
+
+    // A font given to one terminal and a theme given to its container reach
+    // the terminals they are given to and no other, and are given back.
+    let configuredSize = hostedRenderer.pointSize
+    let configuredTheme = hostedSurface.currentThemeName
     guard let chosen = TerminalSurface.themeNames.first(where: { $0 != configuredTheme }) else {
         return refuse("Core names no second theme")
     }
     choice.fontSize = CGFloat(configuredSize + 7)
     choice.themeName = chosen
-    guard spin(seconds: 5, until: { fedRenderer.pointSize == configuredSize + 7 && fedSurface.currentThemeName == chosen }) else {
+    guard spin(seconds: 5, until: { hostedRenderer.pointSize == configuredSize + 7 && hostedSurface.currentThemeName == chosen }) else {
         return refuse(
-            "the fed terminal draws \(fedRenderer.pointSize) points in \(fedSurface.currentThemeName ?? "no theme"), "
+            "the hosted terminal draws \(hostedRenderer.pointSize) points in \(hostedSurface.currentThemeName ?? "no theme"), "
                 + "not the \(configuredSize + 7) and \(chosen) its modifiers name"
         )
     }
     guard commandRenderer.pointSize == configuredSize, commandSurface.currentThemeName == configuredTheme else {
-        return refuse("the modifiers of one terminal moved its sibling")
+        return refuse("the modifiers of one container moved a terminal outside it")
     }
+    guard let ownedSurface = terminalViews(in: hosting).first(where: { screenText($0).contains("owned-") })?.surface,
+        ownedSurface.currentThemeName == chosen, ownedSurface.renderer?.pointSize == configuredSize
+    else {
+        return refuse("the container's theme did not reach its second terminal, or the hosted terminal's font did")
+    }
+
+    // A colour a program set stands through an update that names nothing new.
+    hosted.feed(Data("\u{1b}]11;rgb:12/34/56\u{7}".utf8))
+    let programBackground: [UInt8] = [0x12, 0x34, 0x56]
+    guard spin(seconds: 2, until: { background(hosted) == programBackground }) else {
+        return refuse("OSC 11 did not set the hosted background")
+    }
+    choice.unrelated += 1
+    _ = spin(seconds: 0.5) { false }
+    guard background(hosted) == programBackground else {
+        return refuse("an unrelated update reset a program's background to \(background(hosted))")
+    }
+
     choice.fontSize = nil
     choice.themeName = nil
-    guard spin(seconds: 5, until: { fedRenderer.pointSize == configuredSize && fedSurface.currentThemeName == configuredTheme }) else {
-        return refuse("modifiers naming nothing left the fed terminal at \(fedRenderer.pointSize) points in \(fedSurface.currentThemeName ?? "no theme")")
+    guard spin(seconds: 5, until: { hostedRenderer.pointSize == configuredSize && hostedSurface.currentThemeName == configuredTheme }) else {
+        return refuse("modifiers naming nothing left the hosted terminal at \(hostedRenderer.pointSize) points in \(hostedSurface.currentThemeName ?? "no theme")")
     }
-    print("swiftui-consumer: a command reported its title and exit and kept its line; a fed terminal drew the host's bytes and followed its modifiers to \(chosen) and back")
+
+    print(
+        "swiftui-consumer: titles, exit, a late title and a failed launch reached their modifiers; an owned terminal "
+            + "started afresh under a new identity and a hosted one kept its session; typing, a font and theme, and a "
+            + "program's colour each held"
+    )
     return true
 }
 exit(passed ? 0 : 1)
@@ -1841,7 +2109,7 @@ xcrun swiftc "$HOST_DIR/swiftui.swift" \
     -Xlinker -rpath -Xlinker "$FRAMEWORK_DIR"
 
 run_consumer "$HOST_DIR/swiftui-consumer"
-echo "check-ubiquittykit: ok (SwiftUI's Terminal ran a command, reported its title and exit, drew a host's stream, and followed its font and theme modifiers)"
+echo "check-ubiquittykit: ok (SwiftUI's Terminal reported titles, exits, typing and a failed launch, kept a hosted session through a new identity, started an owned one afresh, and followed its font and theme modifiers)"
 
 # The clear commands, from a host that has only the public interface. Each pane
 # runs a program of known output as its login shell: sixty numbered lines and a
