@@ -420,6 +420,7 @@ extension TerminalSurface {
         let held = modifiers ?? heldKeyboardModifiers()
         if openLink(atViewPoint: point, modifiers: held) { return }
         guard shouldTapSendClick else {
+            _ = keyboardResponder?.becomeFirstResponder()
             observer?.terminalSurfaceDidRequestKeyboard(self)
             return
         }
@@ -431,7 +432,7 @@ extension TerminalSurface {
         // Left alone whenever the software keyboard is up: that keyboard's
         // proxy view must keep first responder, or the keyboard drops.
         if hasHardwareKeyboard, !isKeyboardPresented {
-            _ = becomeFirstResponder()
+            _ = (keyboardResponder ?? self).becomeFirstResponder()
         }
         // Press and release, because a touch has no state between them: an
         // application waiting for the button to come back up would otherwise
