@@ -18,9 +18,13 @@
 #   UBIQUITTY_APPLE_SHARED_RENDERKIT_SOURCES, UBIQUITTY_APPLE_SHARED_KIT_SOURCES,
 #   UBIQUITTY_MACOS_RENDERKIT_SOURCES, UBIQUITTY_MACOS_KIT_SOURCES
 #   ubiquitty_kit_swift_flags(PLATFORM macOS|iOS [SOURCE_ROOTS <directories...>])
+#   ubiquitty_kit_importer_definitions(<outputVariable> [TARGETS <targets...>])
+#   ubiquitty_kit_forward_definitions(<swiftTarget> CXX_TARGETS <targets...>)
 #   ubiquitty_kit_swift_whole_module(<target>)
 #   ubiquitty_kit_add_swift_conditions(<target> <conditions...>)
-#   ubiquitty_kit_add_swift_modules(PLATFORM macOS|iOS [MODULE_MAPS <maps...>]
+#   ubiquitty_kit_add_layout_probe(PLATFORM macOS|iOS CXX_TARGETS <targets...>)
+#   ubiquitty_kit_add_swift_modules(PLATFORM macOS|iOS CXX_TARGETS <targets...>
+#                                   [MODULE_MAPS <maps...>]
 #                                   [LINK_LIBRARIES <libraries...>]
 #                                   [CONDITIONS <names...>]
 #                                   [SHELL_SOURCES <sources...>]
@@ -80,6 +84,194 @@ function(ubiquitty_kit_root_directories outputVariable directory)
     set(${outputVariable} "${directories}" PARENT_SCOPE)
 endfunction()
 
+# The preprocessor definitions a C++ compile carries, as the swiftc arguments
+# that hand the same to a Swift module's C++ importer: a list of -Xcc pairs.
+#
+# A Swift module reads Core's headers through its importer, which compiles them
+# in the module's own translation units with what -Xcc hands it and nothing of
+# the C++ compile's. A definition the C++ translation units are built under and
+# the importer is not makes a header that tests it two definitions in one
+# binary: a release build compiles Core with NDEBUG and imports the same headers
+# without it, so an inline function Swift emits keeps the assert() Core's copy
+# dropped, and the linker keeps whichever copy it meets first. So the importer is
+# handed every definition the C++ compile is, read from where that compile reads
+# it rather than named here:
+#
+#   ubiquitty_kit_importer_definitions(<outputVariable>)
+#       The -D and -U of CMAKE_CXX_FLAGS and CMAKE_CXX_FLAGS_<CONFIG>: NDEBUG
+#       among them, whether from the build type's defaults, the cache or a
+#       toolchain file. A single-configuration build resolves them now. Under a
+#       multi-configuration generator each name is one argument whose value the
+#       configuration being built picks, -U<name> where its flags leave the name
+#       out, so every configuration gets the same arguments, which a SHELL:
+#       group and a hand-run swiftc both accept.
+#   ubiquitty_kit_importer_definitions(<outputVariable> TARGETS <target>...)
+#       The COMPILE_DEFINITIONS of those C++ targets and of their directories,
+#       and the INTERFACE_COMPILE_DEFINITIONS of the targets they link, as they
+#       stand when called; ubiquitty_kit_forward_definitions() calls it once
+#       configuration is over. A definition behind a C++ language guard is taken
+#       out of it: the guard keeps it from Swift's own conditions, which warn on
+#       a value, and the importer is a C++ compile. One behind a guard that
+#       leaves C++ out is not the C++ compile's. Any other generator expression,
+#       and a definition with a space in it, is refused rather than passed on in
+#       a form the importer would read differently.
+#
+# - Parameters:
+#   - outputVariable: Receives the arguments.
+#   - TARGETS: The C++ targets whose definitions are read.
+function(ubiquitty_kit_importer_definitions outputVariable)
+    cmake_parse_arguments(PARSE_ARGV 1 _ubq_definitions "" "" "TARGETS")
+    set(arguments "")
+    if(_ubq_definitions_TARGETS)
+        set(definitions "")
+        foreach(target IN LISTS _ubq_definitions_TARGETS)
+            get_target_property(directory ${target} SOURCE_DIR)
+            get_directory_property(directoryDefinitions DIRECTORY "${directory}" COMPILE_DEFINITIONS)
+            get_target_property(targetDefinitions ${target} COMPILE_DEFINITIONS)
+            if(targetDefinitions)
+                list(APPEND definitions ${targetDefinitions})
+            endif()
+            list(APPEND definitions ${directoryDefinitions})
+            get_target_property(linked ${target} LINK_LIBRARIES)
+            foreach(library IN LISTS linked)
+                if(TARGET "${library}")
+                    get_target_property(interfaceDefinitions "${library}" INTERFACE_COMPILE_DEFINITIONS)
+                    if(interfaceDefinitions)
+                        list(APPEND definitions ${interfaceDefinitions})
+                    endif()
+                endif()
+            endforeach()
+        endforeach()
+        list(REMOVE_DUPLICATES definitions)
+        foreach(definition IN LISTS definitions)
+            if(definition MATCHES "^\\$<\\$<COMPILE_LANGUAGE:([A-Za-z,]+)>:(.*)>$")
+                set(content "${CMAKE_MATCH_2}")
+                string(REPLACE "," ";" languages "${CMAKE_MATCH_1}")
+                if(NOT "CXX" IN_LIST languages)
+                    continue()
+                endif()
+                set(definition "${content}")
+            # One form a branch: a failed MATCHES clears the capture a matched one set.
+            elseif(definition MATCHES "^\\$<\\$<OR:\\$<COMPILE_LANGUAGE:C>,\\$<COMPILE_LANGUAGE:CXX>>:(.*)>$")
+                set(definition "${CMAKE_MATCH_1}")
+            elseif(definition MATCHES "^\\$<\\$<NOT:\\$<COMPILE_LANGUAGE:Swift>>:(.*)>$")
+                set(definition "${CMAKE_MATCH_1}")
+            endif()
+            if(definition MATCHES "\\$<" OR definition MATCHES "[ \t]")
+                message(FATAL_ERROR
+                    "ubiquitty_kit_importer_definitions: '${definition}', a definition of ${_ubq_definitions_TARGETS}, "
+                    "cannot be handed to the C++ importer as the C++ compile reads it. Define it plainly, behind "
+                    "a C++ language guard at most.")
+            endif()
+            list(APPEND arguments -Xcc "-D${definition}")
+        endforeach()
+        set(${outputVariable} "${arguments}" PARENT_SCOPE)
+        return()
+    endif()
+
+    get_property(isMultiConfiguration GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+    if(isMultiConfiguration)
+        set(configurations ${CMAKE_CONFIGURATION_TYPES})
+    else()
+        # Without a build type the common flags are still read: None names no
+        # CMAKE_CXX_FLAGS_<CONFIG> of its own.
+        set(configurations "${CMAKE_BUILD_TYPE}")
+        if(NOT configurations)
+            set(configurations None)
+        endif()
+    endif()
+    set(names "")
+    foreach(configuration IN LISTS configurations)
+        string(TOUPPER "${configuration}" upper)
+        separate_arguments(tokens UNIX_COMMAND "${CMAKE_CXX_FLAGS} ${CMAKE_CXX_FLAGS_${upper}}")
+        set(option "")
+        foreach(token IN LISTS tokens)
+            if(option)
+                set(token "${option}${token}")
+                set(option "")
+            elseif(token STREQUAL "-D" OR token STREQUAL "-U")
+                set(option "${token}")
+                continue()
+            endif()
+            # Later wins, as it does on the compiler's command line.
+            if(token MATCHES "^-([DU])([A-Za-z_][A-Za-z0-9_]*)(=.*)?$")
+                set(name "${CMAKE_MATCH_2}")
+                set(token_${upper}_${name} "-${CMAKE_MATCH_1}${name}${CMAKE_MATCH_3}")
+                list(APPEND names "${name}")
+            endif()
+        endforeach()
+    endforeach()
+    list(REMOVE_DUPLICATES names)
+    foreach(name IN LISTS names)
+        set(branches "")
+        set(distinct "")
+        foreach(configuration IN LISTS configurations)
+            string(TOUPPER "${configuration}" upper)
+            set(token "-U${name}")
+            if(DEFINED token_${upper}_${name})
+                set(token "${token_${upper}_${name}}")
+            endif()
+            if(isMultiConfiguration AND token MATCHES "[>;,$]")
+                message(FATAL_ERROR
+                    "ubiquitty_kit_importer_definitions: '${token}' in the ${configuration} C++ flags cannot be "
+                    "chosen per configuration for the C++ importer")
+            endif()
+            string(APPEND branches "$<$<CONFIG:${configuration}>:${token}>")
+            list(APPEND distinct "${token}")
+        endforeach()
+        list(REMOVE_DUPLICATES distinct)
+        list(LENGTH distinct distinctCount)
+        if(distinctCount EQUAL 1)
+            list(APPEND arguments -Xcc "${distinct}")
+        else()
+            list(APPEND arguments -Xcc "${branches}")
+        endif()
+    endforeach()
+    set(${outputVariable} "${arguments}" PARENT_SCOPE)
+endfunction()
+
+# Hands a Swift target's C++ importer the definitions of the C++ targets that
+# compile what it imports (ubiquitty_kit_importer_definitions(TARGETS)), once
+# configuration has added them all.
+#
+# Each definition becomes an -Xcc pair in the target's Swift compile. The pairs
+# are also the target's UBIQUITTY_KIT_IMPORTER_DEFINITIONS property, which a pass
+# that runs swiftc by hand reads as $<TARGET_PROPERTY:...> under
+# COMMAND_EXPAND_LISTS.
+#
+# - Parameters:
+#   - swiftTarget: The Swift target.
+#   - CXX_TARGETS: The C++ targets whose compile its importer matches: the
+#     target itself where it compiles Core beside its Swift.
+#   - AT_CONFIGURE_END: Forward at once; the deferred call's own spelling, made
+#     when configuration ends.
+function(ubiquitty_kit_forward_definitions swiftTarget)
+    cmake_parse_arguments(PARSE_ARGV 1 _ubq_forward "AT_CONFIGURE_END" "" "CXX_TARGETS")
+    if(NOT _ubq_forward_CXX_TARGETS)
+        message(FATAL_ERROR "ubiquitty_kit_forward_definitions(${swiftTarget}): CXX_TARGETS names no C++ target")
+    endif()
+    if(NOT _ubq_forward_AT_CONFIGURE_END)
+        # A deferred call's arguments are read when it runs, in the directory's
+        # scope, where this function's variables are gone; the code it is
+        # scheduled by carries them as bracket arguments, read now.
+        set(fromArguments "")
+        foreach(target IN LISTS _ubq_forward_CXX_TARGETS)
+            string(APPEND fromArguments " [[${target}]]")
+        endforeach()
+        cmake_language(EVAL CODE
+            "cmake_language(DEFER DIRECTORY [[${CMAKE_SOURCE_DIR}]] CALL ubiquitty_kit_forward_definitions [[${swiftTarget}]] AT_CONFIGURE_END CXX_TARGETS${fromArguments})")
+        return()
+    endif()
+    ubiquitty_kit_importer_definitions(arguments TARGETS ${_ubq_forward_CXX_TARGETS})
+    set_property(TARGET ${swiftTarget} PROPERTY UBIQUITTY_KIT_IMPORTER_DEFINITIONS "${arguments}")
+    set(options "")
+    while(arguments)
+        list(POP_FRONT arguments forward definition)
+        list(APPEND options "$<$<COMPILE_LANGUAGE:Swift>:SHELL:${forward} ${definition}>")
+    endwhile()
+    target_compile_options(${swiftTarget} PRIVATE ${options})
+endfunction()
+
 # The Swift compile options of an arm's Swift targets, the Kit's and the
 # caller's own, which import Core and the Kit through C++ interop.
 #
@@ -113,6 +305,7 @@ function(ubiquitty_kit_swift_flags)
     set(UBIQUITTY_KIT_SOURCE_ROOTS "${UBIQUITTY_KIT_SOURCE_ROOTS}" PARENT_SCOPE)
     ubiquitty_kit_root_directories(sourceDirectories Source)
     list(TRANSFORM sourceDirectories PREPEND "-I" OUTPUT_VARIABLE sourceIncludes)
+    ubiquitty_kit_importer_definitions(configurationDefinitions)
 
     if(_ubq_swift_PLATFORM STREQUAL "iOS")
         set(UBIQUITTY_IOS_SWIFT_FLAGS
@@ -125,6 +318,10 @@ function(ubiquitty_kit_swift_flags)
             # bridges are in its own map, which only the shell's module searches.
             "-I${UBIQUITTY_CORE_SOURCE_DIR}/Source/Platform/Apple"
             "-I${UBIQUITTY_CORE_SOURCE_DIR}/Source/Platform/macOS")
+        if(configurationDefinitions)
+            list(JOIN configurationDefinitions " " configurationGroup)
+            list(APPEND UBIQUITTY_IOS_SWIFT_FLAGS "SHELL:${configurationGroup}")
+        endif()
         if(UBIQUITTY_QUIC)
             list(APPEND UBIQUITTY_IOS_SWIFT_FLAGS "SHELL:-Xcc -DUBIQUITTY_QUIC=1"
                 "-I${quicPrefix}/include")
@@ -153,6 +350,9 @@ function(ubiquitty_kit_swift_flags)
         # Terminal.h → Encodings.h, which uses std::span (C++20). The importer's default
         # standard is pre-C++20, so raise it to match Core or the module won't build.
         -Xcc -std=c++23
+        # The configuration's C++ definitions, NDEBUG among them; a target's own
+        # reach its modules through ubiquitty_kit_forward_definitions.
+        ${configurationDefinitions}
         ${sourceIncludes}
         # The shared Apple map ahead of every other, because a map is searched in
         # include order and the shared one owns Core's headers. Behind, another map
@@ -294,6 +494,59 @@ function(ubiquitty_kit_add_swift_conditions target)
     endforeach()
 endfunction()
 
+# A link that fails when the Swift importer lays a key Core type out apart from
+# the C++ build (Tools/layout-probe). The C++ half compiles under the flags Core's
+# own translation units take and defines one witness per key type at the size it
+# sees; the Swift half compiles under the arm's Swift flags and names each witness
+# at the size the importer sees. A size the two disagree on names a witness
+# nobody defined, and the link fails with the type and the importer's size in the
+# missing symbol, in the build that introduced the disagreement.
+#
+# Reads the flags ubiquitty_kit_swift_flags() set for the same PLATFORM. Both
+# halves take the definitions of the C++ targets that compile Core: the C++ half
+# as those targets compile, the Swift half through ubiquitty_kit_forward_definitions.
+#
+# - Parameters:
+#   - PLATFORM: macOS or iOS.
+#   - CXX_TARGETS: The targets that compile the arm's Core.
+function(ubiquitty_kit_add_layout_probe)
+    cmake_parse_arguments(PARSE_ARGV 0 _ubq_probe "" "PLATFORM" "CXX_TARGETS")
+    if(NOT _ubq_probe_CXX_TARGETS)
+        message(FATAL_ERROR "ubiquitty_kit_add_layout_probe: CXX_TARGETS names no target that compiles Core")
+    endif()
+    set(probe "${UBIQUITTY_KIT_SOURCE_DIR}/Tools/layout-probe")
+    set(target ubiquitty-kit-layout-probe)
+    add_library(${target} SHARED "${probe}/LayoutProbe.swift" "${probe}/ArchiveLayout.cpp")
+    target_include_directories(${target} PRIVATE ${UBIQUITTY_SOURCE_INCLUDE_DIRECTORIES} "${probe}")
+    set_target_properties(${target} PROPERTIES
+        CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF
+        LINKER_LANGUAGE Swift)
+    target_compile_options(${target} PRIVATE
+        "$<$<COMPILE_LANGUAGE:CXX>:-fno-exceptions;-fno-rtti;-Wall;-Wextra>"
+        "$<$<AND:$<COMPILE_LANGUAGE:CXX>,$<BOOL:${UBIQUITTY_WERROR}>>:-Werror>")
+    if(_ubq_probe_PLATFORM STREQUAL "iOS")
+        target_compile_options(${target} PRIVATE "$<$<COMPILE_LANGUAGE:Swift>:SHELL:${UBIQUITTY_IOS_SWIFT_FLAGS}>")
+        set(quicPrefix "${UBIQUITTY_QUIC_PLATFORM_PREFIX}")
+    else()
+        target_compile_options(${target} PRIVATE "$<$<COMPILE_LANGUAGE:Swift>:SHELL:${UBIQUITTY_SWIFT_FLAGS_GROUPED}>")
+        set(quicPrefix "${UBIQUITTY_QUIC_PREFIX}")
+    endif()
+    # The probe's own map imports Core's headers as Core's module only once the
+    # importer has read Core's map; the arm's modules import that module by name.
+    target_compile_options(${target} PRIVATE
+        "$<$<COMPILE_LANGUAGE:Swift>:SHELL:-Xcc -fmodule-map-file=${UBIQUITTY_CORE_SOURCE_DIR}/Source/Platform/Apple/module.modulemap>"
+        "$<$<COMPILE_LANGUAGE:Swift>:SHELL:-I ${probe}>")
+    if(UBIQUITTY_QUIC)
+        target_include_directories(${target} PRIVATE "${quicPrefix}/include")
+    endif()
+    foreach(cxxTarget IN LISTS _ubq_probe_CXX_TARGETS)
+        target_compile_definitions(${target} PRIVATE "$<TARGET_PROPERTY:${cxxTarget},COMPILE_DEFINITIONS>")
+    endforeach()
+    ubiquitty_kit_forward_definitions(${target} CXX_TARGETS ${_ubq_probe_CXX_TARGETS})
+    target_link_options(${target} PRIVATE -cxx-interoperability-mode=default)
+    ubiquitty_kit_swift_language_mode(${target})
+endfunction()
+
 # Holds a Kit Swift target to the Swift 6 language mode, whose data-race
 # checking keeps the Kit at zero concurrency diagnostics, whatever the calling
 # directory's default mode. Xcode takes the mode from SWIFT_VERSION, and a
@@ -321,6 +574,10 @@ endfunction()
 #
 # - Parameters:
 #   - PLATFORM: macOS or iOS.
+#   - CXX_TARGETS: The targets that compile the Core the modules import, whose
+#     definitions every module's importer is handed
+#     (ubiquitty_kit_forward_definitions): the caller's own target where it
+#     compiles Core into itself.
 #   - MODULE_MAPS: The caller's own module maps, which the interop stamp follows
 #     besides Core's and the Kit's.
 #   - LINK_LIBRARIES: What the render kit links: the Core library, where the
@@ -335,8 +592,11 @@ endfunction()
 #     pass, after the conditions.
 function(ubiquitty_kit_add_swift_modules)
     cmake_parse_arguments(PARSE_ARGV 0 _ubq_modules "" "PLATFORM"
-        "MODULE_MAPS;LINK_LIBRARIES;CONDITIONS;SHELL_SOURCES;HEADER_PASS_OPTIONS")
+        "CXX_TARGETS;MODULE_MAPS;LINK_LIBRARIES;CONDITIONS;SHELL_SOURCES;HEADER_PASS_OPTIONS")
     set(platform "${_ubq_modules_PLATFORM}")
+    if(NOT _ubq_modules_CXX_TARGETS)
+        message(FATAL_ERROR "ubiquitty_kit_add_swift_modules: CXX_TARGETS names no target that compiles Core")
+    endif()
     if(platform STREQUAL "macOS")
         if(NOT DEFINED UBIQUITTY_SWIFT_FLAGS_GROUPED)
             message(FATAL_ERROR "ubiquitty_kit_add_swift_modules(PLATFORM macOS) reads ubiquitty_kit_swift_flags(PLATFORM macOS); call it first")
@@ -445,6 +705,7 @@ function(ubiquitty_kit_add_swift_modules)
         target_link_libraries(UbiquittyRenderKit PRIVATE ${_ubq_modules_LINK_LIBRARIES})
     endif()
     ubiquitty_kit_add_swift_conditions(UbiquittyRenderKit ${_ubq_modules_CONDITIONS})
+    ubiquitty_kit_forward_definitions(UbiquittyRenderKit CXX_TARGETS ${_ubq_modules_CXX_TARGETS})
 
     if(platform STREQUAL "macOS")
         # The render kit's generated interface, which
@@ -462,11 +723,13 @@ function(ubiquitty_kit_add_swift_modules)
                     ${UBIQUITTY_SWIFT_FLAGS}
                     ${UBIQUITTY_SWIFT_HEADER_PASS_FLAGS}
                     ${conditionFlags}
+                    "$<TARGET_PROPERTY:UbiquittyRenderKit,UBIQUITTY_KIT_IMPORTER_DEFINITIONS>"
                     ${_ubq_modules_HEADER_PASS_OPTIONS}
                     ${renderKitSources}
             DEPENDS ${renderKitSources}
                     "${UBIQUITTY_CORE_SOURCE_DIR}/Source/Platform/Apple/module.modulemap"
             COMMENT "Emitting UbiquittyRenderKit-Swift.h"
+            COMMAND_EXPAND_LISTS
             VERBATIM)
         add_custom_target(UbiquittyRenderKitHeader
             DEPENDS "${generatedHeader}")
@@ -544,6 +807,7 @@ function(ubiquitty_kit_add_swift_modules)
         target_link_libraries(UbiquittyKitModule PRIVATE UbiquittyRenderKit)
     endif()
     ubiquitty_kit_add_swift_conditions(UbiquittyKitModule ${_ubq_modules_CONDITIONS})
+    ubiquitty_kit_forward_definitions(UbiquittyKitModule CXX_TARGETS ${_ubq_modules_CXX_TARGETS})
 endfunction()
 
 # The shader library the renderer loads, UBShaders.metal compiled to a
@@ -793,6 +1057,8 @@ function(ubiquitty_kit_add_framework)
         "$<$<COMPILE_LANGUAGE:Swift>:SHELL:-enable-library-evolution>"
         "$<$<COMPILE_LANGUAGE:Swift>:SHELL:-emit-module-interface-path ${CMAKE_CURRENT_BINARY_DIR}/UbiquittyKitFramework/UbiquittyKit.swiftinterface>"
         ${UBIQUITTY_SWIFT_PGO_GENEX})
+    # Its Swift imports the Core its own C++ compiles.
+    ubiquitty_kit_forward_definitions(UbiquittyKit CXX_TARGETS UbiquittyKit)
     ubiquitty_kit_root_directories(sourceDirectories Source)
     ubiquitty_kit_root_directories(macosDirectories Source/Platform/macOS)
     target_include_directories(UbiquittyKit PRIVATE
