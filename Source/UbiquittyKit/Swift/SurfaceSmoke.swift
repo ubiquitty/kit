@@ -1305,16 +1305,14 @@ enum SurfaceSmoke {
         }
         surface.isFrameLinkHeldOffForTesting = false
 
-        // The status-line leg. DECSSDT's cells are assembled by Core and ride
-        // the options as a borrow of surface-owned scratch; the observable is
-        // the renderer's own, because the plan's reuse refusal reads the
-        // model directly and would pass whether or not the cells arrived.
-        // The boundary route shares the fill through the session, whose host
-        // tests cover the assembly itself.
-        // Converged over a few frames rather than asserted on one: the live
-        // shell's prompt can land a DECSET-2026 boundary capture at any
-        // moment, and an encode that consumes one takes the boundary path,
-        // where this live-fill observable never moves.
+        // The status-line leg. DECSSDT's cells are assembled by Core, into the
+        // capture the drain makes and into the live read's options; the
+        // observable is the renderer's record of the frame it drew, because
+        // the plan's reuse refusal reads the model directly and would pass
+        // whether or not the cells arrived. Core's host tests cover the
+        // assembly itself. Converged over a few frames rather than asserted
+        // on one: a frame captured before the mode moved can still be the
+        // next one served.
         feed(surface.drive, "\u{1b}[1$~")
         var sawStatusRow = false
         for _ in 0..<6 {

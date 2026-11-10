@@ -3291,6 +3291,9 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
             lastFrameDirtyRows = didReuseBoundaryGrid ? renderer.boundaryFrameDirtyRows : lastFramePlannedRows
             didTrustDirtySetLastFrame = didReuseBoundaryGrid
             phaseLogReuseTerms = didReuseBoundaryGrid ? "" : "boundary"
+            // The status row the drain filled into the capture: the frame's
+            // own fact, as the live route's is the options it filled.
+            lastFrameHadStatusRow = syncFrame.hasStatusRow()
             lastFrameCounts = renderer.counts
             let waitStartedAt = isPerfLogged ? CACurrentMediaTime() : 0
             guard let target = target() else {
