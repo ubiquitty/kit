@@ -77,7 +77,10 @@ On iOS it is the same view, a `UIView`. An iOS app starts no local program, so
 it shows a session that arrives over a connection: it feeds the bytes its own
 connection receives, and sends on what the person types, which the view's
 observer hears as `terminalSurface(_:didTransmit:count:)`. A tap raises the
-view's own keyboard, and so does `becomeFirstResponder()`:
+view's own keyboard, and so does `becomeFirstResponder()`. That keyboard types
+text, Return and Delete and nothing else: no arrows, Escape, Tab or Control
+chords, from the software keyboard or a hardware one. An app that needs them
+brings its own keyboard over a `TerminalSurface`, as the Ubiquitty app does:
 
 ```swift
 import UIKit
@@ -117,19 +120,35 @@ struct ContentView: View {
 A SwiftUI app that keeps the session itself, as an iOS app feeding its own
 connection does, owns a `TerminalView`, feeds it what the connection receives,
 and shows it with `Terminal(_:)`; the session then outlives the view's
-identity. Here `Connection` stands for the app's own:
+identity. The view lives in a model the app creates once. Here `Connection`
+stands for the app's own:
 
 ```swift
-struct RemoteTerminal: View {
-    let terminal: TerminalView
+@MainActor
+@Observable
+final class RemoteSession {
+    let terminal = TerminalView()
     let connection: Connection
 
+    init(connection: Connection) {
+        self.connection = connection
+    }
+}
+
+struct RemoteTerminal: View {
+    let session: RemoteSession
+
     var body: some View {
-        Terminal(terminal)
-            .onTerminalInput { connection.send($0) }
+        Terminal(session.terminal)
+            .onTerminalInput { session.connection.send($0) }
     }
 }
 ```
+
+Do not write `@State private var terminal = TerminalView()` in a view, or build
+the view in a view's initializer: SwiftUI evaluates those each time it rebuilds
+the view's parent, building and dropping a session and a Metal renderer each
+time.
 
 The font, its size and the theme are Core's defaults unless the host names
 others, and in an app that configures Core, as the Ubiquitty app does, they are
