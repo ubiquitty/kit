@@ -153,6 +153,30 @@ package final class TerminalRenderer {
     package private(set) var didBoundaryFrameReuseGrid = false
     package private(set) var boundaryFrameDirtyRows = 0
 
+    /// What kept a boundary build from reusing the retained grid.
+    package struct BoundaryReuseRefusals: OptionSet, Sendable {
+        package let rawValue: UInt8
+        package init(rawValue: UInt8) { self.rawValue = rawValue }
+        /// The capture planned every row.
+        package static let fullCapture = BoundaryReuseRefusals(rawValue: 1 << 0)
+        /// A view tier is baked into this frame's grid.
+        package static let viewTiers = BoundaryReuseRefusals(rawValue: 1 << 1)
+        /// A view tier was baked into the last frame's grid.
+        package static let lastFrameViewTiers = BoundaryReuseRefusals(rawValue: 1 << 2)
+        /// A full rebuild was pending.
+        package static let fullRebuild = BoundaryReuseRefusals(rawValue: 1 << 3)
+        /// Images are placed, or the store resolved some.
+        package static let images = BoundaryReuseRefusals(rawValue: 1 << 4)
+        /// A window backdrop is composited under the frame.
+        package static let backdrop = BoundaryReuseRefusals(rawValue: 1 << 5)
+        /// A row's ink reached past its own row.
+        package static let inkEscapesRow = BoundaryReuseRefusals(rawValue: 1 << 6)
+    }
+
+    /// Why the last boundary build did not reuse the retained grid; empty
+    /// when it did.
+    package private(set) var boundaryReuseRefusals: BoundaryReuseRefusals = []
+
     /// Whether the last encode declined because the frame reproduced the
     /// glass: the caller presents nothing and asks for no retry.
     package private(set) var didLastFramePresentNothing = false
@@ -1108,9 +1132,15 @@ package final class TerminalRenderer {
         // included; drawn again over a Loaded target it builds up on every row
         // the Delta keeps, so a frame with one rebuilds whole as the live
         // route's plan does.
-        var reusesGrid =
-            !capture.isFullFrame() && !hasBakedViewTiers && !hadBakedViewTiers
-            && !wantsFullRebuild && !imagesMayChange && backdrop == nil
+        var refusals: BoundaryReuseRefusals = []
+        if capture.isFullFrame() { refusals.insert(.fullCapture) }
+        if hasBakedViewTiers { refusals.insert(.viewTiers) }
+        if hadBakedViewTiers { refusals.insert(.lastFrameViewTiers) }
+        if wantsFullRebuild { refusals.insert(.fullRebuild) }
+        if imagesMayChange { refusals.insert(.images) }
+        if backdrop != nil { refusals.insert(.backdrop) }
+        boundaryReuseRefusals = refusals
+        var reusesGrid = refusals.isEmpty
         if hasBakedViewTiers || hadBakedViewTiers {
             hasTiersUnknownToLiveCapture = true
         }
@@ -1134,6 +1164,7 @@ package final class TerminalRenderer {
         buildWithMeasuredInk { instances.build(capture, backend: backend, view: view, scope: reusesGrid ? .Damaged : .Whole) }
         if !keepsRowInkContained(capture, backend: backend, view: view, isLoading: reusesGrid) {
             reusesGrid = false
+            boundaryReuseRefusals.insert(.inkEscapesRow)
             didBoundaryFrameReuseGrid = false
             boundaryFrameDirtyRows = Int(capture.rows())
         }
