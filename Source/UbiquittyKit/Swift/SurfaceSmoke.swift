@@ -1254,7 +1254,9 @@ enum SurfaceSmoke {
                 "re-asserting an unchanged palette colour broke grid reuse"
                     + " (epoch \(String(describing: epochAfterRepeat)),"
                     + " dirty \(renderer.lastFrameDirtyRows)/\(renderer.lastFramePlannedRows),"
-                    + " surface drew \(surface.drawnFrameCount - selfDrawsBeforeHeldLegs) frames on its own)"
+                    + " surface drew \(surface.drawnFrameCount - selfDrawsBeforeHeldLegs) frames on its own,"
+                    + " last decline \(renderer.lastFrameDecline.rawValue), boundary refusals"
+                    + " \(surface.frameRenderers.values.map { String($0.boundaryReuseRefusals.rawValue, radix: 2) }))"
             )
         }
         surface.isFrameLinkHeldOffForTesting = false
