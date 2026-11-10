@@ -35,7 +35,7 @@ SECTIONS = (
         "fail": None,
     },
     {
-        "title": 'an adopted terminal seeds its cursor policy (Scripts/check-adopted-term-cursor.py)',
+        "title": 'a hosted pane seeds its cursor policy (Scripts/check-adopted-term-cursor.py)',
         "after": 'Swift gains no new raw pointer (Scripts/check-swift-unsafe.py)',
         "kind": "gate",
         "gate": 'check-adopted-term-cursor.py',

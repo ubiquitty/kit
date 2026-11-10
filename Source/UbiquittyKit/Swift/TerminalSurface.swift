@@ -2862,65 +2862,24 @@ public final class TerminalSurface: PlatformView {
         self.init(drive: drive, rows: rows, columns: columns)
     }
 
-    /// Creates a surface adopting an externally owned terminal — the tmux
-    /// render-only pane, whose model the Session writes and disposes.
-    ///
-    /// The Objective-C spelling, because the owner lives on that side of the
-    /// seam: the terminal crosses as the untyped pointer the reference type
-    /// is, and the lock as the number the adoption seam already hands out.
+    /// Creates a surface presenting one pane a hosting session's source owns
+    /// — the tmux render-only pane, whose model the source writes and
+    /// disposes.
     ///
     /// - Parameters:
-    ///   - terminal: The externally owned terminal, as a raw pointer.
-    ///   - lockAddress: The owner's model lock address.
+    ///   - paneID: The pane.
+    ///   - sourceAddress: ``RuntimeDrive/hostedWindowSourceAddress`` of the
+    ///     hosting surface's drive.
     ///   - rows: The grid's rows.
     ///   - columns: The grid's columns.
-    /// - Returns: The surface, or nil when Core declines a session.
-    /// Creates a surface adopting an externally owned terminal.
-    ///
-    /// The typed spelling, and the one to reach for. A terminal crosses as
-    /// itself: Swift imports it as a reference because Core deletes its copy and
-    /// move constructors, so no pointer and no bitcast are involved, and the
-    /// compiler checks the call.
-    ///
-    /// - Parameters:
-    ///   - terminal: The externally owned terminal.
-    ///   - lockAddress: The owner's model lock address.
-    ///   - rows: The grid's rows.
-    ///   - columns: The grid's columns.
-    /// - Returns: The surface, or nil when Core declines a session.
-    ///
-    /// Package-scoped, not public: its signature names a Core type this module
-    /// imports internally, and a framework's textual interface cannot describe
-    /// one — the emitted `.swiftinterface` spells it `__ObjC.Ubiquitty.Terminal`
-    /// and then fails to verify against itself. An embedder outside the package
-    /// reaches the same constructor through the `UnsafeMutableRawPointer`
-    /// overload below, which is what the ObjC selector already binds to. Both
-    /// callers of this one are in-package.
-    package static func makeAdopting(terminal: Ubiquitty.Terminal, lockAddress: UInt, rows: Int, columns: Int) -> TerminalSurface? {
-        guard let drive = RuntimeDrive(adopting: terminal, lockAddress: lockAddress, rows: rows, columns: columns) else {
+    /// - Returns: The surface, or nil when Core declines a session or the
+    ///   pane is not live.
+    public static func makeHostingPane(_ paneID: Int32, ofSource sourceAddress: UInt, rows: Int, columns: Int) -> TerminalSurface? {
+        guard let drive = RuntimeDrive(hostingPane: paneID, ofSource: sourceAddress, rows: rows, columns: columns) else {
             return nil
         }
         return TerminalSurface(drive: drive, rows: rows, columns: columns)
     }
-
-    #if canImport(AppKit)
-    /// The Objective-C spelling, for the AppKit shell's owner.
-    ///
-    /// It takes a raw pointer for one reason only: Objective-C cannot carry
-    /// a C++ type, so a typed reference degrades at this boundary and the
-    /// bitcast puts it back. Nothing else should use it — a Swift caller has
-    /// the typed overload above, and a Swift-only shell has no reason to
-    /// route a model through a pointer.
-    @objc(surfaceAdoptingTerminal:lockAddress:rows:columns:)
-    public static func makeAdopting(terminal: UnsafeMutableRawPointer, lockAddress: UInt, rows: Int, columns: Int) -> TerminalSurface? {
-        makeAdopting(
-            terminal: unsafeBitCast(terminal, to: Ubiquitty.Terminal.self),
-            lockAddress: lockAddress,
-            rows: rows,
-            columns: columns
-        )
-    }
-    #endif
 
     /// Creates a surface over a caller-built drive — a pane that spawned the
     /// session itself, or one adopting an externally owned terminal.
