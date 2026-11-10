@@ -935,9 +935,10 @@ enum SurfaceSmoke {
         // lives: a direct feed is same-thread feed-then-draw and coherent by
         // construction, so only the drain path arms the capture. The
         // registration rode the encodes above; a 2026 frame through the shell
-        // must land a frozen capture, the slot must not re-hand a drained
-        // frame, and an encode must consume a waiting one.
+        // that a view asks for must land a frozen capture, the slot must not
+        // re-hand a drained frame, and an encode must consume a waiting one.
         let promotedBeforeSync = surface.drive.syncFramePromoteCount
+        let publishedBeforeSync = surface.drive.syncFramePublicationCount
         let seenBeforeSync = surface.drive.syncClearSeenCount
         surface.send("printf '\\033[?2026hsync-frame-leg\\033[?2026l\\n'\n")
         // Waited on the parser reporting the frame, not on a screen update. The
@@ -955,11 +956,12 @@ enum SurfaceSmoke {
                     + "(clears seen \(surface.drive.syncClearSeenCount))"
             )
         }
-        // The capture is the ingest thread's to arm and the frame link's to
-        // present, and the link can tick between the delivery and this read:
-        // then the slot is already drained and the promote count has moved.
-        // Either says the boundary armed a capture; an empty slot with no
-        // promote is the frame that was never captured.
+        // The capture is the ingest thread's to make once a view asks, and the
+        // frame link's to present, and the link can tick between the delivery
+        // and this read: then the slot is already drained and the promote
+        // count has moved. Either says the boundary armed a capture; an empty
+        // slot with no promote is the frame that was never captured.
+        _ = asksForCapture(surface, publishedBefore: publishedBeforeSync)
         let isWaiting = surface.drive.takeSyncFrame() != nil
         guard isWaiting || surface.drive.syncFramePromoteCount > promotedBeforeSync else {
             return failed(
@@ -990,7 +992,7 @@ enum SurfaceSmoke {
         guard surface.drive.syncClearSeenCount > seenBeforeSecond else {
             return failed("the shell's second 2026 block never reached the parser")
         }
-        guard renderer.encodeFrame(for: surface, into: layer) else {
+        guard encodeAfterFontPreparation(renderer, for: surface, into: layer) else {
             return failed("sync-boundary frame declined")
         }
         guard surface.drive.takeSyncFrame() == nil else {
@@ -1035,7 +1037,7 @@ enum SurfaceSmoke {
             linkColorBlue: 0.625
         )
         waitForAdmittedFrame(surface)
-        guard renderer.encodeFrame(for: surface, into: layer) else {
+        guard encodeAfterFontPreparation(renderer, for: surface, into: layer) else {
             return failed("styled frame declined")
         }
         // The damage drain saw no cell writes, so only the retained-target
@@ -1106,11 +1108,13 @@ enum SurfaceSmoke {
             }
             let expectedHeight = renderer.cellSize(for: surface).height * captureScale
             let seenBeforeSpacing = surface.drive.syncClearSeenCount
+            let publishedBeforeSpacing = surface.drive.syncFramePublicationCount
             surface.send("printf '\\033[?2026hspacing-frame\\033[?2026l\\n'\n")
             let spacingDeadline = Date(timeIntervalSinceNow: 5)
             while surface.drive.syncClearSeenCount == seenBeforeSpacing, Date() < spacingDeadline {
                 RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.05))
             }
+            _ = asksForCapture(surface, publishedBefore: publishedBeforeSpacing)
             guard let spaced = surface.drive.takeSyncFrame() else {
                 return failed("no boundary capture followed the spacing change")
             }
@@ -1160,7 +1164,7 @@ enum SurfaceSmoke {
             return failed("the applied palette did not read back: \(String(describing: narrowed))")
         }
         waitForAdmittedFrame(surface)
-        guard renderer.encodeFrame(for: surface, into: layer) else {
+        guard encodeAfterFontPreparation(renderer, for: surface, into: layer) else {
             return failed("post-palette frame declined")
         }
         guard !renderer.didReuseLastFrame else {
@@ -1176,7 +1180,7 @@ enum SurfaceSmoke {
         // reaches nobody — the epoch is the whole mechanism.
         feed(surface.drive, "\u{1b}[38;5;33mosc4-recolour-leg\u{1b}[0m\r\n")
         waitForAdmittedFrame(surface)
-        guard renderer.encodeFrame(for: surface, into: layer) else {
+        guard encodeAfterFontPreparation(renderer, for: surface, into: layer) else {
             return failed("pre-OSC4 frame declined")
         }
         feed(surface.drive, "\u{1b}]4;33;rgb:ff/00/ff\u{07}")
@@ -1204,7 +1208,7 @@ enum SurfaceSmoke {
             return failed("the OSC 4 write never reached the model")
         }
         waitForAdmittedFrame(surface)
-        guard renderer.encodeFrame(for: surface, into: layer) else {
+        guard encodeAfterFontPreparation(renderer, for: surface, into: layer) else {
             return failed("post-OSC4 frame declined")
         }
         guard !renderer.didReuseLastFrame else {
@@ -1223,7 +1227,7 @@ enum SurfaceSmoke {
         var reusedAfterRepeat = false
         for _ in 0..<6 {
             waitForAdmittedFrame(surface)
-            guard renderer.encodeFrame(for: surface, into: layer) else {
+            guard encodeAfterFontPreparation(renderer, for: surface, into: layer) else {
                 return failed("repeated-OSC4 frame declined")
             }
             if renderer.didReuseLastFrame {
@@ -1256,7 +1260,7 @@ enum SurfaceSmoke {
         var sawStatusRow = false
         for _ in 0..<6 {
             waitForAdmittedFrame(surface)
-            guard renderer.encodeFrame(for: surface, into: layer) else {
+            guard encodeAfterFontPreparation(renderer, for: surface, into: layer) else {
                 return failed("the status-line frame declined")
             }
             if renderer.lastFrameHadStatusRow {
@@ -1271,7 +1275,7 @@ enum SurfaceSmoke {
         var droppedStatusRow = false
         for _ in 0..<6 {
             waitForAdmittedFrame(surface)
-            guard renderer.encodeFrame(for: surface, into: layer) else {
+            guard encodeAfterFontPreparation(renderer, for: surface, into: layer) else {
                 return failed("the status-line teardown frame declined")
             }
             if !renderer.lastFrameHadStatusRow {
@@ -2392,7 +2396,7 @@ enum SurfaceSmoke {
             return "the view holding its rows under output registered the capture geometry again "
                 + "(\(String(describing: registeredViewOffset)) to \(String(describing: surface.registeredSyncViewOffset)))"
         }
-        if let failure = liveReadAlignmentFailure(surface, renderer: renderer, layer: layer, selectedText: inHistory) {
+        if let failure = heldRowsAlignmentFailure(surface, renderer: renderer, layer: layer, selectedText: inHistory) {
             return failure
         }
 
@@ -2435,8 +2439,10 @@ enum SurfaceSmoke {
     /// - A tick inside an open synchronized update draws nothing and arms the
     ///   recheck of the hold, whichever check, published or under the model
     ///   lock, finds the update open.
-    /// - A resize step is held only under the model lock: the published hold
-    ///   does not wait for it.
+    /// - A resize step inside an open synchronized update draws nothing.
+    ///   Core holds it by the resize's own rule: the published hold, the
+    ///   check under the read's lock, or the owner's turn, which captures
+    ///   nothing while the update stays open.
     /// - A view drawing search matches reads the model while a capture
     ///   waits, and retires the capture: the live plan drains the slot, so
     ///   rows older than the live frame are never presented after it.
@@ -2484,9 +2490,10 @@ enum SurfaceSmoke {
         let resizeDecline = renderer.lastFrameDecline
         surface.isDrawingResizeStep = false
         feed(surface.drive, "\u{1b}[?2026l")
-        guard !drewResizeStep, resizeDecline == .blockOpenUnderLock else {
-            return "a resize step inside an open synchronized update drew=\(drewResizeStep), decline=\(resizeDecline.rawValue);"
-                + " it is held under the model lock and nowhere else"
+        let isResizeStepHeld =
+            resizeDecline == .withheld || resizeDecline == .blockOpenUnderLock || resizeDecline == .awaitingCapture
+        guard !drewResizeStep, isResizeStepHeld else {
+            return "a resize step inside an open synchronized update drew=\(drewResizeStep), decline=\(resizeDecline.rawValue)"
         }
         guard encodeAfterFontPreparation(renderer, for: surface, into: layer) else {
             return "the frame after the resize step's update closed declined: decline=\(renderer.lastFrameDecline.rawValue)"
@@ -2637,15 +2644,17 @@ enum SurfaceSmoke {
         return nil
     }
 
-    /// Reads the model live between the drain appending history and the view
-    /// taking it, right after a boundary frame drew the view held back over
+    /// Draws the next frame between rows arriving below the view and the view
+    /// taking them, right after a boundary frame drew the view held back over
     /// its history with a selection there.
     ///
-    /// Rows fed straight into the model reach no delivery, so the view's
-    /// offset still stands against the history before them. The live frame
-    /// must show the rows the boundary frame showed, and the selection where
-    /// that frame drew it. No row is evicted at this depth, so one absolute
-    /// row number names one line in both frames.
+    /// Rows fed straight into the model reach no delivery first, so the view's
+    /// offset still stands against the history before them. Whichever route
+    /// draws the next frame, a capture the owner serves the view's ask with or
+    /// the live read of a lane with no captures armed, it must show the rows
+    /// the boundary frame showed, and the selection where that frame drew it.
+    /// No row is evicted at this depth, so one absolute row number names one
+    /// line in both frames.
     ///
     /// - Parameters:
     ///   - surface: The surface, scrolled back, its last frame a boundary
@@ -2654,7 +2663,7 @@ enum SurfaceSmoke {
     ///   - layer: The layer to present into.
     ///   - selectedText: The selection's text.
     /// - Returns: Why the leg failed, or nil.
-    private static func liveReadAlignmentFailure(
+    private static func heldRowsAlignmentFailure(
         _ surface: TerminalSurface,
         renderer: SurfaceRenderer,
         layer: CAMetalLayer,
@@ -2665,22 +2674,19 @@ enum SurfaceSmoke {
             return "the boundary frame over the history selection showed none of it"
         }
         let viewOffsetBeforeOutput = surface.viewOffset
-        let boundaryFrames = renderer.selectedBoundaryFrameCount
         feed(surface.drive, String(repeating: "arrived below the held rows\r\n", count: 3))
         guard encodeAfterFontPreparation(renderer, for: surface, into: layer) else {
-            return "the live frame after rows the view had not taken declined: decline=\(renderer.lastFrameDecline.rawValue)"
-        }
-        guard surface.viewOffset == viewOffsetBeforeOutput, renderer.selectedBoundaryFrameCount == boundaryFrames else {
-            return "the view took the arrived rows, or a boundary frame presented them, before a live read could"
+            return "the frame after rows the view had not taken declined: decline=\(renderer.lastFrameDecline.rawValue)"
         }
         guard renderer.lastFrameFirstAbsoluteRow == boundaryFirstRow else {
-            return "the live read showed row \(renderer.lastFrameFirstAbsoluteRow) at the top"
+            return "the frame after rows arrived showed row \(renderer.lastFrameFirstAbsoluteRow) at the top"
                 + " where the boundary frame showed row \(boundaryFirstRow)"
+                + " (view offset \(viewOffsetBeforeOutput) to \(surface.viewOffset))"
         }
-        guard let liveEnds = surface.selectionModel.visibleEnds,
-            liveEnds.start == boundaryEnds.start, liveEnds.end == boundaryEnds.end
+        guard let nextEnds = surface.selectionModel.visibleEnds,
+            nextEnds.start == boundaryEnds.start, nextEnds.end == boundaryEnds.end
         else {
-            return "the live read drew the selection at \(String(describing: surface.selectionModel.visibleEnds))"
+            return "the frame after rows arrived drew the selection at \(String(describing: surface.selectionModel.visibleEnds))"
                 + " where the boundary frame drew it at \(boundaryEnds)"
         }
         guard surface.selectedText == selectedText else {
@@ -2690,18 +2696,56 @@ enum SurfaceSmoke {
     }
 
     /// Publishes one capture through the shell: a synchronized update whose
-    /// close the drain captures.
+    /// close the drain captures once a view asks for it.
     ///
     /// - Parameter surface: The surface, its shell awake.
-    /// - Returns: Whether the shell's update closed within two seconds.
+    /// - Returns: Whether the shell's update closed and a capture was
+    ///   published after it, each within two seconds.
     private static func publishesBoundaryFrame(_ surface: TerminalSurface) -> Bool {
         let seenBefore = surface.drive.syncClearSeenCount
+        let publishedBefore = surface.drive.syncFramePublicationCount
         surface.send("printf '\\033[?2026hboundary-selection-frame\\033[?2026l\\n'\n")
         let deadline = Date(timeIntervalSinceNow: 2)
         while surface.drive.syncClearSeenCount == seenBefore, Date() < deadline {
             RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.02))
         }
-        return surface.drive.syncClearSeenCount != seenBefore
+        guard surface.drive.syncClearSeenCount != seenBefore else {
+            return false
+        }
+        return asksForCapture(surface, publishedBefore: publishedBefore)
+    }
+
+    /// Asks Core for the view's frame, as a tick does and without drawing,
+    /// until a capture is published, for up to two seconds.
+    ///
+    /// Captures are made on demand: output the drain parses reaches the slot
+    /// once a view has asked for a frame. An ask that finds a capture already
+    /// published since `publishedBefore` is not made, and one that finds an
+    /// older capture waiting takes it and drops it, so the capture that
+    /// follows shows the screen as it stands after the ask.
+    ///
+    /// - Parameters:
+    ///   - surface: The surface, its shell awake.
+    ///   - publishedBefore: The publication count before the output the
+    ///     capture must show.
+    /// - Returns: Whether a capture was published after `publishedBefore`.
+    private static func asksForCapture(_ surface: TerminalSurface, publishedBefore: UInt64) -> Bool {
+        let snapshot = surface.drive.readSnapshot()
+        let deadline = Date(timeIntervalSinceNow: 2)
+        while surface.drive.syncFramePublicationCount == publishedBefore, Date() < deadline {
+            var supply = Ubiquitty.Runtime.FrameSupply()
+            _ = surface.selectionModel.takeFrame(
+                drive: surface.drive,
+                rows: Int(snapshot.rows),
+                columns: Int(snapshot.columns),
+                nowTicks: TerminalSurface.monotonicTicksNow(),
+                isResizing: false,
+                keepsSearchLive: false,
+                supply: &supply
+            )
+            RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.02))
+        }
+        return surface.drive.syncFramePublicationCount != publishedBefore
     }
 
     /// Drives synchronized updates through the shell until a boundary frame
