@@ -2803,7 +2803,8 @@ enum SurfaceSmoke {
             // for a hold can find none by the time it is asked about here.
             let decline = renderer.lastFrameDecline
             let isDeferred =
-                decline == .withheld || decline == .blockOpenUnderLock || decline == .drainSaturated || decline == .redrawArriving
+                decline == .withheld || decline == .blockOpenUnderLock || decline == .awaitingCapture
+                || decline == .ownerStalled || decline == .redrawArriving
                 || surface.frameRenderers.values.contains(where: { $0.didDeferForFontPreparation })
             guard isDeferred, Date() < deadline
             else {
