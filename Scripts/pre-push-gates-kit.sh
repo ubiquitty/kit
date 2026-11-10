@@ -26,6 +26,8 @@
 kit_swift_arm_reached() {
     local changed="${1-}" shaderInputs="" pending="" source include resolved pattern selectsShader=0
     local kitRoot="${UBQ_KIT_ROOT:-.}" coreRoot="${UBQ_CORE_ROOT:-.}"
+    # A run that selects every gate (the full tier, CI) reaches the arm.
+    ubq_select_all && return 0
     if [ -z "$changed" ]; then
         changed="$(ubq_changed_with_libraries)" || return 1
     fi
@@ -99,7 +101,7 @@ kit_gate_apple() {
     # The framework is built separately from an app's static modules, so its
     # source lists, bundle layout, shipped resources and Core catalogs all
     # select its external consumer check.
-    if ! git diff --quiet origin/main -- Source/Platform/macOS Source/UbiquittyKit Source/UbiquittyRenderKit \
+    if ubq_select_all || ! git diff --quiet origin/main -- Source/Platform/macOS Source/UbiquittyKit Source/UbiquittyRenderKit \
             Scripts/cmake/UbiquittyKit.cmake Scripts/cmake/AppleSharedSwift.cmake cmake \
             Resources/fonts Resources/phosphor Resources/process-icons \
             Source/Core/Rendering/BundledFonts.h Source/Core/Rendering/FontSelection.h \
@@ -163,6 +165,7 @@ kit_gate_ios() {
 # ubiquitty-kit's own tiers: the shared families of ubiquitty-core that judge any
 # repository's tree, and the kit's arms. The host, agent, PGO and wasm gates
 # judge Core's binaries and are ubiquitty-core's.
+#
 # What the monorepo's quick tier runs for a change to the kit's paths and the kit's
 # list cannot, said out loud so a green run does not read as covering them. Each
 # is named only when the change reaches its scope.
@@ -189,9 +192,10 @@ kit_tier() {
         quick | default) core_gate_style; core_gate_commit_rules; kit_gate_apple; kit_gate_renderer_drivers; kit_gate_ios; kit_gate_tests; kit_gate_not_in_this_list ;;
         ctest) core_gate_style; core_gate_commit_rules; kit_gate_apple; kit_gate_renderer_drivers; kit_gate_ios; kit_gate_tests; kit_gate_ctest; kit_gate_not_in_this_list ;;
         linux) core_gate_style; core_gate_commit_rules; kit_gate_apple; kit_gate_renderer_drivers; kit_gate_ios; kit_gate_tests; kit_gate_linux; kit_gate_not_in_this_list ;;
-        full) core_gate_style; core_gate_commit_rules; kit_gate_apple; kit_gate_renderer_drivers; kit_gate_ios; kit_gate_tests; kit_gate_ctest; kit_gate_linux; kit_gate_not_in_this_list ;;
+        full) core_gate_style; core_gate_commit_rules; kit_gate_apple; kit_gate_renderer_drivers; kit_gate_ios; kit_gate_tests; kit_gate_ctest; kit_gate_linux ;;
+        families) ubq_run_families ;;
         *)
-            echo "pre-push gates: unknown tier '$TIER' (want lint|quick|ctest|linux|full)" >&2
+            echo "pre-push gates: unknown tier '$TIER' (want lint|quick|ctest|linux|full|families)" >&2
             exit 1
             ;;
     esac

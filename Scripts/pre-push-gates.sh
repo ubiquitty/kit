@@ -13,12 +13,14 @@
 # runner ubiquitty-core's Scripts/pre-push-gates-lib.sh. The host, agent, PGO and
 # wasm gates judge Core's binaries and are not in this list.
 #
-#   TIER=lint    every gate that needs no build                       no toolchain
-#   TIER=quick   style + commit rules + the Swift renderer, its drivers, the iOS
-#                protected file and the kit's tests
-#   TIER=ctest   quick + the kit's ctest suite
-#   TIER=linux   quick + the kit's Linux libraries and tests in a container
-#   TIER=full    ctest + linux
+#   TIER=lint      every gate that needs no build                     no toolchain
+#   TIER=quick     style + commit rules + the Swift renderer, its drivers, the
+#                  iOS protected file and the tests the diff reaches, each arm
+#                  when the push reaches it; CI runs the rest
+#   TIER=ctest     quick + the kit's ctest suite
+#   TIER=linux     quick + the kit's Linux libraries and tests in a container
+#   TIER=full      ctest + linux, every arm whatever the push reaches
+#   TIER=families  the families UBQ_PREPUSH_FAMILIES names: CI's entry
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck source=Scripts/ubq-library.sh
