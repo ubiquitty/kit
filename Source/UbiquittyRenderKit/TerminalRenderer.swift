@@ -171,6 +171,8 @@ package final class TerminalRenderer {
         package static let backdrop = BoundaryReuseRefusals(rawValue: 1 << 5)
         /// A row's ink reached past its own row.
         package static let inkEscapesRow = BoundaryReuseRefusals(rawValue: 1 << 6)
+        /// The retained target may not hold the frame last built.
+        package static let wholeFrameOwed = BoundaryReuseRefusals(rawValue: 1 << 7)
     }
 
     /// Why the last boundary build did not reuse the retained grid; empty
@@ -223,6 +225,79 @@ package final class TerminalRenderer {
     /// nothing — a pane whose first drawable arrived late stays blank.
     package func noteFrameNotPresented() {
         lastPresentedOverlay = nil
+        owesWholeFrame = true
+    }
+
+    /// Whether the retained target may not hold the frame last built, so the
+    /// next frame, on either route, builds and draws every row.
+    ///
+    /// Raised where the target stopped holding the last built frame: a frame
+    /// built and not encoded, a picture drawn through this renderer that the
+    /// glass never shows, the target released, or the faces, scale or style
+    /// it was drawn in replaced. Lowered by the first frame that builds every
+    /// row. The renderer's own record, so raising it takes no lock: a whole
+    /// frame reads every row of its capture and none of the damage that says
+    /// which rows changed.
+    package private(set) var owesWholeFrame = true
+
+    /// Records that the retained target no longer holds the frame last built.
+    package func noteRetainedTargetStale() {
+        owesWholeFrame = true
+    }
+
+    /// The captured frame the view last presented, held until the view takes
+    /// a newer capture or presents a frame read from the model.
+    ///
+    /// Holding it is its lease: the drain writes no capture a frontend still
+    /// holds, so a picture drawn from it later reads the rows the glass shows.
+    /// It is always the capture the view last took, the slot a view reads, so
+    /// the lease leaves the drain the other two of its three.
+    package private(set) var presentedCapture: Ubiquitty.Rendering.FrameCapture?
+
+    /// The selection spans drawn over ``presentedCapture``, in its visible
+    /// rows.
+    package private(set) var presentedSelectionSpans: [Ubiquitty.Rendering.SelectionRowSpan] = []
+
+    /// The drain's count of captures it found no slot for, when
+    /// ``presentedCapture`` was taken; a count that has moved since says the
+    /// lease is one of the slots the drain lacks.
+    package private(set) var presentedAtNoSlotCount: UInt64 = 0
+
+    /// Lets ``presentedCapture`` go after a take, when the take replaced it or
+    /// the drain has found no slot since it was leased.
+    ///
+    /// The lease is free only while it is the capture the view last took,
+    /// the slot a view reads. A newer take moves it off that slot, and a
+    /// drain that finds no slot may be short exactly the lease's.
+    ///
+    /// - Parameters:
+    ///   - tookCapture: Whether the take returned a capture.
+    ///   - noSlotCount: The drain's count of captures it found no slot for.
+    package func notePresentedCaptureTake(tookCapture: Bool, noSlotCount: UInt64) {
+        guard presentedCapture != nil, tookCapture || noSlotCount != presentedAtNoSlotCount else {
+            return
+        }
+        notePresented(capture: nil, selectionSpans: [])
+    }
+
+    /// Records the frame the view just presented.
+    ///
+    /// - Parameters:
+    ///   - capture: The captured frame presented, or nil for a frame read
+    ///     from the model.
+    ///   - selectionSpans: The selection drawn over the captured frame.
+    ///   - noSlotCount: The drain's count of captures it found no slot for.
+    package func notePresented(
+        capture: Ubiquitty.Rendering.FrameCapture?,
+        selectionSpans: ArraySlice<Ubiquitty.Rendering.SelectionRowSpan>,
+        noSlotCount: UInt64 = 0
+    ) {
+        presentedCapture = capture
+        presentedAtNoSlotCount = noSlotCount
+        presentedSelectionSpans.removeAll(keepingCapacity: true)
+        if capture != nil {
+            presentedSelectionSpans.append(contentsOf: selectionSpans)
+        }
     }
 
     /// Refuses the retained grid to the next build, which then draws every
@@ -911,11 +986,15 @@ package final class TerminalRenderer {
         // protection while their quads still sample the sheets is the one way
         // this makes things worse.
         didLastFramePresentNothing = false
+        assert(!owesWholeFrame || !plan.shouldLoadRetainedTarget, "a stale retained target was planned to load")
         if wantsFullRebuild, !plan.shouldLoadRetainedTarget {
             rebaselineRetainedFrame()
         }
         guard capture.capture(terminal, options, metrics, atlas.slotGeometry, plan.refresh, Ubiquitty.Rendering.ChromeLayers()) else {
             return false
+        }
+        if !plan.shouldLoadRetainedTarget {
+            owesWholeFrame = false
         }
         isFocusedMatchBouncing = capture.isFocusedMatchBouncing()
         // Net change against the shadow baseline, not bytes or writes: an
@@ -1146,6 +1225,7 @@ package final class TerminalRenderer {
         if wantsFullRebuild { refusals.insert(.fullRebuild) }
         if imagesMayChange { refusals.insert(.images) }
         if backdrop != nil { refusals.insert(.backdrop) }
+        if owesWholeFrame { refusals.insert(.wholeFrameOwed) }
         boundaryReuseRefusals = refusals
         var reusesGrid = refusals.isEmpty
         if hasBakedViewTiers || hadBakedViewTiers {
@@ -1165,6 +1245,9 @@ package final class TerminalRenderer {
         }
         if wantsFullRebuild, !reusesGrid {
             rebaselineRetainedFrame()
+        }
+        if !reusesGrid {
+            owesWholeFrame = false
         }
         var backend = Ubiquitty.Rendering.GlyphBackend()
         backendBox.fillBackend(into: &backend)
@@ -1773,6 +1856,7 @@ package final class TerminalRenderer {
     /// damage baseline before it captures, or a capture that trusted the
     /// baseline hands the dirty rows to a frame with nothing under them.
     package func releaseRetainedGrid() {
+        owesWholeFrame = true
         gridTexture = nil
         gridTextureBack = nil
         secondaryTexture = nil

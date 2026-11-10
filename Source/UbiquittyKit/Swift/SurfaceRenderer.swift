@@ -1074,10 +1074,10 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
         descriptor.usage = [.renderTarget, .shaderRead]
         descriptor.storageMode = .managed
         guard let texture = device.makeTexture(descriptor: descriptor) else { return nil }
-        noteFrameNotPresented(for: surface, renderer: live)
+        noteFrameNotPresented(renderer: live)
         let didDraw = render(surface, into: texture, contentScale: Double(surface.metalLayer.contentsScale))
         if let after = frameRenderer(for: surface) {
-            noteFrameNotPresented(for: surface, renderer: after)
+            noteFrameNotPresented(renderer: after)
         }
         surface.needsDisplay = true
         guard didDraw,
@@ -1148,6 +1148,13 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
 
     /// Boundary frames committed, with or without a selection over them.
     package private(set) var presentedBoundaryFrameCount = 0
+
+    /// Pictures drawn from the captured frame the view last presented.
+    package private(set) var stillsFromPresentedCaptureCount = 0
+
+    /// Refuses the next drawable a frame asks the layer for, as a layer with
+    /// none free does, for a smoke that needs a frame built and not shown.
+    package var refusesNextDrawableForTesting = false
 
     /// The search, trigger and hilite spans the last committed boundary frame
     /// drew over its captured rows, and the publications they were read from.
@@ -2037,6 +2044,10 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
             presentsWithTransaction: layer.presentsWithTransaction,
             allowsFontPreparation: true
         ) {
+            if refusesNextDrawableForTesting {
+                refusesNextDrawableForTesting = false
+                return nil
+            }
             let drawable: CAMetalDrawable?
             #if canImport(AppKit)
             if let supplied = surface.frameLink?.currentDrawable {
@@ -2238,22 +2249,96 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
         }
     }
 
+    /// Draws the captured frame the view last presented into a target the
+    /// glass never shows, for a picture of the pane such as a thumbnail.
+    ///
+    /// The frame is the one on the glass: its rows, and the selection the
+    /// view drew over them. The search, trigger and hilite tiers are the
+    /// pane's published ones now. Nothing here takes the slot's capture or
+    /// waits on the model.
+    ///
+    /// - Parameters:
+    ///   - capture: The view's presented capture.
+    ///   - surface: The surface.
+    ///   - renderer: Its frame renderer, which holds the capture.
+    ///   - clip: The frame's presentation clip in the target.
+    ///   - cursorMixAlpha: The cursor's weight in the picture.
+    ///   - clearColor: The pass's clear colour.
+    ///   - target: The target to draw into.
+    /// - Returns: Whether a frame was encoded.
+    private func encodeStill(
+        _ capture: Ubiquitty.Rendering.FrameCapture,
+        for surface: TerminalSurface,
+        renderer: TerminalRenderer,
+        clip: CGRect?,
+        cursorMixAlpha: Float,
+        clearColor: MTLClearColor,
+        target: () -> FrameTarget?
+    ) -> Bool {
+        capture.setCursorMixAlpha(cursorMixAlpha)
+        renderer.setBackdrop(
+            texture: backdropTexture,
+            opacity: backdropOpacity,
+            mode: backdropMode,
+            pixelWidth: backdropPixelWidth,
+            pixelHeight: backdropPixelHeight
+        )
+        // The capture is the one on the glass, so a build that may load the
+        // retained target would read it as reproducing the glass and draw
+        // nothing; a picture builds every row onto its own target.
+        renderer.noteRetainedTargetStale()
+        var tiers = Ubiquitty.Rendering.OverlaySpanCounts()
+        let built = buildFrameOverCapture(
+            capture,
+            selectionSpans: renderer.presentedSelectionSpans[...],
+            for: surface,
+            renderer: renderer,
+            tiers: &tiers
+        )
+        guard var pending = built else {
+            lastFrameDecline = .boundaryBuild
+            return false
+        }
+        pending.viewportClipInPixels = clip
+        guard let target = target() else {
+            lastFrameDecline = .boundaryDrawable
+            return false
+        }
+        target.descriptor.colorAttachments[0].clearColor = clearColor
+        guard
+            let commands = renderer.encode(
+                pending,
+                secondaryDescriptor: target.secondaryDescriptor,
+                backgroundDescriptor: target.backgroundDescriptor,
+                into: target.descriptor
+            )
+        else {
+            lastFrameDecline = .boundaryEncode
+            return false
+        }
+        commit(
+            commands,
+            presenting: target.drawable,
+            secondaryDrawable: target.secondaryDrawable,
+            backgroundDrawable: target.backgroundDrawable,
+            transactionally: false
+        )
+        stillsFromPresentedCaptureCount += 1
+        return true
+    }
+
     /// Records that a frame was built and not shown.
     ///
     /// The build consumed the rows the capture owed and set the glass
     /// baseline, so a retry would read its own capture as reproducing the
     /// glass and load a retained target nothing wrote: the renderer forgets
-    /// the baseline and the session's retained frame is declared gone, so the
-    /// retry builds every row and presents them.
+    /// the baseline and owes a whole frame, so the retry builds every row and
+    /// presents them. Nothing here waits on the model.
     ///
-    /// - Parameters:
-    ///   - surface: The surface whose frame was denied a drawable.
-    ///   - renderer: Its frame renderer.
-    private func noteFrameNotPresented(for surface: TerminalSurface, renderer: TerminalRenderer) {
+    /// - Parameter renderer: The frame renderer of the surface whose frame was
+    ///   denied a drawable.
+    private func noteFrameNotPresented(renderer: TerminalRenderer) {
         renderer.noteFrameNotPresented()
-        _ = surface.drive.withTerminal { terminal in
-            surface.drive.invalidateRetainedFrame(terminal)
-        }
     }
 
     /// Draws one frame into `texture`, for a caller that reads pixels back.
@@ -2322,10 +2407,12 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
     /// presents, such as a thumbnail, and leaves the pane's next presented
     /// frame whole.
     ///
-    /// The build consumes the rows the capture owed and moves the glass
-    /// baseline, exactly as a drawable that never arrived does, so it is
-    /// answered the same way: the next frame on the glass builds every row.
-    /// The cursor is drawn steady.
+    /// The picture is the captured frame the view last presented, when there
+    /// is one of the pane's grid; otherwise one read of the model, which
+    /// plans every row and retires no capture. Either way the slot's capture,
+    /// the capture registration and the drain's lineage stay the view's.
+    /// The build goes through the view's renderer, so its next frame on the
+    /// glass builds every row. The cursor is drawn steady.
     ///
     /// - Parameters:
     ///   - surface: The surface whose terminal is drawn.
@@ -2337,7 +2424,7 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
         defer { isDrawingStill = false }
         let didRender = render(surface, into: texture, contentScale: contentScale)
         if let renderer = frameRenderer(for: surface) {
-            noteFrameNotPresented(for: surface, renderer: renderer)
+            noteFrameNotPresented(renderer: renderer)
         }
         return didRender
     }
@@ -2960,18 +3047,37 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
                 ? Int(Ubiquitty.Selection.heldViewOffset(Int32(offset), surface.registeredSyncViewHistory, viewHistory))
                 : offset
         }
-        if surface.registeredSyncGeometryOrigin != captureOrigin
-            || surface.registeredSyncGeometrySize != drawableSize
-            || surface.registeredSyncGeometryScale != font.atlasScale
-            || surface.registeredSyncStyle != style
-            || surface.registeredSyncBackground != captureBackground
-            || surface.registeredSyncBackgroundOpacity != groundOpacity
-            || surface.isRegisteredSyncCursorFilled != options.isFocused
-            || registeredViewOffsetNow != surface.viewOffset
-            || surface.registeredSyncRaster != raster
-            || surface.registeredSyncCellWidth != frameMetrics.cellWidth
-            || surface.registeredSyncSheetKey != currentSheetKey
-            || isRegisteredSelectionColorStale
+        // A picture nobody presents, such as a thumbnail, draws the captured
+        // frame the view last presented, when it is of this grid: the slot,
+        // the registration and the lineage the drain captures against stay
+        // the view's. A view whose glass shows a frame read from the model
+        // reads the model again below, without taking the slot's capture.
+        if isDrawingStill, let held = renderer.presentedCapture,
+            Int(held.rows()) == Int(snapshot.rows), Int(held.columns()) == Int(snapshot.columns)
+        {
+            return encodeStill(
+                held,
+                for: surface,
+                renderer: renderer,
+                clip: presentation.clip,
+                cursorMixAlpha: options.cursorMixAlpha,
+                clearColor: passClearColor,
+                target: target
+            )
+        }
+        if !isDrawingStill,
+            surface.registeredSyncGeometryOrigin != captureOrigin
+                || surface.registeredSyncGeometrySize != drawableSize
+                || surface.registeredSyncGeometryScale != font.atlasScale
+                || surface.registeredSyncStyle != style
+                || surface.registeredSyncBackground != captureBackground
+                || surface.registeredSyncBackgroundOpacity != groundOpacity
+                || surface.isRegisteredSyncCursorFilled != options.isFocused
+                || registeredViewOffsetNow != surface.viewOffset
+                || surface.registeredSyncRaster != raster
+                || surface.registeredSyncCellWidth != frameMetrics.cellWidth
+                || surface.registeredSyncSheetKey != currentSheetKey
+                || isRegisteredSelectionColorStale
         {
             // The placement and style are the ones the live path below
             // applies — copied from the same assembled options, so the two
@@ -3035,6 +3141,9 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
             // frame it annotates.
             surface.scrollbackCellHeightPoints = CGFloat(frameMetrics.cellHeight) / contentsScale
             surface.drive.setSyncFrameCaptureGeometry(geometry)
+            // The presented capture was placed and styled by the registration
+            // this one replaces, so no picture draws it again.
+            renderer.notePresented(capture: nil, selectionSpans: [])
             surface.registeredSyncGeometryOrigin = captureOrigin
             surface.registeredSyncGeometrySize = drawableSize
             surface.registeredSyncGeometryScale = font.atlasScale
@@ -3076,14 +3185,20 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
         // lock below.
         let isResizing = surface.isInLiveResizeGesture || surface.isDrawingResizeStep
         var supply = Ubiquitty.Runtime.FrameSupply()
-        let taken = surface.selectionModel.takeFrame(
-            drive: surface.drive,
-            rows: Int(snapshot.rows),
-            columns: Int(snapshot.columns),
-            nowTicks: TerminalSurface.monotonicTicksNow(),
-            isResizing: isResizing,
-            supply: &supply
-        )
+        var taken: Ubiquitty.Rendering.FrameCapture?
+        if isDrawingStill {
+            supply.route = .LiveRead
+        } else {
+            taken = surface.selectionModel.takeFrame(
+                drive: surface.drive,
+                rows: Int(snapshot.rows),
+                columns: Int(snapshot.columns),
+                nowTicks: TerminalSurface.monotonicTicksNow(),
+                isResizing: isResizing,
+                supply: &supply
+            )
+            renderer.notePresentedCaptureTake(tookCapture: taken != nil, noSlotCount: surface.drive.syncFrameNoSlotCount)
+        }
         if let syncFrame = taken {
             let selection = surface.selectionModel
             let spanCount = Int(supply.selection.count)
@@ -3134,7 +3249,7 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
                 // composited: the drawable goes back unpresented, the verdict
                 // reads as a reused frame of no rows, and no retry is asked.
                 if renderer.didDeferForFontPreparation {
-                    noteFrameNotPresented(for: surface, renderer: renderer)
+                    noteFrameNotPresented(renderer: renderer)
                 }
                 if renderer.didLastFramePresentNothing {
                     didReuseLastFrame = true
@@ -3143,6 +3258,13 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
                     didTrustDirtySetLastFrame = true
                     phaseLogReuseTerms = "skipped"
                     skippedAsReproducingGlassCount += 1
+                    // The frame the renderer last presented holds what this
+                    // capture holds.
+                    renderer.notePresented(
+                        capture: syncFrame,
+                        selectionSpans: selection.spanScratch.prefix(spanCount),
+                        noSlotCount: surface.drive.syncFrameNoSlotCount
+                    )
                     return true
                 }
                 lastFrameDecline = .boundaryBuild
@@ -3172,7 +3294,7 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
             lastFrameCounts = renderer.counts
             let waitStartedAt = isPerfLogged ? CACurrentMediaTime() : 0
             guard let target = target() else {
-                noteFrameNotPresented(for: surface, renderer: renderer)
+                noteFrameNotPresented(renderer: renderer)
                 lastFrameDecline = .boundaryDrawable
                 return false
             }
@@ -3186,7 +3308,7 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
                     into: target.descriptor
                 )
             else {
-                noteFrameNotPresented(for: surface, renderer: renderer)
+                noteFrameNotPresented(renderer: renderer)
                 lastFrameDecline = .boundaryEncode
                 return false
             }
@@ -3202,6 +3324,13 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
                 transactionally: presentsWithTransaction
             )
             notePresentedGeometry(for: surface, frame: pending, deviceScale: deviceScale, panOffset: presentation.panOffset)
+            if target.drawable != nil {
+                renderer.notePresented(
+                    capture: syncFrame,
+                    selectionSpans: selection.spanScratch.prefix(spanCount),
+                    noSlotCount: surface.drive.syncFrameNoSlotCount
+                )
+            }
             lastFrameFirstAbsoluteRow = Int(syncFrame.firstAbsoluteRow())
             surface.didLastFrameDrawSelection = spanCount > 0
             surface.didLastFrameDrawSearch = tiers.focusedSearch > 0 || tiers.otherSearch > 0
@@ -3374,7 +3503,9 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
                 SurfaceRenderer.isOcclusionSkipEnabled ? .Enabled : .Disabled
             )
             let plan: Ubiquitty.Rendering.RetainedFramePlan
-            if skipsGridCapture {
+            if isDrawingStill {
+                plan = Ubiquitty.Rendering.makeFullRebuildPlan()
+            } else if skipsGridCapture {
                 gridCaptureSkipCount += 1
                 plan = surface.planSkippedGridFrame(
                     terminal,
@@ -3388,7 +3519,7 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
                     rows: rows,
                     columns: Int(snapshot.columns),
                     viewOffset: options.viewOffset,
-                    target: !grantsFullRebuild && !owesTierRows && reusesRetainedContent,
+                    target: !grantsFullRebuild && !owesTierRows && !renderer.owesWholeFrame && reusesRetainedContent,
                     hasBackdrop: backdropTexture != nil,
                     cellHeightInPixels: Int(metrics.cellHeight.rounded()),
                     originYInPixels: Int(options.originInPixels.y.rounded()),
@@ -3561,7 +3692,7 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
 
         guard var pending else {
             if renderer.didDeferForFontPreparation {
-                noteFrameNotPresented(for: surface, renderer: renderer)
+                noteFrameNotPresented(renderer: renderer)
             }
             // The frame reproduced the glass: nothing is composited, the
             // verdicts already read reused with no dirty row, and no retry is
@@ -3591,7 +3722,7 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
         // what the glass holds.
         let waitStartedAt = isPerfLogged ? CACurrentMediaTime() : 0
         guard let target = target() else {
-            noteFrameNotPresented(for: surface, renderer: renderer)
+            noteFrameNotPresented(renderer: renderer)
             lastFrameDecline = .drawable
             return false
         }
@@ -3605,7 +3736,7 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
                 into: target.descriptor
             )
         else {
-            noteFrameNotPresented(for: surface, renderer: renderer)
+            noteFrameNotPresented(renderer: renderer)
             lastFrameDecline = .encode
             return false
         }
@@ -3621,6 +3752,9 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
             transactionally: presentsWithTransaction
         )
         notePresentedGeometry(for: surface, frame: pending, deviceScale: deviceScale, panOffset: presentation.panOffset)
+        if target.drawable != nil {
+            renderer.notePresented(capture: nil, selectionSpans: [])
+        }
         lastFrameFirstAbsoluteRow = renderer.capturedFirstAbsoluteRow
         surface.didLastFrameDrawSelection = liveFrameDrawsSelection
         if isPerfLogged {

@@ -1024,6 +1024,16 @@ enum SurfaceSmoke {
             return failed(failure)
         }
 
+        // The still legs: a picture of the pane draws the frame on the glass
+        // and leaves the view its capture, and a frame that reached no
+        // drawable makes the next one whole without waiting on the model.
+        if let failure = stillFromPresentedCaptureFailure(surface, renderer: renderer, layer: layer) {
+            return failed(failure)
+        }
+        if let failure = deniedDrawableFailure(surface, renderer: renderer, layer: layer) {
+            return failed(failure)
+        }
+
         // The style leg. A host's styling must be the styling the frame
         // derives its uniforms from. The live route shares the assembled
         // options with the registration by construction, so the assertion
@@ -2719,6 +2729,105 @@ enum SurfaceSmoke {
         return nil
     }
 
+    /// Draws a picture of the pane while a capture waits for the view.
+    ///
+    /// The picture must come from the captured frame the view presented,
+    /// leave the waiting capture for the view's next frame, and leave that
+    /// frame whole, since the picture was built through the view's renderer.
+    ///
+    /// - Parameters:
+    ///   - surface: The surface, its shell awake.
+    ///   - renderer: The surface renderer.
+    ///   - layer: The layer to present into.
+    /// - Returns: Why the leg failed, or nil.
+    private static func stillFromPresentedCaptureFailure(
+        _ surface: TerminalSurface,
+        renderer: SurfaceRenderer,
+        layer: CAMetalLayer
+    ) -> String? {
+        waitForAdmittedFrame(surface)
+        guard presentsBoundaryFrame(surface, renderer: renderer, layer: layer) else {
+            return "no captured frame was presented before the picture (decline=\(renderer.lastFrameDecline.rawValue))"
+        }
+        guard publishesBoundaryFrame(surface) else {
+            return "no capture was published for the picture to leave waiting"
+        }
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .bgra8Unorm_srgb,
+            width: max(1, Int(layer.drawableSize.width)),
+            height: max(1, Int(layer.drawableSize.height)),
+            mipmapped: false
+        )
+        descriptor.usage = [.renderTarget, .shaderRead]
+        guard let texture = renderer.device.makeTexture(descriptor: descriptor) else {
+            return "Metal refused the picture's texture"
+        }
+        let stillsBefore = renderer.stillsFromPresentedCaptureCount
+        guard renderer.renderDetached(surface, into: texture, contentScale: Double(layer.contentsScale)) else {
+            return "the picture of the pane declined: decline=\(renderer.lastFrameDecline.rawValue)"
+        }
+        guard renderer.stillsFromPresentedCaptureCount == stillsBefore + 1 else {
+            return "the picture was not drawn from the captured frame the view presented"
+        }
+        let presentedBefore = renderer.presentedBoundaryFrameCount
+        waitForAdmittedFrame(surface)
+        guard encodeAfterFontPreparation(renderer, for: surface, into: layer),
+            renderer.presentedBoundaryFrameCount == presentedBefore + 1
+        else {
+            return "the picture took the capture the view was about to present (decline=\(renderer.lastFrameDecline.rawValue))"
+        }
+        guard !renderer.didReuseLastFrame else {
+            return "the frame after the picture loaded a retained target the picture was drawn through"
+        }
+        return nil
+    }
+
+    /// Denies a frame its drawable while another thread holds the model.
+    ///
+    /// The frame must give up without waiting on the model, and the next
+    /// presented frame must build every row: the retained target never
+    /// received the frame that was built.
+    ///
+    /// - Parameters:
+    ///   - surface: The surface, its shell awake.
+    ///   - renderer: The surface renderer.
+    ///   - layer: The layer to present into.
+    /// - Returns: Why the leg failed, or nil.
+    private static func deniedDrawableFailure(
+        _ surface: TerminalSurface,
+        renderer: SurfaceRenderer,
+        layer: CAMetalLayer
+    ) -> String? {
+        waitForAdmittedFrame(surface)
+        guard presentsBoundaryFrame(surface, renderer: renderer, layer: layer) else {
+            return "no captured frame was presented before the denied one (decline=\(renderer.lastFrameDecline.rawValue))"
+        }
+        guard publishesBoundaryFrame(surface) else {
+            return "no capture was published for the denied frame"
+        }
+        let holder = ModelLockHolder(surface.drive)
+        holder.hold()
+        renderer.refusesNextDrawableForTesting = true
+        let started = CACurrentMediaTime()
+        let drew = renderer.encodeFrame(for: surface, into: layer)
+        let waited = CACurrentMediaTime() - started
+        let decline = renderer.lastFrameDecline
+        holder.letGo()
+        guard !drew, decline == .boundaryDrawable else {
+            return "a captured frame denied its drawable drew=\(drew), decline=\(decline.rawValue)"
+        }
+        guard waited < 0.5 else {
+            return "a captured frame denied its drawable waited \(waited)s while another thread held the model"
+        }
+        guard presentsBoundaryFrame(surface, renderer: renderer, layer: layer) else {
+            return "no captured frame was presented after the denied one (decline=\(renderer.lastFrameDecline.rawValue))"
+        }
+        guard !renderer.didReuseLastFrame else {
+            return "the frame after a denied drawable loaded a retained target that never received the denied frame"
+        }
+        return nil
+    }
+
     /// Draws the next frame between rows arriving below the view and the view
     /// taking them, right after a boundary frame drew the view held back over
     /// its history with a selection there.
@@ -2797,7 +2906,9 @@ enum SurfaceSmoke {
     /// once a view has asked for a frame. An ask that finds a capture already
     /// published since `publishedBefore` is not made, and one that finds an
     /// older capture waiting takes it and drops it, so the capture that
-    /// follows shows the screen as it stands after the ask.
+    /// follows shows the screen as it stands after the ask. Each ask lets go
+    /// of the capture the view holds as presented by the rule a tick's take
+    /// applies, since the drain writes no capture a view holds.
     ///
     /// - Parameters:
     ///   - surface: The surface, its shell awake.
@@ -2809,7 +2920,7 @@ enum SurfaceSmoke {
         let deadline = Date(timeIntervalSinceNow: 2)
         while surface.drive.syncFramePublicationCount == publishedBefore, Date() < deadline {
             var supply = Ubiquitty.Runtime.FrameSupply()
-            _ = surface.selectionModel.takeFrame(
+            let taken = surface.selectionModel.takeFrame(
                 drive: surface.drive,
                 rows: Int(snapshot.rows),
                 columns: Int(snapshot.columns),
@@ -2817,6 +2928,9 @@ enum SurfaceSmoke {
                 isResizing: false,
                 supply: &supply
             )
+            for renderer in surface.frameRenderers.values {
+                renderer.notePresentedCaptureTake(tookCapture: taken != nil, noSlotCount: surface.drive.syncFrameNoSlotCount)
+            }
             RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.02))
         }
         return surface.drive.syncFramePublicationCount != publishedBefore
@@ -3067,3 +3181,32 @@ enum SurfaceSmoke {
 }
 
 #endif
+
+/// Holds a pane's model lock on a thread of its own until let go, for a leg
+/// that shows a frame-path step does not wait on the model.
+private final class ModelLockHolder: @unchecked Sendable {
+    private let drive: RuntimeDrive
+    private let held = DispatchSemaphore(value: 0)
+    private let released = DispatchSemaphore(value: 0)
+
+    init(_ drive: RuntimeDrive) {
+        self.drive = drive
+    }
+
+    /// Takes the lock on a new thread and returns once it is held. The thread
+    /// lets it go when ``letGo()`` is called, or after five seconds.
+    func hold() {
+        Thread { [self] in
+            drive.lockForRead()
+            held.signal()
+            _ = released.wait(timeout: .now() + 5)
+            drive.unlockForRead()
+        }
+        .start()
+        held.wait()
+    }
+
+    func letGo() {
+        released.signal()
+    }
+}

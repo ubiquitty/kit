@@ -2414,9 +2414,14 @@ public final class TerminalSurface: PlatformView {
         resizeGridToBounds(reportingChangeFrom: standingGrid)
     }
 
+    /// Makes the next frame of every scale build and draw every row.
+    ///
+    /// For a change that leaves the retained targets holding pixels the next
+    /// frame lays out differently. A renderer cut after this starts owing a
+    /// whole frame of its own, and nothing here waits on the model.
     package func invalidateRetainedBaseline() {
-        drive.withTerminal { terminal in
-            drive.invalidateRetainedFrame(terminal)
+        for renderer in frameRenderers.values {
+            renderer.noteRetainedTargetStale()
         }
     }
 
