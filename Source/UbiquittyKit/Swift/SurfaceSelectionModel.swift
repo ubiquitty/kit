@@ -34,6 +34,10 @@ final class SurfaceSelectionModel {
     /// The highlight spans of the last frame, reused so a steady selection
     /// allocates nothing per frame.
     var spanScratch: [Ubiquitty.Rendering.SelectionRowSpan] = []
+
+    /// The most spans a captured frame has needed, so the room ``spanScratch``
+    /// is given before a tick covers a capture taken at a larger grid.
+    var spansNeeded = 0
     /// Where the last frame's selection begins and ends on screen, in
     /// viewport cells, for the touch shell's handles; nil when the frame drew
     /// none. The end's column is the last selected cell, inclusive.
