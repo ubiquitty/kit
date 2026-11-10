@@ -4291,12 +4291,6 @@ public final class RuntimeDrive {
         session.isDrainSaturated()
     }
 
-    /// Whether a tick that found no capture in the sync slot may present
-    /// nothing and wait for the drain's next one rather than read the model.
-    public var shouldSkipLiveReadForSaturation: Bool {
-        session.shouldSkipLiveReadForSaturation()
-    }
-
     /// The adaptive drain streak, for a debug readout.
     public var presentationFastDrainStreak: Int {
         Int(session.presentationFastDrainStreak())
@@ -4316,21 +4310,6 @@ public final class RuntimeDrive {
     /// open, or a whole-screen erase's redraw is still arriving.
     public func shouldWithholdFrame(nowTicks: UInt32) -> Bool {
         session.shouldWithholdFrame(Ubiquitty.Ticks(nowTicks))
-    }
-
-    /// The capture's recheck under the model lock it holds: a block the
-    /// parser opened, or a screen it erased, since the published check.
-    public func shouldWithholdCapture(_ terminal: Ubiquitty.Terminal, nowTicks: UInt32) -> Bool {
-        session.shouldWithholdCapture(terminal, Ubiquitty.Ticks(nowTicks))
-    }
-
-    /// The live-resize capture's check under the model lock it holds: the
-    /// redraw behind the newest whole-screen erase has not been parsed whole.
-    ///
-    /// - Parameter terminal: The model, borrowed under the caller's lock.
-    /// - Returns: True while the capture would show the erased screen.
-    public func isEraseRedrawArriving(_ terminal: Ubiquitty.Terminal) -> Bool {
-        session.isEraseRedrawArriving(terminal)
     }
 
     /// Tells the drain whether a live resize is in progress, so that it takes
