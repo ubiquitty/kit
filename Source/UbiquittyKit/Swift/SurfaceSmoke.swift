@@ -2403,7 +2403,8 @@ enum SurfaceSmoke {
     /// - A resize step is held only under the model lock: the published hold
     ///   does not wait for it.
     /// - A view drawing search matches reads the model while a capture
-    ///   waits, and leaves the capture in the slot.
+    ///   waits, and retires the capture: the live plan drains the slot, so
+    ///   rows older than the live frame are never presented after it.
     ///
     /// - Parameters:
     ///   - surface: The surface, its shell awake.
@@ -2474,9 +2475,9 @@ enum SurfaceSmoke {
         let tookCapture = renderer.presentedBoundaryFrameCount != presentedBefore
         let isCaptureWaiting = surface.drive.takeSyncFrame() != nil
         surface.clearSearch()
-        guard drewOverSearch, !tookCapture, isCaptureWaiting else {
+        guard drewOverSearch, !tookCapture, !isCaptureWaiting else {
             return "a view drawing search matches drew=\(drewOverSearch), took the capture=\(tookCapture),"
-                + " left it waiting=\(isCaptureWaiting): it reads the model and leaves the capture"
+                + " left it waiting=\(isCaptureWaiting): it reads the model and retires the capture"
         }
         guard encodeAfterFontPreparation(renderer, for: surface, into: layer) else {
             return "the frame after the search ended declined: decline=\(renderer.lastFrameDecline.rawValue)"
