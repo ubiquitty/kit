@@ -1086,6 +1086,14 @@ enum SurfaceSmoke {
             )
         }
 
+        // The spacing and palette legs read the slot and the retained target
+        // between draws of their own. A publication wakes the view, and the
+        // surface's own link would take the capture or draw into its own layer
+        // between them, so the link stays off until the palette leg ends; the
+        // count of draws the surface made on its own goes in every refusal.
+        surface.isFrameLinkHeldOffForTesting = true
+        let selfDrawsBeforeHeldLegs = surface.drawnFrameCount
+
         // A spacing change must reach boundary captures even when the drawable,
         // cell width, scale, and style stay fixed.
         let originalTypography = renderer.typography
@@ -1116,7 +1124,10 @@ enum SurfaceSmoke {
             }
             _ = asksForCapture(surface, publishedBefore: publishedBeforeSpacing)
             guard let spaced = surface.drive.takeSyncFrame() else {
-                return failed("no boundary capture followed the spacing change")
+                return failed(
+                    "no boundary capture followed the spacing change"
+                        + " (surface drew \(surface.drawnFrameCount - selfDrawsBeforeHeldLegs) frames on its own)"
+                )
             }
             guard abs(Double(spaced.uniforms().cellSizeInPixels.y) - expectedHeight) < 0.001 else {
                 return failed("boundary capture kept row height \(spaced.uniforms().cellSizeInPixels.y), expected \(expectedHeight)")
@@ -1242,9 +1253,11 @@ enum SurfaceSmoke {
             return failed(
                 "re-asserting an unchanged palette colour broke grid reuse"
                     + " (epoch \(String(describing: epochAfterRepeat)),"
-                    + " dirty \(renderer.lastFrameDirtyRows)/\(renderer.lastFramePlannedRows))"
+                    + " dirty \(renderer.lastFrameDirtyRows)/\(renderer.lastFramePlannedRows),"
+                    + " surface drew \(surface.drawnFrameCount - selfDrawsBeforeHeldLegs) frames on its own)"
             )
         }
+        surface.isFrameLinkHeldOffForTesting = false
 
         // The status-line leg. DECSSDT's cells are assembled by Core and ride
         // the options as a borrow of surface-owned scratch; the observable is
