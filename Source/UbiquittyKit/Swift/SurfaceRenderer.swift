@@ -3039,6 +3039,21 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
                 pixelWidth: backdropPixelWidth,
                 pixelHeight: backdropPixelHeight
             )
+            // The retained target holds pixels drawn under the stamp the last
+            // presented frame recorded, on either route. A capture planned as a
+            // Delta would Load them, so a styling, content epoch or origin that
+            // moved since then builds every row, as the live route's verdict
+            // does. The palette is the capture's own: Core plans a frame whose
+            // palette moved whole.
+            let boundaryOrigin = CGPoint(x: CGFloat(options.originInPixels.x), y: CGFloat(options.originInPixels.y))
+            let presentedStamp = retainedStamps[ObjectIdentifier(renderer)]
+            let isBoundaryTargetCurrent =
+                presentedStamp.map {
+                    $0.style == style && $0.contentEpoch == surface.retainedContentEpoch && $0.origin == boundaryOrigin
+                } ?? false
+            if !isBoundaryTargetCurrent {
+                renderer.requestFullRebuild()
+            }
             // The selection is a tier over the frozen rows, in the fill and ink
             // the capture resolved from its own style and the host's colours.
             let built = selection.spanScratch.withUnsafeBufferPointer { spans -> TerminalRenderer.PendingFrame? in
@@ -3081,6 +3096,13 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
             // cleared target trusting a partial damage set.
             pending.viewportClipInPixels = presentation.clip
             surface.noteFrameImageQuads(Int32(pending.imageQuadCount))
+            retainedStamps[ObjectIdentifier(renderer)] = RetainedStamp(
+                style: style,
+                contentEpoch: surface.retainedContentEpoch,
+                origin: boundaryOrigin,
+                paletteEpoch: syncFrame.paletteGeneration(),
+                isEdgeToEdge: presentedStamp?.isEdgeToEdge ?? false
+            )
             let didReuseBoundaryGrid = renderer.didBoundaryFrameReuseGrid
             didReuseLastFrame = didReuseBoundaryGrid
             lastFramePlannedRows = Int(snapshot.rows)
