@@ -143,7 +143,7 @@ if(UBIQUITTY_FRONTEND STREQUAL "macOS")
     option(UBIQUITTY_HARFBUZZ_PROBE "Build the experimental uniform-face shaping comparison" OFF)
     set(UBIQUITTY_SWIFT_PGO_FLAGS "" CACHE STRING "Swift codegen profile flags (empty = no PGO)")
     ubiquitty_kit_swift_flags(PLATFORM macOS)
-    ubiquitty_kit_add_swift_modules(PLATFORM macOS)
+    ubiquitty_kit_add_swift_modules(PLATFORM macOS CXX_TARGETS UbiquittyKit)
     # The framework compiles the Kit's sources itself; the static module is what
     # an app links, and it is built when a target asks for it.
     set_target_properties(UbiquittyKitModule PROPERTIES EXCLUDE_FROM_ALL ON)
@@ -152,6 +152,8 @@ if(UBIQUITTY_FRONTEND STREQUAL "macOS")
     ubiquitty_kit_add_framework(
         CORE_SOURCES ${UBIQUITTY_PORTABLE_CORE_ABS}
         METAL_LIBRARY UbiquittyMetalLib)
+    ubiquitty_kit_add_layout_probe(PLATFORM macOS CXX_TARGETS UbiquittyKit)
+    add_dependencies(UbiquittyKit ubiquitty-kit-layout-probe)
 
     # The host tests link Core's aggregate, which this arm does not otherwise
     # build.
@@ -261,7 +263,9 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "iOS")
     enable_language(Swift)
 
     ubiquitty_kit_swift_flags(PLATFORM iOS)
-    ubiquitty_kit_add_swift_modules(PLATFORM iOS LINK_LIBRARIES ubiquitty-core-ios)
+    ubiquitty_kit_add_swift_modules(PLATFORM iOS CXX_TARGETS ubiquitty-core-ios ubiquitty-kit
+        LINK_LIBRARIES ubiquitty-core-ios)
+    ubiquitty_kit_add_layout_probe(PLATFORM iOS CXX_TARGETS ubiquitty-core-ios ubiquitty-kit)
 
     # The shaders, compiled for the SDK being built by a script run when the
     # build runs.
