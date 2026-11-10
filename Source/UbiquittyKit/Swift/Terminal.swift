@@ -87,7 +87,10 @@ public struct Terminal: View {
     ///
     /// The parameters are `Process`'s, as
     /// ``TerminalView/launch(executableURL:arguments:environment:currentDirectoryURL:)``
-    /// takes them.
+    /// takes them, and what that refuses starts nothing and is reported to
+    /// ``View/onTerminalLaunchFailure(_:)``: a missing or unexecutable
+    /// program, a working directory that is missing or cannot be entered, and
+    /// arguments or variables past the limits it names.
     ///
     /// - Parameters:
     ///   - executableURL: The program, as a file URL.
@@ -187,9 +190,13 @@ extension View {
     /// was made to run.
     ///
     /// - Parameter action: Called on the main actor, after the update that made
-    ///   the terminal, when the shell, command or program did not launch: a
-    ///   pseudo-terminal or process that could not be opened, a command line
-    ///   holding a NUL, or a session Core refused. Nil performs nothing.
+    ///   the terminal, when the shell, command or program did not start: a
+    ///   pseudo-terminal that could not be opened, a session Core refused, a
+    ///   command line holding a NUL, or a program launch refused as
+    ///   ``TerminalView/launch(executableURL:arguments:environment:currentDirectoryURL:)``
+    ///   refuses it. What a started shell fails at, such as a command it
+    ///   cannot find, it reports by exiting, to ``onTerminalExit(_:)``. Nil
+    ///   performs nothing.
     /// - Returns: A view that reports its terminals' failed launches.
     @available(iOS, unavailable)
     public func onTerminalLaunchFailure(_ action: (() -> Void)?) -> some View {
@@ -323,6 +330,12 @@ final class TerminalCoordinator: TerminalSurfaceObserver {
         Task { @MainActor in action(title) }
     }
 
+    /// Forgets the title last handed over, so a title action given again is
+    /// handed the title standing even when it has not moved.
+    func forgetToldTitle() {
+        lastToldTitle = nil
+    }
+
     /// Calls the launch failure action, after the current update.
     func reportLaunchFailure() {
         guard let action = launchFailureAction else { return }
@@ -437,6 +450,14 @@ struct TerminalRepresentable {
         coordinator.inputAction = environment.terminalInputAction
         coordinator.launchFailureAction = environment.terminalLaunchFailureAction
         let hasTitleAction = coordinator.titleAction != nil
+        if hadTitleAction, !hasTitleAction {
+            coordinator.forgetToldTitle()
+        }
+        // Only the identity showing the terminal dresses and observes it: one
+        // a host-owned view has moved on from is still updated until SwiftUI
+        // tears it down, and would take the observer back from the identity
+        // that shows the view.
+        guard terminal.superview === host else { return }
         let mayObserve = !coordinator.isHostOwned || terminal.observer == nil || terminal.observer is TerminalCoordinator
         if mayObserve, terminal.observer !== coordinator || hadTitleAction != hasTitleAction {
             terminal.observer = coordinator
@@ -458,6 +479,8 @@ struct TerminalRepresentable {
 
     /// Lets go of this identity's terminal: the observer it set and the
     /// container, unless the terminal has already moved to the next identity's.
+    /// A session this identity owns ends here, whenever SwiftUI frees the
+    /// view; a host's session is the host's.
     ///
     /// - Parameters:
     ///   - host: The container SwiftUI is tearing down.
@@ -469,6 +492,9 @@ struct TerminalRepresentable {
         }
         if terminal.superview === host {
             terminal.removeFromSuperview()
+        }
+        if !coordinator.isHostOwned {
+            terminal.surface?.endSession()
         }
         coordinator.terminalView = nil
     }

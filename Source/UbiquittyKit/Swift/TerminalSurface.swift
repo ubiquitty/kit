@@ -1357,7 +1357,7 @@ private func surfaceDrainSignal(_ context: UInt) {
 
 /// What an archive holds in a ``TerminalSurface``'s place when nothing holds
 /// the surface that rebuilds one: an empty view of its frame.
-@objc(UBQArchivedTerminalSurface)
+@objc(UBArchivedTerminalSurface)
 final class ArchivedTerminalSurface: PlatformView {
     /// Carries what a surface is archived as, made on the main actor, out to
     /// the archiver that asked for it on the same thread.
@@ -3334,6 +3334,15 @@ public final class TerminalSurface: PlatformView {
                 || (UInt8(ascii: "0")...UInt8(ascii: "9")).contains(byte) || byte == UInt8(ascii: "_")
         }
         return bytes.allSatisfy(isNameByte) && !reservedEnvironmentNames.contains(name)
+    }
+
+    /// Ends the session now rather than when the surface is freed: ingest
+    /// stops and the program's pseudo-terminal closes, which hangs the program
+    /// up. The surface keeps what it last drew and takes no more input.
+    /// Idempotent, and the surface's own teardown repeats it harmlessly.
+    package func endSession() {
+        drive.stopIngest()
+        drive.close()
     }
 
     /// Starts reading the program a launch just opened.

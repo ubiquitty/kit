@@ -55,8 +55,10 @@ internal import UbiquittyRenderKit
 /// local program, a host feeds the bytes its own connection receives with
 /// ``feed(_:)`` and hears what the person types as
 /// ``TerminalSurfaceObserver/terminalSurface(_:didTransmit:count:)``; a tap
-/// that asks for a keyboard raises the view's own, which types text, Return
-/// and Delete, as does ``becomeFirstResponder()``.
+/// that asks for a keyboard raises the view's own, as does
+/// ``becomeFirstResponder()``. That keyboard types text, Return and Delete
+/// and nothing else: no arrows, Escape, Tab or Control chords, from the
+/// software keyboard or a hardware one.
 public final class TerminalView: PlatformView {
     /// The terminal this view shows, or nil when Core refused a session.
     ///
@@ -228,9 +230,15 @@ public final class TerminalView: PlatformView {
     ///     inherits from the app.
     ///   - currentDirectoryURL: The working directory, or nil for the user's
     ///     home directory.
-    /// - Returns: Whether the program launched and its output is being read;
-    ///   false as ``TerminalSurface/launch(executableURL:arguments:environment:currentDirectoryURL:)``
-    ///   answers it.
+    /// - Returns: Whether the program launched and its output is being read.
+    ///   False, with nothing started, for what
+    ///   ``TerminalSurface/launch(executableURL:arguments:environment:currentDirectoryURL:)``
+    ///   refuses: an executable that is missing, a directory or not
+    ///   executable; a working directory that is missing, not a directory,
+    ///   not enterable or longer than 1023 bytes; more than 255 arguments or
+    ///   128 variables; a variable name other than ASCII letters, digits and
+    ///   `_` not starting with a digit, or one the terminal sets itself; a
+    ///   NUL; a view that already runs a program; and iOS.
     @discardableResult
     public func launch(
         executableURL: URL,
@@ -296,14 +304,16 @@ public final class TerminalView: PlatformView {
     }
 
     /// Resolves Core's theme again for an appearance that may have changed,
-    /// while the view draws Core's theme and Core follows the system
-    /// appearance.
+    /// while the view is in a window, draws Core's theme, and Core follows
+    /// the system appearance.
     ///
     /// Only a theme that moves is applied: applying one resets the colours
     /// programs set, which an appearance change that resolves to the same
-    /// theme must not do.
+    /// theme must not do. A view out of any window reads an appearance no
+    /// window gives it, the app's or none, so it follows nothing until it
+    /// joins one again.
     private func followAppearance() {
-        guard let surface, themeName == nil, isFollowingAppearance else { return }
+        guard let surface, window != nil, themeName == nil, isFollowingAppearance else { return }
         let index = configuredThemeIndex(followingAppearance: true)
         guard Int(surface.drive.currentThemeIndex()) != index else { return }
         _ = surface.applyTheme(at: index)
@@ -340,6 +350,14 @@ public final class TerminalView: PlatformView {
 
     override public func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
+        followAppearance()
+    }
+
+    /// Resolves the theme for the window the view joined: AppKit can tell a
+    /// view its appearance changed before the view has a window, when this
+    /// view follows none.
+    override public func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
         followAppearance()
     }
 
@@ -411,9 +429,9 @@ public final class TerminalView: PlatformView {
 ///
 /// UIKit shows a keyboard for a first responder that takes text, and a surface
 /// takes none: its typing is the host's. A view that holds a surface is that
-/// host, so it holds this. It takes committed text, Return and Delete; an
-/// input method's marked text and a hardware keyboard's arrows, Escape and
-/// chords are a host's keyboard's to carry.
+/// host, so it holds this. It takes committed text, Return and Delete, and
+/// carries no input method's marked text and no arrows, Escape, Tab or
+/// Control chords, from the software keyboard or a hardware one.
 final class TerminalKeyboardInput: UIView, UIKeyInput {
     /// The surface the keyboard types into.
     weak var surface: TerminalSurface?

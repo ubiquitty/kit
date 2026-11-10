@@ -1735,6 +1735,34 @@ let passed = MainActor.assumeIsolated { () -> Bool in
         return refuse("Core's font did not restore \(fittedGrid.rows)x\(fittedGrid.columns)")
     }
 
+    // Out of its window the view follows no appearance: an app whose
+    // appearance turns light while the view is out of a window forced dark
+    // moves no theme, and the view comes back with a program's colour
+    // standing.
+    NSApp.appearance = NSAppearance(named: .darkAqua)
+    window.appearance = NSAppearance(named: .darkAqua)
+    view.themeName = nil
+    guard spin(seconds: 2, until: { drawsDarkTheme(surface) == true }) else {
+        return refuse("a dark window in a dark app drew \(surface.currentThemeName ?? "no theme")")
+    }
+    view.feed(Data("\u{1b}]11;rgb:65/43/21\u{7}".utf8))
+    let detachedBackground: [UInt8] = [0x65, 0x43, 0x21]
+    guard spin(seconds: 2, until: { background(surface) == detachedBackground }) else {
+        return refuse("OSC 11 did not set the background before the view left its window")
+    }
+    view.removeFromSuperview()
+    _ = spin(seconds: 0.3) { false }
+    NSApp.appearance = NSAppearance(named: .aqua)
+    _ = spin(seconds: 0.5) { false }
+    guard background(surface) == detachedBackground, drawsDarkTheme(surface) == true else {
+        return refuse("a light app moved the theme of a view out of its window to \(surface.currentThemeName ?? "none"), background \(background(surface))")
+    }
+    window.contentView = view
+    _ = spin(seconds: 0.5) { false }
+    guard background(surface) == detachedBackground, drawsDarkTheme(surface) == true else {
+        return refuse("a view back in its dark window drew \(surface.currentThemeName ?? "no theme") with background \(background(surface))")
+    }
+
     view.send("exit\r")
     guard spin(seconds: 10, until: { report.hasExited }) else {
         return refuse("the observer the view forwards never heard the shell exit")
@@ -1764,14 +1792,51 @@ let passed = MainActor.assumeIsolated { () -> Bool in
     else {
         return refuse("the program form showed \(programView.surface.map(screenLines) ?? []), not its arguments, variable and directory")
     }
+    // Each launch Core would refuse, or run somewhere else, is refused before
+    // anything starts, and leaves the view free to launch.
+    let echo = URL(fileURLWithPath: "/bin/echo")
+    let lockedDirectory = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("terminal-view-locked")
+    try? FileManager.default.createDirectory(at: lockedDirectory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o600])
+    defer { try? FileManager.default.removeItem(at: lockedDirectory) }
+    let refusals: [(String, (TerminalView) -> Bool)] = [
+        ("a NUL in a command line", { $0.launchCommand("printf a\u{0}b") }),
+        ("a NUL in an argument", { $0.launch(executableURL: echo, arguments: ["a\u{0}b"]) }),
+        ("a NUL in a value", { $0.launch(executableURL: echo, environment: ["SAMPLE": "a\u{0}b"]) }),
+        ("a URL that is not a file", { $0.launch(executableURL: URL(string: "https://example.com/echo")!) }),
+        ("a missing program", { $0.launch(executableURL: URL(fileURLWithPath: "/nonexistent/program")) }),
+        ("a directory as the program", { $0.launch(executableURL: URL(fileURLWithPath: "/usr/bin")) }),
+        ("a file that is not executable", { $0.launch(executableURL: URL(fileURLWithPath: "/etc/hosts")) }),
+        ("a missing directory", { $0.launch(executableURL: echo, currentDirectoryURL: URL(fileURLWithPath: "/nonexistent-directory")) }),
+        ("a file as the directory", { $0.launch(executableURL: echo, currentDirectoryURL: URL(fileURLWithPath: "/etc/hosts")) }),
+        ("a directory that cannot be entered", { $0.launch(executableURL: echo, currentDirectoryURL: lockedDirectory) }),
+        ("a directory path past 1023 bytes", {
+            $0.launch(executableURL: echo, currentDirectoryURL: URL(fileURLWithPath: "/" + String(repeating: "d", count: 1100)))
+        }),
+        ("256 arguments", { $0.launch(executableURL: echo, arguments: Array(repeating: "x", count: 256)) }),
+        ("129 variables", {
+            $0.launch(executableURL: echo, environment: Dictionary(uniqueKeysWithValues: (0..<129).map { ("SAMPLE_\($0)", "x") }))
+        }),
+        ("an empty name", { $0.launch(executableURL: echo, environment: ["": "x"]) }),
+        ("a name holding =", { $0.launch(executableURL: echo, environment: ["A=B": "x"]) }),
+        ("a name holding -", { $0.launch(executableURL: echo, environment: ["A-B": "x"]) }),
+        ("a name starting with a digit", { $0.launch(executableURL: echo, environment: ["1A": "x"]) }),
+        ("TERM", { $0.launch(executableURL: echo, environment: ["TERM": "dumb"]) }),
+        ("COLORTERM", { $0.launch(executableURL: echo, environment: ["COLORTERM": "x"]) }),
+        ("TERM_PROGRAM", { $0.launch(executableURL: echo, environment: ["TERM_PROGRAM": "x"]) }),
+        ("TERM_PROGRAM_VERSION", { $0.launch(executableURL: echo, environment: ["TERM_PROGRAM_VERSION": "x"]) }),
+        ("LC_CTYPE", { $0.launch(executableURL: echo, environment: ["LC_CTYPE": "C"]) }),
+        ("LC_ALL", { $0.launch(executableURL: echo, environment: ["LC_ALL": "C"]) }),
+    ]
     let refusingView = TerminalView()
-    guard !refusingView.launchCommand("printf a\u{0}b"),
-        !refusingView.launch(executableURL: URL(fileURLWithPath: "/bin/echo"), arguments: ["a\u{0}b"]),
-        !refusingView.launch(executableURL: URL(fileURLWithPath: "/bin/echo"), environment: ["A=B": "c"]),
-        !refusingView.launch(executableURL: URL(string: "https://example.com/echo")!),
-        refusingView.launchCommand("true")
-    else {
-        return refuse("a NUL, a name holding =, or a URL that is not a file was launched, or its refusal used the view up")
+    for (what, launch) in refusals where launch(refusingView) {
+        return refuse("\(what) was launched")
+    }
+    guard refusingView.launchCommand("true") else {
+        return refuse("refused launches used the view up")
+    }
+    let boundaryView = TerminalView()
+    guard boundaryView.launch(executableURL: echo, arguments: Array(repeating: "x", count: 255)) else {
+        return refuse("255 arguments, the most a launch takes, were refused")
     }
 
     // A live view archived and read back comes back with a session of its
@@ -1846,6 +1911,8 @@ final class Heard {
     var exits = 0
     var launchFailures = 0
     var input = Data()
+    var twinInputShowing = Data()
+    var twinInputLeft = Data()
 }
 
 /// The state the host's view reads.
@@ -1856,11 +1923,14 @@ final class Choice: ObservableObject {
     @Published var ownedGeneration = 0
     @Published var hostedGeneration = 0
     @Published var unrelated = 0
+    @Published var showsTwinTwice = false
+    @Published var leftTwinFontSize: CGFloat?
 }
 
 struct Panes: View {
     let heard: Heard
     let hosted: TerminalView
+    let twin: TerminalView
     @ObservedObject var choice: Choice
 
     var body: some View {
@@ -1872,6 +1942,16 @@ struct Panes: View {
                 .onTerminalTitleChange(choice.isListeningForLateTitle ? { heard.lateTitles.append($0) } : nil)
             Terminal(command: "printf a\u{0}b")
                 .onTerminalLaunchFailure { heard.launchFailures += 1 }
+            Terminal(executableURL: URL(fileURLWithPath: "/nonexistent/program"))
+                .onTerminalLaunchFailure { heard.launchFailures += 1 }
+            HStack(spacing: 0) {
+                if choice.showsTwinTwice {
+                    Terminal(twin).onTerminalInput { heard.twinInputShowing.append($0) }
+                }
+                Terminal(twin)
+                    .terminalFont(size: choice.leftTwinFontSize)
+                    .onTerminalInput { heard.twinInputLeft.append($0) }
+            }
             VStack(spacing: 0) {
                 Terminal(hosted)
                     .id(choice.hostedGeneration)
@@ -1960,7 +2040,8 @@ let passed = MainActor.assumeIsolated { () -> Bool in
     guard let hostedSurface = hosted.surface, let hostedRenderer = hostedSurface.renderer else {
         return refuse("no hosted view with a renderer")
     }
-    let hosting = NSHostingView(rootView: Panes(heard: heard, hosted: hosted, choice: choice))
+    let twin = TerminalView()
+    let hosting = NSHostingView(rootView: Panes(heard: heard, hosted: hosted, twin: twin, choice: choice))
     let window = NSWindow(
         contentRect: CGRect(x: -4000, y: -4000, width: 640, height: 960),
         styleMask: [.borderless],
@@ -1972,8 +2053,8 @@ let passed = MainActor.assumeIsolated { () -> Bool in
     window.orderFrontRegardless()
     defer { window.orderOut(nil) }
 
-    guard spin(seconds: 5, until: { terminalViews(in: hosting).count == 5 }) else {
-        return refuse("SwiftUI made \(terminalViews(in: hosting).count) terminal views, not 5")
+    guard spin(seconds: 5, until: { terminalViews(in: hosting).count == 7 }) else {
+        return refuse("SwiftUI made \(terminalViews(in: hosting).count) terminal views, not 7")
     }
 
     // A command's title and exit, and a failed launch.
@@ -1989,8 +2070,8 @@ let passed = MainActor.assumeIsolated { () -> Bool in
     else {
         return refuse("no terminal kept and drew the command's line: \(terminalViews(in: hosting).map(screenText))")
     }
-    guard spin(seconds: 2, until: { heard.launchFailures == 1 }) else {
-        return refuse("a command line holding a NUL reached onTerminalLaunchFailure \(heard.launchFailures) times")
+    guard spin(seconds: 2, until: { heard.launchFailures == 2 }) else {
+        return refuse("a command line holding a NUL and a missing program reached onTerminalLaunchFailure \(heard.launchFailures) times, not twice")
     }
 
     // A title action given after the terminal was made hears the title standing.
@@ -2001,6 +2082,12 @@ let passed = MainActor.assumeIsolated { () -> Bool in
     guard spinRevealing(hosting, seconds: 5, until: { heard.lateTitles.contains("late-title") }) else {
         return refuse("a title action given after the terminal was made heard \(heard.lateTitles)")
     }
+    choice.isListeningForLateTitle = false
+    _ = spin(seconds: 0.3) { false }
+    choice.isListeningForLateTitle = true
+    guard spin(seconds: 5, until: { heard.lateTitles.filter { $0 == "late-title" }.count == 2 }) else {
+        return refuse("a title action taken away and given again heard \(heard.lateTitles), not the standing title again")
+    }
 
     // A terminal that owns its session starts afresh under a new identity and
     // lets the old one go.
@@ -2009,9 +2096,14 @@ let passed = MainActor.assumeIsolated { () -> Bool in
     }
     weak var releasedOwned: TerminalView?
     var firstLine = ""
+    var firstProcessID: pid_t = 0
     if let firstOwned = terminal(in: hosting, showing: "owned-") {
         firstLine = screenText(firstOwned).split(separator: "\n").first { $0.hasPrefix("owned-") }.map(String.init) ?? ""
+        firstProcessID = pid_t(firstLine.dropFirst("owned-".count).trimmingCharacters(in: .whitespaces)) ?? 0
         releasedOwned = firstOwned
+    }
+    guard firstProcessID > 0, kill(firstProcessID, 0) == 0 else {
+        return refuse("the owned command named no live process: \(firstLine)")
     }
     choice.ownedGeneration += 1
     guard spinRevealing(hosting, seconds: 10, until: {
@@ -2031,6 +2123,9 @@ let passed = MainActor.assumeIsolated { () -> Bool in
     guard releasedOwned.map({ $0.superview == nil && $0.window == nil && $0.observer == nil }) ?? true else {
         return refuse("the owned terminal of a dropped identity is still in place or still observed")
     }
+    guard spin(seconds: 5, until: { kill(firstProcessID, 0) == -1 && errno == ESRCH }) else {
+        return refuse("the program of a dropped identity's owned session, process \(firstProcessID), is still running")
+    }
 
     // A view the host owns keeps its session through a change of identity,
     // shows what it is fed, and hands its typing to the input modifier.
@@ -2047,6 +2142,31 @@ let passed = MainActor.assumeIsolated { () -> Bool in
     hostedSurface.insertText("typed", replacementRange: NSRange(location: NSNotFound, length: 0))
     guard spin(seconds: 2, until: { heard.input == Data("typed".utf8) }) else {
         return refuse("onTerminalInput heard \(String(decoding: heard.input, as: UTF8.self)), not what was typed")
+    }
+
+    // A view the host owns, shown by two identities at once, is dressed and
+    // observed by the identity that shows it alone: a font given to the one
+    // it left does not reach it, whichever order SwiftUI updates the two in.
+    choice.showsTwinTwice = true
+    _ = spin(seconds: 0.5) { false }
+    guard let twinRenderer = twin.surface?.renderer else {
+        return refuse("the twin view has no renderer")
+    }
+    let twinSize = twinRenderer.pointSize
+    choice.leftTwinFontSize = CGFloat(twinSize + 5)
+    _ = spin(seconds: 0.5) { false }
+    choice.unrelated += 1
+    _ = spin(seconds: 0.5) { false }
+    guard twinRenderer.pointSize == twinSize else {
+        return refuse("the identity a view had left gave it its font: \(twinRenderer.pointSize) points, not \(twinSize)")
+    }
+    twin.surface?.insertText("twin", replacementRange: NSRange(location: NSNotFound, length: 0))
+    guard spin(seconds: 2, until: { heard.twinInputShowing == Data("twin".utf8) }), heard.twinInputLeft.isEmpty else {
+        return refuse(
+            "typing into a view two identities name reached the one showing it with "
+                + "\(String(decoding: heard.twinInputShowing, as: UTF8.self)) and the one it left with "
+                + "\(String(decoding: heard.twinInputLeft, as: UTF8.self))"
+        )
     }
 
     // A font given to one terminal and a theme given to its container reach
