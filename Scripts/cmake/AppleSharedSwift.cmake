@@ -159,7 +159,9 @@ set(UBIQUITTY_APPLE_SHARED_KIT_SOURCES
     Source/UbiquittyKit/Swift/TerminalSurface+TextInput.swift
     Source/UbiquittyKit/Swift/TerminalSurface+UIKitEvents.swift
     Source/UbiquittyKit/Swift/TerminalSurface+UIKitPointer.swift
-    Source/UbiquittyKit/Swift/TerminalSurface+UIKitSelection.swift)
+    Source/UbiquittyKit/Swift/TerminalSurface+UIKitSelection.swift
+    Source/UbiquittyKit/Swift/TerminalView.swift
+    Source/UbiquittyKit/Swift/Terminal.swift)
 
 # The macOS shell's chrome the renderer draws, which is AppKit and belongs to
 # macOS alone.

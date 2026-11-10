@@ -44,6 +44,14 @@
 # again once the link stands down. Last, a thread asks on its own schedule
 # through a second flood, while the surface starts and stops its link under it.
 #
+# Two consumers place the view a host drops in. One puts TerminalView(), given
+# nothing, in a window: it must fill its bounds with cells as the window
+# resizes, draw its shell's line, take a size and give it back, and follow the
+# window's appearance until it is given a theme; one decoded as a nib decodes it
+# must come up drawing. The other hosts SwiftUI's Terminal: a command's title
+# and exit must reach its modifiers, a stream's bytes must reach the screen, and
+# a font and theme named by the host's state must be drawn and then given back.
+#
 # A further consumer launches a shell in a surface taken out of its window,
 # runs a program the process catalog names, and reads the program's name,
 # catalog key, icon and chains as the public observer hears the process sample move;
@@ -1357,6 +1365,483 @@ xcrun swiftc "$HOST_DIR/window.swift" \
 
 run_consumer "$HOST_DIR/window-consumer"
 echo "check-ubiquittykit: ok (a surface in a window drew its own frame, and its layer answered a host's task and thread nil under the display link, never a raise)"
+
+# The view a host drops in, from a consumer that names no font, no grid and no
+# Metal object. TerminalView() goes into a window, which must leave it with a
+# renderer, a grid of as many cells as its bounds hold, and that grid again
+# after the window resizes. Its login shell, /bin/sh here, prints a line; the
+# view must present a frame of its own, and the frame it draws must hold ink in
+# the pixel rows of that line and none in a blank row. A size it is given must
+# shrink the grid and nil must restore the configured one; the configured theme
+# must follow the window's light and dark appearance, a theme it is given must
+# hold through both, and nil must follow again. The observer it forwards must
+# hear the shell exit. A view decoded as a nib decodes a custom class must come
+# up with a renderer and its archived frame.
+cat > "$HOST_DIR/terminal-view.swift" <<'EOF'
+import AppKit
+import Foundation
+import Metal
+import QuartzCore
+import UbiquittyKit
+
+/// What the view's observer heard.
+@MainActor
+final class ViewReport: TerminalSurfaceObserver {
+    private(set) var grids: [(rows: Int, columns: Int)] = []
+    private(set) var hasExited = false
+
+    var grid: (rows: Int, columns: Int)? { grids.last }
+
+    nonisolated func terminalSurface(_ surface: TerminalSurface, didResizeGridTo rows: Int, columns: Int) {
+        MainActor.assumeIsolated { grids.append((rows, columns)) }
+    }
+
+    nonisolated func terminalSurfaceDidExit(_ surface: TerminalSurface) {
+        MainActor.assumeIsolated { hasExited = true }
+    }
+}
+
+/// A layer that keeps the texture of the last drawable it handed out, so a
+/// frame encoded into it can be read back.
+final class ProbeLayer: CAMetalLayer {
+    var lastTexture: (any MTLTexture)?
+
+    override func nextDrawable() -> (any CAMetalDrawable)? {
+        let drawable = super.nextDrawable()
+        lastTexture = drawable?.texture
+        return drawable
+    }
+}
+
+@MainActor
+func refuse(_ message: String) -> Bool {
+    FileHandle.standardError.write(Data("terminal-view-consumer: \(message)\n".utf8))
+    return false
+}
+
+/// Turns the main run loop until `isDone` answers true or the time runs out.
+@MainActor
+func spin(seconds: Double, until isDone: () -> Bool) -> Bool {
+    let deadline = Date(timeIntervalSinceNow: seconds)
+    while !isDone(), Date() < deadline {
+        RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.01))
+    }
+    return isDone()
+}
+
+/// The screen's rows as an assistive reader reads them, without trailing blanks.
+@MainActor
+func screenLines(_ surface: TerminalSurface) -> [String] {
+    (surface.accessibilityValue() as? String ?? "").components(separatedBy: "\n").map {
+        String($0.reversed().drop(while: { $0 == " " }).reversed())
+    }
+}
+
+/// Turns the run loop until `isDone` answers true or the time runs out,
+/// hiding and showing the surface each half second that passes without.
+///
+/// The window is off every screen, so the window system reports it covered,
+/// and a covered surface holds what arrives until an edge shows it. The edge
+/// is made here, as the window consumer makes it.
+@MainActor
+func spinRevealing(_ surface: TerminalSurface, seconds: Double, until isDone: () -> Bool) -> Bool {
+    let deadline = Date(timeIntervalSinceNow: seconds)
+    while !spin(seconds: 0.5, until: isDone), Date() < deadline {
+        surface.isHidden = true
+        surface.isHidden = false
+    }
+    return isDone()
+}
+
+/// Encodes the frame `surface` would draw now into a probe the size of its own
+/// drawable, and counts each pixel row's pixels unlike the top-left one.
+///
+/// - Returns: The count per pixel row, top first, or nil when no frame was
+///   encoded within two seconds.
+@MainActor
+func inkOfFrame(_ surface: TerminalSurface, _ renderer: any TerminalSurfaceRenderer) -> [Int]? {
+    let probe = ProbeLayer()
+    probe.device = MTLCreateSystemDefaultDevice()
+    probe.pixelFormat = surface.metalLayer.pixelFormat
+    probe.framebufferOnly = false
+    probe.presentsWithTransaction = true
+    probe.contentsScale = surface.metalLayer.contentsScale
+    probe.frame = surface.metalLayer.bounds
+    probe.drawableSize = surface.metalLayer.drawableSize
+    var drawn: (any MTLTexture)?
+    _ = spin(seconds: 2) {
+        probe.lastTexture = nil
+        if renderer.encodeFrame(for: surface, into: probe) {
+            drawn = probe.lastTexture
+        }
+        return drawn != nil
+    }
+    guard let texture = drawn else { return nil }
+    // The present waits for the frame's scheduling, not its completion.
+    _ = spin(seconds: 0.1) { false }
+    var bytes = [UInt8](repeating: 0, count: texture.width * texture.height * 4)
+    texture.getBytes(&bytes, bytesPerRow: texture.width * 4, from: MTLRegionMake2D(0, 0, texture.width, texture.height), mipmapLevel: 0)
+    var rows = [Int](repeating: 0, count: texture.height)
+    for row in 0..<texture.height {
+        for column in 0..<texture.width {
+            let index = (row * texture.width + column) * 4
+            if bytes[index] != bytes[0] || bytes[index + 1] != bytes[1] || bytes[index + 2] != bytes[2] {
+                rows[row] += 1
+            }
+        }
+    }
+    return rows
+}
+
+/// The ink in the pixel rows of one row of the grid.
+@MainActor
+func ink(ofGridRow row: Int, in pixelRows: [Int], _ geometry: TerminalSurfaceFrameGeometry) -> Int {
+    let scale = CGFloat(geometry.deviceScale)
+    let top = Int(((geometry.insets.top + CGFloat(row) * geometry.cellSize.height) * scale).rounded())
+    let bottom = Int(((geometry.insets.top + CGFloat(row + 1) * geometry.cellSize.height) * scale).rounded())
+    guard top >= 0, bottom <= pixelRows.count, top < bottom else { return 0 }
+    return pixelRows[top..<bottom].reduce(0, +)
+}
+
+/// Whether `grid` is as many cells as the view's bounds hold.
+@MainActor
+func fills(_ grid: (rows: Int, columns: Int), _ view: TerminalView, _ surface: TerminalSurface, _ renderer: any TerminalSurfaceRenderer) -> Bool {
+    let cell = renderer.cellSize(for: surface)
+    let insets = renderer.gridFitInsets(for: surface)
+    let width = view.bounds.width - insets.left - insets.right
+    let height = view.bounds.height - insets.top - insets.bottom
+    let tolerance: CGFloat = 0.01
+    return CGFloat(grid.columns) * cell.width <= width + tolerance && CGFloat(grid.columns + 1) * cell.width > width - tolerance
+        && CGFloat(grid.rows) * cell.height <= height + tolerance && CGFloat(grid.rows + 1) * cell.height > height - tolerance
+}
+
+/// Whether the surface draws a dark theme.
+@MainActor
+func drawsDarkTheme(_ surface: TerminalSurface) -> Bool? {
+    guard let name = surface.currentThemeName, let index = TerminalSurface.themeNames.firstIndex(of: name) else { return nil }
+    return TerminalSurface.isThemeDark(at: index)
+}
+
+/// A view decoded through `init(coder:)`, as a nib decodes a view whose custom
+/// class is TerminalView: an archived plain view read back under that class.
+@MainActor
+func decodedFromArchive(frame: CGRect) -> TerminalView? {
+    let archiver = NSKeyedArchiver(requiringSecureCoding: false)
+    archiver.encode(NSView(frame: frame), forKey: NSKeyedArchiveRootObjectKey)
+    archiver.finishEncoding()
+    guard let unarchiver = try? NSKeyedUnarchiver(forReadingFrom: archiver.encodedData) else { return nil }
+    unarchiver.requiresSecureCoding = false
+    unarchiver.setClass(TerminalView.self, forClassName: "NSView")
+    return unarchiver.decodeObject(forKey: NSKeyedArchiveRootObjectKey) as? TerminalView
+}
+
+let passed = MainActor.assumeIsolated { () -> Bool in
+    let application = NSApplication.shared
+    application.setActivationPolicy(.accessory)
+    application.finishLaunching()
+
+    let view = TerminalView()
+    guard let surface = view.surface else {
+        return refuse("Core refused TerminalView() a session")
+    }
+    guard let renderer = surface.renderer, view.rendererRefusal == nil else {
+        return refuse("TerminalView() built no renderer: \(view.rendererRefusal.map { "\($0)" } ?? "no reason")")
+    }
+    let report = ViewReport()
+    view.observer = report
+    guard view.observer === report, surface.observer === report else {
+        return refuse("the view's observer is not its surface's")
+    }
+
+    let window = NSWindow(
+        contentRect: CGRect(x: -4000, y: -4000, width: 900, height: 520),
+        styleMask: [.borderless],
+        backing: .buffered,
+        defer: false
+    )
+    window.isReleasedWhenClosed = false
+    window.appearance = NSAppearance(named: .darkAqua)
+    window.contentView = view
+    window.orderFrontRegardless()
+    defer { window.orderOut(nil) }
+
+    guard spin(seconds: 2, until: { report.grid.map { fills($0, view, surface, renderer) } ?? false }) else {
+        let heard = report.grid.map { "\($0.rows)x\($0.columns)" } ?? "none"
+        return refuse("the grid does not fill the view's \(view.bounds.size); the observer heard \(heard)")
+    }
+    let configuredGrid = report.grid ?? (0, 0)
+
+    guard view.launchShell() else {
+        return refuse("no shell")
+    }
+    view.send("printf 'terminal-%s\\n' view\r")
+    guard spinRevealing(surface, seconds: 10, until: { screenLines(surface).contains("terminal-view") }) else {
+        return refuse("the shell's line never reached the screen: \(screenLines(surface).prefix(4))")
+    }
+    guard spin(seconds: 5, until: { renderer.presentedGeometry(for: surface) != nil }),
+        let geometry = renderer.presentedGeometry(for: surface)
+    else {
+        return refuse("the view presented no frame of its own in 5 s")
+    }
+    let lines = screenLines(surface)
+    guard let textRow = lines.firstIndex(of: "terminal-view"), let pixelRows = inkOfFrame(surface, renderer) else {
+        return refuse("no frame of the view's drawable to read")
+    }
+    let blankRow = Int(geometry.rows) - 1
+    let textInk = ink(ofGridRow: textRow, in: pixelRows, geometry)
+    let blankInk = ink(ofGridRow: blankRow, in: pixelRows, geometry)
+    guard blankRow > textRow + 1, lines.count <= blankRow || lines[blankRow].isEmpty else {
+        return refuse("row \(blankRow) is not blank: \(lines)")
+    }
+    guard textInk > 40, blankInk == 0 else {
+        return refuse("the row reading terminal-view holds \(textInk) inked pixels and the blank row \(blankInk)")
+    }
+
+    window.setContentSize(CGSize(width: 640, height: 384))
+    guard spin(seconds: 2, until: { report.grid.map { $0 != configuredGrid && fills($0, view, surface, renderer) } ?? false }) else {
+        return refuse("the grid did not follow the window to \(view.bounds.size)")
+    }
+    let fittedGrid = report.grid ?? (0, 0)
+
+    let configuredSize = renderer.pointSize
+    view.fontSize = configuredSize * 2
+    guard spin(seconds: 2, until: { (report.grid?.columns ?? .max) < fittedGrid.columns }),
+        renderer.pointSize == configuredSize * 2
+    else {
+        return refuse("a size of \(configuredSize * 2) left the grid at \(report.grid.map { "\($0.columns)" } ?? "none") columns")
+    }
+    view.fontSize = nil
+    guard spin(seconds: 2, until: { report.grid.map { $0 == fittedGrid } ?? false }), renderer.pointSize == configuredSize else {
+        return refuse("a nil size did not restore the configured \(configuredSize) points and \(fittedGrid.columns) columns")
+    }
+
+    guard drawsDarkTheme(surface) == true else {
+        return refuse("a dark window drew \(surface.currentThemeName ?? "no theme")")
+    }
+    window.appearance = NSAppearance(named: .aqua)
+    guard spin(seconds: 2, until: { drawsDarkTheme(surface) == false }) else {
+        return refuse("the configured theme did not follow the window to light: \(surface.currentThemeName ?? "none")")
+    }
+    let darkIndex = TerminalSurface.themeNames.indices.first { TerminalSurface.isThemeDark(at: $0) && TerminalSurface.themeNames[$0] != surface.currentThemeName }
+    guard let darkIndex else {
+        return refuse("Core names no dark theme")
+    }
+    let chosen = TerminalSurface.themeNames[darkIndex]
+    view.themeName = chosen
+    window.appearance = NSAppearance(named: .darkAqua)
+    _ = spin(seconds: 0.3) { false }
+    window.appearance = NSAppearance(named: .aqua)
+    _ = spin(seconds: 0.3) { false }
+    guard surface.currentThemeName == chosen else {
+        return refuse("a chosen theme \(chosen) gave way to \(surface.currentThemeName ?? "none") as the appearance moved")
+    }
+    view.themeName = nil
+    guard drawsDarkTheme(surface) == false else {
+        return refuse("nil did not return a light window to the configured light theme")
+    }
+
+    view.send("exit\r")
+    guard spin(seconds: 10, until: { report.hasExited }) else {
+        return refuse("the observer the view forwards never heard the shell exit")
+    }
+
+    guard let decoded = decodedFromArchive(frame: CGRect(x: 0, y: 0, width: 320, height: 200)) else {
+        return refuse("no TerminalView decoded through init(coder:)")
+    }
+    guard decoded.surface?.renderer != nil, decoded.frame.size == CGSize(width: 320, height: 200) else {
+        return refuse("a decoded view has \(decoded.surface?.renderer == nil ? "no" : "a") renderer and frame \(decoded.frame)")
+    }
+
+    print(
+        "terminal-view-consumer: TerminalView() filled \(configuredGrid.rows)x\(configuredGrid.columns) and then "
+            + "\(fittedGrid.rows)x\(fittedGrid.columns) cells, drew \(textInk) inked pixels in the shell's line, "
+            + "followed the appearance and kept a chosen theme"
+    )
+    return true
+}
+exit(passed ? 0 : 1)
+EOF
+
+xcrun swiftc "$HOST_DIR/terminal-view.swift" \
+    -o "$HOST_DIR/terminal-view-consumer" \
+    -warnings-as-errors \
+    -F "$FRAMEWORK_DIR" \
+    -framework UbiquittyKit \
+    -Xlinker -rpath -Xlinker "$FRAMEWORK_DIR"
+
+run_consumer "$HOST_DIR/terminal-view-consumer"
+echo "check-ubiquittykit: ok (TerminalView() in a window filled its bounds, drew its shell's line, followed the window's appearance and size, and decoded as a nib's view)"
+
+# The SwiftUI view, hosted in a window as an AppKit app hosts SwiftUI. One
+# Terminal runs a command that sets a title and prints a line, and must report
+# the title and the exit through its modifiers and keep the line on screen;
+# another runs nothing and must show what the host writes to its stream. Once
+# both are up, the host's state names a font size and a theme for the second
+# one, which must draw them while the first keeps the configured ones, and then
+# names neither, which must return the second to the configured ones.
+cat > "$HOST_DIR/swiftui.swift" <<'EOF'
+import AppKit
+import Combine
+import Foundation
+import SwiftUI
+import UbiquittyKit
+
+/// What the terminals' modifiers reported.
+@MainActor
+final class Heard {
+    var titles: [String] = []
+    var exits = 0
+}
+
+/// The font size and theme the host's state names for the fed terminal.
+final class Choice: ObservableObject {
+    @Published var fontSize: CGFloat?
+    @Published var themeName: String?
+}
+
+struct Panes: View {
+    let heard: Heard
+    let output: AsyncStream<Data>
+    @ObservedObject var choice: Choice
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Terminal(command: "printf '\\033]0;swiftui-title\\007'; printf 'swiftui-%s\\n' command; sleep 1")
+                .onTerminalTitleChange { heard.titles.append($0) }
+                .onTerminalExit { heard.exits += 1 }
+            Terminal(feeding: output)
+                .terminalFont(size: choice.fontSize)
+                .terminalTheme(choice.themeName)
+        }
+    }
+}
+
+@MainActor
+func refuse(_ message: String) -> Bool {
+    FileHandle.standardError.write(Data("swiftui-consumer: \(message)\n".utf8))
+    return false
+}
+
+@MainActor
+func spin(seconds: Double, until isDone: () -> Bool) -> Bool {
+    let deadline = Date(timeIntervalSinceNow: seconds)
+    while !isDone(), Date() < deadline {
+        RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.01))
+    }
+    return isDone()
+}
+
+/// Every TerminalView under `view`.
+@MainActor
+func terminalViews(in view: NSView) -> [TerminalView] {
+    (view as? TerminalView).map { [$0] } ?? view.subviews.flatMap { terminalViews(in: $0) }
+}
+
+/// Turns the run loop until `isDone` answers true or the time runs out,
+/// hiding and showing the surface each half second that passes without.
+///
+/// The window is off every screen, so the window system reports it covered,
+/// and a covered surface holds what arrives until an edge shows it. The edge
+/// is made here, as the window consumer makes it.
+@MainActor
+func spinRevealing(_ surface: TerminalSurface, seconds: Double, until isDone: () -> Bool) -> Bool {
+    let deadline = Date(timeIntervalSinceNow: seconds)
+    while !spin(seconds: 0.5, until: isDone), Date() < deadline {
+        surface.isHidden = true
+        surface.isHidden = false
+    }
+    return isDone()
+}
+
+@MainActor
+func screenText(_ view: TerminalView) -> String {
+    view.surface?.accessibilityValue() as? String ?? ""
+}
+
+let passed = MainActor.assumeIsolated { () -> Bool in
+    let application = NSApplication.shared
+    application.setActivationPolicy(.accessory)
+    application.finishLaunching()
+
+    let heard = Heard()
+    let choice = Choice()
+    let (output, continuation) = AsyncStream.makeStream(of: Data.self)
+    let hosting = NSHostingView(rootView: Panes(heard: heard, output: output, choice: choice))
+    let window = NSWindow(
+        contentRect: CGRect(x: -4000, y: -4000, width: 640, height: 480),
+        styleMask: [.borderless],
+        backing: .buffered,
+        defer: false
+    )
+    window.isReleasedWhenClosed = false
+    window.contentView = hosting
+    window.orderFrontRegardless()
+    defer { window.orderOut(nil) }
+
+    guard spin(seconds: 5, until: { terminalViews(in: hosting).count == 2 }) else {
+        return refuse("SwiftUI made \(terminalViews(in: hosting).count) terminal views, not 2")
+    }
+    guard spin(seconds: 10, until: { heard.exits == 1 }) else {
+        return refuse("the command's exit reached onTerminalExit \(heard.exits) times")
+    }
+    guard heard.titles.contains("swiftui-title") else {
+        return refuse("onTerminalTitleChange heard \(heard.titles), not the command's title")
+    }
+    let views = terminalViews(in: hosting)
+    guard let command = views.first(where: { screenText($0).contains("swiftui-command") }),
+        let commandSurface = command.surface, let commandRenderer = commandSurface.renderer,
+        commandRenderer.presentedGeometry(for: commandSurface) != nil
+    else {
+        return refuse("no terminal kept and drew the command's line: \(views.map(screenText))")
+    }
+    guard let fed = views.first(where: { $0 !== command }), let fedSurface = fed.surface,
+        let fedRenderer = fedSurface.renderer
+    else {
+        return refuse("no fed terminal with a renderer")
+    }
+
+    continuation.yield(Data("swiftui-fed\r\n".utf8))
+    guard spinRevealing(fedSurface, seconds: 5, until: { screenText(fed).contains("swiftui-fed") }) else {
+        return refuse("the bytes written to the stream never reached the fed terminal")
+    }
+    continuation.finish()
+
+    let configuredSize = fedRenderer.pointSize
+    let configuredTheme = fedSurface.currentThemeName
+    guard let chosen = TerminalSurface.themeNames.first(where: { $0 != configuredTheme }) else {
+        return refuse("Core names no second theme")
+    }
+    choice.fontSize = CGFloat(configuredSize + 7)
+    choice.themeName = chosen
+    guard spin(seconds: 5, until: { fedRenderer.pointSize == configuredSize + 7 && fedSurface.currentThemeName == chosen }) else {
+        return refuse(
+            "the fed terminal draws \(fedRenderer.pointSize) points in \(fedSurface.currentThemeName ?? "no theme"), "
+                + "not the \(configuredSize + 7) and \(chosen) its modifiers name"
+        )
+    }
+    guard commandRenderer.pointSize == configuredSize, commandSurface.currentThemeName == configuredTheme else {
+        return refuse("the modifiers of one terminal moved its sibling")
+    }
+    choice.fontSize = nil
+    choice.themeName = nil
+    guard spin(seconds: 5, until: { fedRenderer.pointSize == configuredSize && fedSurface.currentThemeName == configuredTheme }) else {
+        return refuse("modifiers naming nothing left the fed terminal at \(fedRenderer.pointSize) points in \(fedSurface.currentThemeName ?? "no theme")")
+    }
+    print("swiftui-consumer: a command reported its title and exit and kept its line; a fed terminal drew the host's bytes and followed its modifiers to \(chosen) and back")
+    return true
+}
+exit(passed ? 0 : 1)
+EOF
+
+xcrun swiftc "$HOST_DIR/swiftui.swift" \
+    -o "$HOST_DIR/swiftui-consumer" \
+    -warnings-as-errors \
+    -F "$FRAMEWORK_DIR" \
+    -framework UbiquittyKit \
+    -Xlinker -rpath -Xlinker "$FRAMEWORK_DIR"
+
+run_consumer "$HOST_DIR/swiftui-consumer"
+echo "check-ubiquittykit: ok (SwiftUI's Terminal ran a command, reported its title and exit, drew a host's stream, and followed its font and theme modifiers)"
 
 # The clear commands, from a host that has only the public interface. Each pane
 # runs a program of known output as its login shell: sixty numbered lines and a
