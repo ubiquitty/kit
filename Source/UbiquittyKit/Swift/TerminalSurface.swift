@@ -3838,8 +3838,8 @@ public final class TerminalSurface: PlatformView {
     /// Whether the last frame drawn for this surface drew a search tier: the
     /// focused match or any other match on the visible rows.
     ///
-    /// Read by the frame assembly, which keeps such a surface on the live
-    /// capture: a boundary capture is built without the search tiers.
+    /// Set once the frame is committed, by either route. A record for tests:
+    /// no route is chosen by it.
     package var didLastFrameDrawSearch = false
 
     /// Whether the keyboard is on this surface, by Core's rule.

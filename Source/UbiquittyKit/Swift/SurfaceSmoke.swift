@@ -28,6 +28,7 @@
 import AppKit
 import Metal
 import QuartzCore
+internal import CxxStdlib
 internal import UbiquittyRenderKit
 internal import UbiquittyCore
 
@@ -1014,6 +1015,12 @@ enum SurfaceSmoke {
         // The flood-selection leg: a selection standing through a flood never
         // decides whether a frame draws.
         if let failure = floodSelectionFailure(surface, renderer: renderer, layer: layer) {
+            return failed(failure)
+        }
+
+        // The captured tiers leg: trigger highlights and the hilite band are
+        // drawn over a captured frame from the pane's publications.
+        if let failure = capturedTiersFailure(surface, renderer: renderer, layer: layer) {
             return failed(failure)
         }
 
@@ -2458,9 +2465,8 @@ enum SurfaceSmoke {
     ///   Core holds it by the resize's own rule: the published hold, the
     ///   check under the read's lock, or the owner's turn, which captures
     ///   nothing while the update stays open.
-    /// - A view drawing search matches reads the model while a capture
-    ///   waits, and retires the capture: the live plan drains the slot, so
-    ///   rows older than the live frame are never presented after it.
+    /// - A view drawing search matches presents a waiting capture with its
+    ///   matches drawn over it, read from the pane's publications.
     ///
     /// - Parameters:
     ///   - surface: The surface, its shell awake.
@@ -2530,11 +2536,13 @@ enum SurfaceSmoke {
         waitForAdmittedFrame(surface)
         let drewOverSearch = encodeAfterFontPreparation(renderer, for: surface, into: layer)
         let tookCapture = renderer.presentedBoundaryFrameCount != presentedBefore
-        let isCaptureWaiting = surface.drive.takeSyncFrame() != nil
+        let tiers = renderer.lastCapturedFrameTiers
+        let drewMatches = surface.didLastFrameDrawSearch && tiers.focusedSearch + tiers.otherSearch > 0
         surface.clearSearch()
-        guard drewOverSearch, !tookCapture, !isCaptureWaiting else {
+        guard drewOverSearch, tookCapture, drewMatches else {
             return "a view drawing search matches drew=\(drewOverSearch), took the capture=\(tookCapture),"
-                + " left it waiting=\(isCaptureWaiting): it reads the model and retires the capture"
+                + " drew its matches over it=\(drewMatches) (focused \(tiers.focusedSearch), other \(tiers.otherSearch)):"
+                + " it presents the capture with its matches"
         }
         guard encodeAfterFontPreparation(renderer, for: surface, into: layer) else {
             return "the frame after the search ended declined: decline=\(renderer.lastFrameDecline.rawValue)"
@@ -2659,6 +2667,58 @@ enum SurfaceSmoke {
         return nil
     }
 
+    /// Draws a trigger highlight and the hilite band over a captured frame.
+    ///
+    /// Each is written into the model outside a drain, so only the pane's
+    /// publications carry it to a frame built over a capture. The leg fails
+    /// if a presented capture draws none of the tier's spans.
+    ///
+    /// - Parameters:
+    ///   - surface: The surface, its shell awake.
+    ///   - renderer: The surface renderer.
+    ///   - layer: The layer to present into.
+    /// - Returns: Why the leg failed, or nil.
+    private static func capturedTiersFailure(
+        _ surface: TerminalSurface,
+        renderer: SurfaceRenderer,
+        layer: CAMetalLayer
+    ) -> String? {
+        var configuration = Ubiquitty.Preferences.Values()
+        var trigger = Ubiquitty.Preferences.TriggerEntry()
+        trigger.pattern = std.string("captured-trigger-frame")
+        trigger.action = std.string("highlight:red")
+        configuration.triggers.push_back(trigger)
+        let refused = surface.drive.applyTriggerConfiguration(configuration)
+        guard refused.isEmpty else {
+            return "the smoke's highlight trigger was refused: \(refused)"
+        }
+        defer { surface.drive.applyTriggerConfiguration(Ubiquitty.Preferences.Values()) }
+        feed(surface.drive, "captured-trigger-frame\r\n")
+        waitForAdmittedFrame(surface)
+        guard presentsBoundaryFrame(surface, renderer: renderer, layer: layer) else {
+            return "no captured frame was presented over the trigger highlight (decline=\(renderer.lastFrameDecline.rawValue))"
+        }
+        guard renderer.lastCapturedFrameTiers.triggers > 0 else {
+            return "a captured frame drew no trigger highlight over its rows"
+        }
+        // A highlight stays on its row once its rule is gone, and a frame that
+        // bakes a tier rebuilds every row: scrolled off the screen, it leaves
+        // the legs after this one frames with no tier.
+        feed(surface.drive, String(repeating: "\r\n", count: Int(surface.drive.readSnapshot().rows)))
+
+        // XTHIMOUSE's reply under mode 1001 caches the band the frame draws.
+        feed(surface.drive, "\u{1b}[?1001h\u{1b}[1;3;2;2;4T")
+        defer { feed(surface.drive, "\u{1b}[?1001l") }
+        waitForAdmittedFrame(surface)
+        guard presentsBoundaryFrame(surface, renderer: renderer, layer: layer) else {
+            return "no captured frame was presented over the hilite band (decline=\(renderer.lastFrameDecline.rawValue))"
+        }
+        guard renderer.lastCapturedFrameTiers.hilite > 0 else {
+            return "a captured frame drew no hilite band over its rows"
+        }
+        return nil
+    }
+
     /// Draws the next frame between rows arriving below the view and the view
     /// taking them, right after a boundary frame drew the view held back over
     /// its history with a selection there.
@@ -2755,7 +2815,6 @@ enum SurfaceSmoke {
                 columns: Int(snapshot.columns),
                 nowTicks: TerminalSurface.monotonicTicksNow(),
                 isResizing: false,
-                keepsSearchLive: false,
                 supply: &supply
             )
             RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.02))
