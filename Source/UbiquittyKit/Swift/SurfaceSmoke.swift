@@ -825,6 +825,9 @@ enum SurfaceSmoke {
         guard firstFramePasswordBadgeLeg() else {
             return false
         }
+        guard endedSessionLeg() else {
+            return false
+        }
         // The pipeline leg: a real shell, the ingest thread, and the drain
         // signal's hop back to main. The direct-feed frames above never cross
         // a thread, so they cannot see a dead deliver path — a surface whose
@@ -1622,6 +1625,39 @@ enum SurfaceSmoke {
         func terminalSurface(_ surface: TerminalSurface, didChangeColors colors: TerminalColors) {
             reports.append(colors)
         }
+    }
+
+    /// A surface whose session ends while a drain hop is already queued on main.
+    ///
+    /// The shell's output reaches the ingest thread while main is not running its
+    /// loop, so the hop is queued and waiting when the session ends. It must find
+    /// the signal cleared: a delivery that ran against a session already closed
+    /// would reach a model that is gone.
+    ///
+    /// - Returns: Whether the leg passed.
+    private static func endedSessionLeg() -> Bool {
+        guard let surface = TerminalSurface(rows: 24, columns: 80) else {
+            return failed("no surface for the ended-session leg")
+        }
+        let witness = DeliveryWitness()
+        surface.observer = witness
+        guard surface.launchShell() else {
+            return failed("the ended-session leg's shell declined to launch")
+        }
+        guard shellRunsWhatItIsSent(surface) else {
+            return failed("the ended-session leg's shell never ran a line it was sent; \(screenReport(surface))")
+        }
+        // Settle what the start-up queued, then let output arrive with main not running its loop.
+        RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.2))
+        surface.send("printf 'queued-before-the-session-ended\\n'\n")
+        Thread.sleep(forTimeInterval: 0.5)
+        let updatesBeforeEnd = witness.screenUpdates
+        surface.endSession()
+        RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.5))
+        guard witness.screenUpdates == updatesBeforeEnd else {
+            return failed("a drain hop queued before the session ended delivered to the ended session")
+        }
+        return passed("a drain hop queued before the session ended is dropped")
     }
 
     /// The lock on a capture's first frame.

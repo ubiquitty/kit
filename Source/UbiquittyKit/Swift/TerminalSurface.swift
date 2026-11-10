@@ -3142,21 +3142,7 @@ public final class TerminalSurface: PlatformView {
             applyPointerLock(false)
             #endif
             statusRowStorage?.deallocate()
-            frameClock.stop()
-            // Clear the box first: a pass already inside the trampoline is holding
-            // its lock, and this waits for it; every pass after it finds nothing
-            // and returns. Park ingest and unregister, which waits for every
-            // event producer's active callback, before releasing its context.
-            if let box = drainSignalBox {
-                box.takeUnretainedValue().clear()
-            }
-            drive.stopIngest()
-            drive.setDrainSignal(context: 0, function: 0)
-            if let box = drainSignalBox {
-                box.release()
-                drainSignalBox = nil
-            }
-            drive.close()
+            endDriveSession()
         }
     }
 
@@ -3347,7 +3333,32 @@ public final class TerminalSurface: PlatformView {
     /// up. The surface keeps what it last drew and takes no more input.
     /// Idempotent, and the surface's own teardown repeats it harmlessly.
     package func endSession() {
+        endDriveSession()
+    }
+
+    /// Stops everything that feeds this surface from its session and closes
+    /// the session, in the one order that leaves no delivery pending against a
+    /// session whose model is gone.
+    ///
+    /// The frame clock stops first. The drain-signal box is cleared before
+    /// ingest parks: a pass already inside the trampoline holds the box's lock
+    /// and this waits for it, and every pass after finds nothing, so a main-queue
+    /// hop queued before this ran finds a cleared box and does nothing. Parking
+    /// ingest and unregistering the signal waits for every event producer's
+    /// active callback before the box's context is released, and only then
+    /// does the session close. Safe to repeat: the surface's own teardown runs
+    /// it again after an `endSession`.
+    private func endDriveSession() {
+        frameClock.stop()
+        if let box = drainSignalBox {
+            box.takeUnretainedValue().clear()
+        }
         drive.stopIngest()
+        drive.setDrainSignal(context: 0, function: 0)
+        if let box = drainSignalBox {
+            box.release()
+            drainSignalBox = nil
+        }
         drive.close()
     }
 
