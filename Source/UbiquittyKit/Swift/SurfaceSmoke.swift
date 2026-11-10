@@ -980,6 +980,12 @@ enum SurfaceSmoke {
             return failed(failure)
         }
 
+        // The flood-selection leg: a selection standing through a flood never
+        // decides whether a frame draws.
+        if let failure = floodSelectionFailure(surface, renderer: renderer, layer: layer) {
+            return failed(failure)
+        }
+
         // The style leg. A host's styling must be the styling the frame
         // derives its uniforms from. The live route shares the assembled
         // options with the registration by construction, so the assertion
@@ -2481,6 +2487,123 @@ enum SurfaceSmoke {
         }
         guard encodeAfterFontPreparation(renderer, for: surface, into: layer) else {
             return "the frame after the search ended declined: decline=\(renderer.lastFrameDecline.rawValue)"
+        }
+        return nil
+    }
+
+    /// Floods the shell's scrolling region for a few seconds with a selection
+    /// standing on the row above it, ticking as the frame link does.
+    ///
+    /// The selection lies on the top row and the scrolling region is every
+    /// row below it, so output cannot shear the selection away: only the
+    /// frame path can lose it. Through the flood, every tick that draws draws
+    /// the selection, ticks keep drawing fresh rows with no gap past the
+    /// ceiling, a captured frame draws the selection, and the selection still
+    /// holds its text when the flood ends. A selection never decides whether
+    /// a frame draws.
+    ///
+    /// - Parameters:
+    ///   - surface: The surface, its shell awake.
+    ///   - renderer: The surface renderer.
+    ///   - layer: The layer to present into.
+    /// - Returns: Why the leg failed, or nil.
+    private static func floodSelectionFailure(
+        _ surface: TerminalSurface,
+        renderer: SurfaceRenderer,
+        layer: CAMetalLayer
+    ) -> String? {
+        let marker = "floodmarker"
+        let gapCeiling: TimeInterval = 1
+        let minimumFreshFrames = 5
+        surface.clearSelection()
+        surface.setViewOffset(absolute: 0)
+        let rows = Int(surface.drive.readSnapshot().rows)
+        guard rows >= 4 else {
+            return "the flood-selection leg needs four rows and the grid has \(rows)"
+        }
+        surface.send("printf '\\033[2J\\033[H\(marker)\\033[2;\(rows)r\\033[2;1H'\n")
+        func topRow() -> Substring? {
+            surface.gridTextForTesting().split(separator: "\n", omittingEmptySubsequences: false).first
+        }
+        let markerDeadline = Date(timeIntervalSinceNow: 5)
+        while topRow() != Substring(marker), Date() < markerDeadline {
+            RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.02))
+        }
+        guard topRow() == Substring(marker) else {
+            return "the flood-selection marker never reached the top row: \(String(describing: topRow()))"
+        }
+        if let failure = selectWord(surface, row: 0) {
+            return failure
+        }
+        guard surface.selectedText == marker else {
+            return "a word press on the marker selected \(String(describing: surface.selectedText))"
+        }
+
+        // Output for three seconds of the clock, as fast as the pty takes it,
+        // then a line whose echo does not carry the text its output does.
+        surface.send(
+            "/usr/bin/perl -e 'my $end = time + 3; my $line = 0;"
+                + " while (time < $end) { print \"flood line \", $line++, \"\\n\" }'; printf 'flood''-done\\n'\n"
+        )
+        let selectedBefore = renderer.selectedBoundaryFrameCount
+        var drawnFrames = 0
+        var freshFrames = 0
+        var framesWithoutSelection = 0
+        var longestGap: TimeInterval = 0
+        var lastDraw = Date()
+        var isDone = false
+        var tick = 0
+        let floodDeadline = Date(timeIntervalSinceNow: 20)
+        while !isDone, Date() < floodDeadline {
+            RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 1.0 / 60))
+            if renderer.encodeFrame(for: surface, into: layer) {
+                let now = Date()
+                longestGap = max(longestGap, now.timeIntervalSince(lastDraw))
+                lastDraw = now
+                drawnFrames += 1
+                if renderer.lastFrameDirtyRows > 0 {
+                    freshFrames += 1
+                }
+                if !surface.didLastFrameDrawSelection {
+                    framesWithoutSelection += 1
+                }
+            }
+            // The grid read takes the model lock, so it is asked twice a
+            // second rather than at every tick, where it would hold the
+            // drain off the flood it measures.
+            tick += 1
+            if tick.isMultiple(of: 30) {
+                isDone = surface.gridTextForTesting().contains("flood-done")
+            }
+        }
+        let selectedFrames = renderer.selectedBoundaryFrameCount - selectedBefore
+        let selectionAfter = surface.selectedText
+        surface.clearSelection()
+        surface.send("printf '\\033[r\\033[2J\\033[H'\n")
+
+        guard isDone else {
+            return "the flood never finished: \(drawnFrames) frames drawn, \(freshFrames) fresh"
+        }
+        guard freshFrames >= minimumFreshFrames else {
+            return "a flood with a standing selection drew \(freshFrames) fresh frames of \(drawnFrames),"
+                + " fewer than \(minimumFreshFrames): decline=\(renderer.lastFrameDecline.rawValue)"
+        }
+        guard longestGap <= gapCeiling else {
+            return "a flood with a standing selection stood still for \(Int(longestGap * 1000)) ms,"
+                + " past the \(Int(gapCeiling * 1000)) ms ceiling"
+        }
+        guard framesWithoutSelection == 0 else {
+            return "\(framesWithoutSelection) of \(drawnFrames) frames through the flood drew no selection"
+        }
+        guard selectedFrames > 0 else {
+            return "no captured frame drew the selection through the flood (\(drawnFrames) drawn)"
+        }
+        guard selectionAfter == marker else {
+            return "the marker's selection did not stand through the flood: \(String(describing: selectionAfter))"
+        }
+        waitForAdmittedFrame(surface)
+        guard encodeAfterFontPreparation(renderer, for: surface, into: layer) else {
+            return "the frame after the flood declined: decline=\(renderer.lastFrameDecline.rawValue)"
         }
         return nil
     }
