@@ -1200,6 +1200,11 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
     /// compares.
     private(set) var didDrawTekFrame = false
 
+    /// Tek frames drawn from the tube a capture froze, rather than from the
+    /// model under its lock — the smoke's oracle that the tube takes the
+    /// lane.
+    private(set) var tekFramesFromCaptureCount = 0
+
     /// How many distinct scales have been measured.
     ///
     /// The scale a frame resolved against is the same either way, so this is
@@ -2645,10 +2650,36 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
                 lastFrameDecline = .noRenderer
                 return false
             }
+            // The tube a capture froze, taken through Core's frame decision
+            // as a grid frame is: the owner commits and captures it, and the
+            // view never waits on the parser for it. A still, a lane with no
+            // captures armed, and a capture of the grid taken across the
+            // mode's edge read the tube from the model under its lock.
+            var tube: Ubiquitty.Rendering.FrameCapture?
+            if !isDrawingStill {
+                var supply = Ubiquitty.Runtime.FrameSupply()
+                let taken = surface.selectionModel.takeFrame(
+                    drive: surface.drive,
+                    rows: Int(snapshot.rows),
+                    columns: Int(snapshot.columns),
+                    nowTicks: TerminalSurface.monotonicTicksNow(),
+                    isResizing: false,
+                    supply: &supply
+                )
+                renderer.notePresentedCaptureTake(tookCapture: taken != nil, noSlotCount: surface.drive.syncFrameNoSlotCount)
+                if supply.route == .Declined {
+                    recordDecline(supply, for: surface)
+                    return false
+                }
+                if let taken, taken.isTekFrame() {
+                    tube = taken
+                }
+            }
             guard let target = target(),
                 let commands = encodeTekFrame(
                     for: surface,
                     renderer: renderer,
+                    tube: tube,
                     deviceScale: deviceScale,
                     into: target.descriptor
                 )
@@ -2669,6 +2700,9 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
                 clear.endEncoding()
             }
             didDrawTekFrame = true
+            if tube != nil {
+                tekFramesFromCaptureCount += 1
+            }
             if !isDrawingStill {
                 surface.presentedFrameGeometry = nil
                 surface.remotePanOffsetInPoints = .zero
@@ -3368,26 +3402,9 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
             return true
         }
 
-        // A hold the coherence rule, an open update or an arriving redraw puts
-        // on the frame is rechecked when Core says it may release. A frame
-        // awaiting its capture, or an owner that has not turned since the
-        // demand, is woken by the capture's publication, unless Core names a
-        // tick to ask again at: a pane nothing drains, whose model another
-        // thread held at the ask.
+        // A frame Core declined records why, and arms what asks for it again.
         if supply.route == .Declined {
-            switch supply.decline {
-            case .AwaitingCapture:
-                lastFrameDecline = .awaitingCapture
-                surface.awaitCapture(askAgainTicks: supply.askAgainTicks)
-            case .OwnerStalled:
-                lastFrameDecline = .ownerStalled
-            case .RedrawArriving:
-                surface.deferPresentationForArrivingRedraw(askAgainTicks: supply.askAgainTicks)
-                lastFrameDecline = .redrawArriving
-            default:
-                surface.deferHeldPresentation(askAgainTicks: supply.askAgainTicks)
-                lastFrameDecline = .withheld
-            }
+            recordDecline(supply, for: surface)
             return false
         }
 
@@ -3816,18 +3833,22 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
         return true
     }
 
-    /// Assembles and encodes one Tektronix frame, under the model lock.
+    /// Assembles and encodes one Tektronix frame.
     ///
     /// The platform inputs resolve here — the colours through Core's three
     /// resolvers, the beam thickness, the glyph baseline — and the pass
     /// strokes the display list through Core's one walk, so a disagreement
     /// with the Metal arm's view is geometry the pass owns rather than a
-    /// setting read twice. Tek reads the live display list, which the ingest
-    /// thread mutates, so the whole assembly brackets in the lock.
+    /// setting read twice. A captured tube carries its display list, its
+    /// crosshair and the host's colour requests, frozen with the frame; with
+    /// none, the live display list, which the ingest thread mutates, is read
+    /// under the model lock for the whole assembly.
     ///
     /// - Parameters:
     ///   - surface: The surface whose terminal is in Tek mode.
     ///   - renderer: The surface's frame renderer, whose Tek pass encodes.
+    ///   - tube: The capture whose tube the frame shows, or nil to read the
+    ///     model's.
     ///   - deviceScale: Backing pixels per point, which sizes the beam, its
     ///     halo and the projection's edge inset through Core's beam geometry.
     ///   - descriptor: The pass to encode into.
@@ -3835,6 +3856,7 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
     private func encodeTekFrame(
         for surface: TerminalSurface,
         renderer: TerminalRenderer,
+        tube: Ubiquitty.Rendering.FrameCapture?,
         deviceScale: Double,
         into descriptor: MTLRenderPassDescriptor
     ) -> MTLCommandBuffer? {
@@ -3843,6 +3865,7 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
         preference.mode = tekSettings.usesCustomColors ? .Custom : .Theme
         preference.beam = Ubiquitty.Tek.tekColorFromPackedRGB(tekSettings.customBeamRGB)
         preference.background = Ubiquitty.Tek.tekColorFromPackedRGB(tekSettings.customBackgroundRGB)
+        let spotSetting: Ubiquitty.Tek.WritingSpotSetting = tekSettings.drawsWritingSpot ? .Drawn : .Suppressed
 
         var uniforms = Ubiquitty.Rendering.FrameUniforms()
         if let target = descriptor.colorAttachments[0].texture {
@@ -3852,38 +3875,111 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
         uniforms.backgroundOpacity = Float(style.backgroundOpacity)
         uniforms.bitmapTier = font.unifontScale > 0 ? 1 : 0
 
+        // The model's palette carries 16-bit channels; the resolvers take the
+        // 8-bit theme colour and widen, so the narrowing divides by the same
+        // 257 the widening multiplies by — lossless for a theme that arrived
+        // as 8-bit, which is every theme the config can express.
+        func encode(_ frame: TekFrameInputs, _ primitives: Ubiquitty.Tek.PrimitiveSpan) -> MTLCommandBuffer? {
+            uniforms.defaultBackground = Self.tekFloat4(frame.background)
+            return renderer.encodeTekFrame(
+                uniforms: uniforms,
+                primitives: primitives.size() > 0 ? primitives.__dataUnsafe() : nil,
+                primitiveCount: Int32(primitives.size()),
+                tekWidth: frame.width,
+                tekHeight: frame.height,
+                isGINActive: frame.isGraphicInputActive,
+                ginX: frame.graphicInputX,
+                ginY: frame.graphicInputY,
+                drawsBrightPen: frame.drawsBrightPen,
+                beam: Self.tekFloat4(frame.beam),
+                cursor: Self.tekFloat4(frame.cursor),
+                deviceScale: Float(deviceScale),
+                drawsGlow: tekSettings.drawsGlowVectors,
+                into: descriptor
+            )
+        }
+
+        if let tube {
+            let requests = tube.tekHostColorRequests()
+            let beam = Ubiquitty.Tek.tekBeam(requests, Self.narrowColor(tube.tekThemeForeground()), preference)
+            return encode(
+                TekFrameInputs(
+                    width: Int32(tube.tekScreenWidth()),
+                    height: Int32(tube.tekScreenHeight()),
+                    isGraphicInputActive: tube.isTekGraphicInputActive(),
+                    graphicInputX: Int32(tube.tekGraphicInputX()),
+                    graphicInputY: Int32(tube.tekGraphicInputY()),
+                    background: Ubiquitty.Tek.tekBackground(requests, Self.narrowColor(tube.tekThemeBackground()), preference),
+                    beam: beam,
+                    cursor: Ubiquitty.Tek.tekCursor(requests, beam),
+                    drawsBrightPen: Ubiquitty.Tek.isWritingSpotDrawn(requests, spotSetting)
+                ),
+                tube.tekPrimitives()
+            )
+        }
         surface.drive.lockForRead()
         defer { surface.drive.unlockForRead() }
         guard let terminal = surface.drive.borrowTerminal() else {
             return nil
         }
-        // The model's palette carries 16-bit channels; the resolvers take the
-        // 8-bit theme colour and widen, so the narrowing divides by the same
-        // 257 the widening multiplies by — lossless for a theme that arrived
-        // as 8-bit, which is every theme the config can express.
-        let background = Ubiquitty.Tek.tekBackground(terminal, Self.narrowColor(terminal.palette.defaultBackground), preference)
         let beam = Ubiquitty.Tek.tekBeam(terminal, Self.narrowColor(terminal.palette.defaultForeground), preference)
-        let cursor = Ubiquitty.Tek.tekCursor(terminal, beam)
-        uniforms.defaultBackground = Self.tekFloat4(background)
-        let spotSetting: Ubiquitty.Tek.WritingSpotSetting = tekSettings.drawsWritingSpot ? .Drawn : .Suppressed
-        let drawsBrightPen = Ubiquitty.Tek.isWritingSpotDrawn(terminal, spotSetting)
-        let primitives = Ubiquitty.tekVisiblePrimitives(terminal)
-        return renderer.encodeTekFrame(
-            uniforms: uniforms,
-            primitives: primitives.size() > 0 ? primitives.__dataUnsafe() : nil,
-            primitiveCount: Int32(primitives.size()),
-            tekWidth: Int32(Ubiquitty.tekScreenWidth(terminal)),
-            tekHeight: Int32(Ubiquitty.tekScreenHeight(terminal)),
-            isGINActive: Ubiquitty.tekGINActive(terminal),
-            ginX: Int32(Ubiquitty.tekGINX(terminal)),
-            ginY: Int32(Ubiquitty.tekGINY(terminal)),
-            drawsBrightPen: drawsBrightPen,
-            beam: Self.tekFloat4(beam),
-            cursor: Self.tekFloat4(cursor),
-            deviceScale: Float(deviceScale),
-            drawsGlow: tekSettings.drawsGlowVectors,
-            into: descriptor
+        return encode(
+            TekFrameInputs(
+                width: Int32(Ubiquitty.tekScreenWidth(terminal)),
+                height: Int32(Ubiquitty.tekScreenHeight(terminal)),
+                isGraphicInputActive: Ubiquitty.tekGINActive(terminal),
+                graphicInputX: Int32(Ubiquitty.tekGINX(terminal)),
+                graphicInputY: Int32(Ubiquitty.tekGINY(terminal)),
+                background: Ubiquitty.Tek.tekBackground(terminal, Self.narrowColor(terminal.palette.defaultBackground), preference),
+                beam: beam,
+                cursor: Ubiquitty.Tek.tekCursor(terminal, beam),
+                drawsBrightPen: Ubiquitty.Tek.isWritingSpotDrawn(terminal, spotSetting)
+            ),
+            Ubiquitty.tekVisiblePrimitives(terminal)
         )
+    }
+
+    /// Where one Tektronix frame strokes and in which colours, from a
+    /// captured tube or the model's; its display list is passed beside it,
+    /// borrowed from whichever holds it.
+    private struct TekFrameInputs {
+        let width: Int32
+        let height: Int32
+        let isGraphicInputActive: Bool
+        let graphicInputX: Int32
+        let graphicInputY: Int32
+        let background: Ubiquitty.Tek.TekColor
+        let beam: Ubiquitty.Tek.TekColor
+        let cursor: Ubiquitty.Tek.TekColor
+        let drawsBrightPen: Bool
+    }
+
+    /// Records why Core declined a frame, and arms what asks for it again.
+    ///
+    /// A hold the coherence rule, an open update or an arriving redraw puts
+    /// on the frame is rechecked when Core says it may release. A frame
+    /// awaiting its capture, or an owner that has not turned since the
+    /// demand, is woken by the capture's publication, unless Core names a
+    /// tick to ask again at: a pane nothing drains, whose model another
+    /// thread held at the ask.
+    ///
+    /// - Parameters:
+    ///   - supply: Core's answer, declined.
+    ///   - surface: The surface whose frame was declined.
+    private func recordDecline(_ supply: Ubiquitty.Runtime.FrameSupply, for surface: TerminalSurface) {
+        switch supply.decline {
+        case .AwaitingCapture:
+            lastFrameDecline = .awaitingCapture
+            surface.awaitCapture(askAgainTicks: supply.askAgainTicks)
+        case .OwnerStalled:
+            lastFrameDecline = .ownerStalled
+        case .RedrawArriving:
+            surface.deferPresentationForArrivingRedraw(askAgainTicks: supply.askAgainTicks)
+            lastFrameDecline = .redrawArriving
+        default:
+            surface.deferHeldPresentation(askAgainTicks: supply.askAgainTicks)
+            lastFrameDecline = .withheld
+        }
     }
 
     /// The model's 16-bit palette channels as the resolvers' 8-bit theme

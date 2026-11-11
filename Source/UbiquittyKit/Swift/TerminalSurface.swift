@@ -6539,7 +6539,9 @@ private final class SurfaceClockBridge: NSObject, @preconcurrency FrameClockDele
         guard surface.drive.readSnapshot().isTekModeActive else {
             return
         }
-        surface.drive.withTerminal { Ubiquitty.tekCommitFrame($0) }
+        // The owner commits at its next turn and serves a frame of the
+        // committed tube; the frame owed here asks for it.
+        surface.drive.requestTekFrameCommit()
         surface.needsDisplay = true
     }
 
