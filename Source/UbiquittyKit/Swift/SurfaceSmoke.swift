@@ -986,6 +986,13 @@ enum SurfaceSmoke {
             return failed(failure)
         }
 
+        // The legs from here read whether a frame Loaded its target, and a
+        // view held back over history plans every row whatever changed: there
+        // "rebuilt" holds of every frame and "reused" of none.
+        guard surface.viewOffset == 0 else {
+            return failed("the style and palette legs read reuse at the live tail, and the view stands \(surface.viewOffset) rows back")
+        }
+
         // The style leg. A host's styling must be the styling the frame
         // derives its uniforms from. The live route shares the assembled
         // options with the registration by construction, so the assertion
@@ -2481,6 +2488,13 @@ enum SurfaceSmoke {
         let tookCapture = renderer.presentedBoundaryFrameCount != presentedBefore
         let isCaptureWaiting = surface.drive.takeSyncFrame() != nil
         surface.clearSearch()
+        // The leg hands back the view it took. The search revealed its match
+        // a third of the way down, which holds the view back over history,
+        // and closing it left the match selected; a view held over history
+        // plans every row, so a later leg reading reuse would read this
+        // leg's view instead of its own frame.
+        surface.clearSelection()
+        surface.setViewOffset(absolute: 0)
         guard drewOverSearch, !tookCapture, !isCaptureWaiting else {
             return "a view drawing search matches drew=\(drewOverSearch), took the capture=\(tookCapture),"
                 + " left it waiting=\(isCaptureWaiting): it reads the model and retires the capture"
