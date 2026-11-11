@@ -3371,11 +3371,14 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
         // A hold the coherence rule, an open update or an arriving redraw puts
         // on the frame is rechecked when Core says it may release. A frame
         // awaiting its capture, or an owner that has not turned since the
-        // demand, arms nothing: the capture's publication wakes the view.
+        // demand, is woken by the capture's publication, unless Core names a
+        // tick to ask again at: a pane nothing drains, whose model another
+        // thread held at the ask.
         if supply.route == .Declined {
             switch supply.decline {
             case .AwaitingCapture:
                 lastFrameDecline = .awaitingCapture
+                surface.awaitCapture(askAgainTicks: supply.askAgainTicks)
             case .OwnerStalled:
                 lastFrameDecline = .ownerStalled
             case .RedrawArriving:
