@@ -1085,9 +1085,13 @@ enum DrawEntrySmoke {
         }
         // A run whose steps were held apart past the quiet interval is two
         // runs by design, so it is put back with a lone change and taken
-        // again rather than judged.
-        func takeRun(from startWidth: CGFloat, to endWidth: CGFloat, isBracketed: Bool) -> Bool {
-            for _ in 0..<3 {
+        // again rather than judged, until one is timely or the time runs
+        // out: a loaded host can hold the main thread past the interval for
+        // several runs in a row. Nil when no run was timely, which says the
+        // run was never taken, not that a drag broke.
+        func takeRun(from startWidth: CGFloat, to endWidth: CGFloat, isBracketed: Bool) -> Bool? {
+            let deadline = Date(timeIntervalSinceNow: 15)
+            repeat {
                 if isBracketed {
                     runSurface.beginLiveResize()
                 }
@@ -1098,8 +1102,8 @@ enum DrawEntrySmoke {
                 _ = spinUntil(isRunSettled)
                 runSurface.setFrameSize(CGSize(width: startWidth, height: originalSize.height))
                 _ = spinUntil(isRunSettled)
-            }
-            return false
+            } while Date() < deadline
+            return nil
         }
         func heldAfterSettle() -> String? {
             if runSurface.drive.liveResize != .Idle { return "the drain's hold" }
@@ -1138,7 +1142,12 @@ enum DrawEntrySmoke {
         for run in runs {
             let target = width == originalSize.width ? (originalSize.width * 0.55).rounded() : originalSize.width
             cover(run.isCoveredDuringRun)
-            guard takeRun(from: width, to: target, isBracketed: run.isBracketed) else {
+            guard let didLatchHold = takeRun(from: width, to: target, isBracketed: run.isBracketed) else {
+                return failed(
+                    "\(run.name) was never taken: no attempt in 15 s stepped within the quiet interval (60 ms), so the main thread was held between steps"
+                )
+            }
+            guard didLatchHold else {
                 return failed("\(run.name) was not held as one drag from its second step to its last")
             }
             width = target
