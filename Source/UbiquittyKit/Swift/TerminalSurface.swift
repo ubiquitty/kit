@@ -4593,6 +4593,23 @@ public final class TerminalSurface: PlatformView {
         scheduleSyncOutputRecheck(afterTicks: askAgainTicks)
     }
 
+    /// Keeps a frame owed while Core makes the capture it was asked for.
+    ///
+    /// A pane its ingest loop drains is woken by the capture's publication,
+    /// and Core names no tick for it, so nothing is armed. A pane nothing
+    /// drains, whose model another thread held at the ask, is told to ask
+    /// again at a tick, and nothing else would wake it.
+    ///
+    /// - Parameter askAgainTicks: When Core said to ask again, in ticks from
+    ///   now; zero when the capture's publication wakes the view.
+    internal func awaitCapture(askAgainTicks: UInt32) {
+        guard askAgainTicks > 0 else {
+            return
+        }
+        isFrameOwed = true
+        scheduleSyncOutputRecheck(afterTicks: askAgainTicks)
+    }
+
     /// Ages the held block once its budget can have run out, and re-marks
     /// the view.
     ///
