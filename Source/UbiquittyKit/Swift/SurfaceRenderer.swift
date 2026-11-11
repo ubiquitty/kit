@@ -3173,6 +3173,7 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
             || surface.registeredSyncGeometrySize != drawableSize
             || surface.registeredSyncGeometryScale != font.atlasScale
             || surface.registeredSyncStyle != style
+            || surface.shouldUseSubpixelGlyphsInRegisteredSync != options.shouldUseSubpixelGlyphs
             || surface.registeredSyncBackground != captureBackground
             || surface.registeredSyncBackgroundOpacity != groundOpacity
             || surface.isRegisteredSyncCursorFilled != options.isFocused
@@ -3198,6 +3199,7 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
             // boundary route's cursor and the live route's agree.
             geometry.isFocused = options.isFocused
             geometry.shouldCursorInvertText = options.shouldCursorInvertText
+            geometry.shouldUseSubpixelGlyphs = options.shouldUseSubpixelGlyphs
             geometry.originInPixels = options.originInPixels
             geometry.viewportSizeInPixels = options.viewportSizeInPixels
             geometry.cellHeightPoints = options.cellHeightPoints
@@ -3256,6 +3258,7 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
             surface.registeredSyncGeometrySize = drawableSize
             surface.registeredSyncGeometryScale = font.atlasScale
             surface.registeredSyncStyle = style
+            surface.shouldUseSubpixelGlyphsInRegisteredSync = options.shouldUseSubpixelGlyphs
             surface.registeredSyncBackground = captureBackground
             surface.registeredSyncBackgroundOpacity = groundOpacity
             surface.isRegisteredSyncCursorFilled = options.isFocused

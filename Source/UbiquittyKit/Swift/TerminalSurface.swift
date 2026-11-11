@@ -2581,6 +2581,8 @@ public final class TerminalSurface: PlatformView {
     /// the registration stores the assembled style whole, and a style change
     /// alone moves neither the drawable size nor the scale.
     package var registeredSyncStyle: SurfaceStyle?
+    /// The subpixel glyph choice the registered capture uses.
+    package var shouldUseSubpixelGlyphsInRegisteredSync: Bool?
     internal var registeredSyncBackground: SIMD4<Float>?
     internal var registeredSyncBackgroundOpacity: Double?
 
