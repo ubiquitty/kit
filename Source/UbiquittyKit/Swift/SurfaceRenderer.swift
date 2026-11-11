@@ -2528,6 +2528,16 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
         let overlaysPerFrame: Int
     }
 
+    /// The captured frame the surface's glass shows, held, for input that
+    /// reads the frame on the glass rather than the model.
+    ///
+    /// - Parameter surface: The surface.
+    /// - Returns: The frame, or nil while the glass shows a frame read from
+    ///   the model, or none.
+    func presentedCapture(for surface: TerminalSurface) -> Ubiquitty.Rendering.FrameCapture? {
+        surface.frameRenderers[Self.scaleKey(current.font.atlasScale)]?.presentedCapture
+    }
+
     /// Reads the renderer's half of the drawing-debug facts.
     ///
     /// - Parameter surface: The surface the panel reports on.

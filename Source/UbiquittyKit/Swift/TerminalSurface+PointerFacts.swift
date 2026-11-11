@@ -317,7 +317,10 @@ extension TerminalSurface {
         if fact.kind == .press || fact.kind == .release {
             noteUserActivity()
         }
-        let outcome = drive.pointerFact(fact, selection: selectionModel.session)
+        // Over the captured frame the glass shows, a plain selection's
+        // gesture expands without waiting on the parser.
+        let presented = (renderer as? SurfaceRenderer)?.presentedCapture(for: self)
+        let outcome = drive.pointerFact(fact, selection: selectionModel.session, presented: presented)
         // Whether a press opened a selection is Core's answer rather than this
         // shell's guess: a press an application receives opens none, and the
         // affordances reading this latch — the pointer's shape over the void,
