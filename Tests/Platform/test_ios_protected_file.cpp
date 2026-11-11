@@ -16,6 +16,9 @@
 /// Defined in Swift (test_ios_protected_file_probe.swift): a file's protection
 /// class is a Foundation resource value.
 extern "C" bool ubiquittyTestHasCompleteProtection(const char* path);
+/// Defined beside it: whether a file written with Complete protection reads
+/// back as Complete on this device; it prints the class it read.
+extern "C" bool ubiquittyTestCompleteProtectionApplies();
 
 using namespace Ubiquitty;
 
@@ -29,6 +32,15 @@ bool hasCompleteProtection(const std::string& path)
 }
 
 } // namespace
+
+// The suite's premise: this device applies the Complete class at all. One
+// that cannot reads back another class, and the creator refuses every file
+// for it; this case names what it read, where those can say only that the
+// creation failed.
+TEST(theDeviceAppliesCompleteProtection)
+{
+    CHECK_MSG(ubiquittyTestCompleteProtectionApplies(), "this device does not apply Complete protection; the probe line above names what it read back");
+}
 
 TEST(aProtectedCreatorReturnsOnlyAnEmptyPrivateCompleteFile)
 {
