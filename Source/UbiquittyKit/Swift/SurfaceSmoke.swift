@@ -1036,6 +1036,9 @@ enum SurfaceSmoke {
         if let failure = momentumScrollFailure(surface, renderer: renderer, layer: layer) {
             return failed(failure)
         }
+        if let failure = resizeBackgroundFailure(renderer: renderer) {
+            return failed(failure)
+        }
 
         // The captured tiers leg: trigger highlights and the hilite band are
         // drawn over a captured frame from the pane's publications.
@@ -2669,6 +2672,49 @@ enum SurfaceSmoke {
         guard drawnTicks >= steps - 2, worstLag <= 1 else {
             return "a viewport moved a line a tick drew \(drawnTicks) of \(steps) ticks, at most \(worstLag) lines behind:"
                 + " \(lagReport.prefix(8).joined(separator: ", "))"
+        }
+        return nil
+    }
+
+    /// Checks the ground exposed while a resize cannot present a new drawable.
+    ///
+    /// An open update holds the frame while the bounds grow. The native layer
+    /// must fill what its old drawable cannot cover with the current palette,
+    /// and leave a translucent host's backdrop clear.
+    private static func resizeBackgroundFailure(renderer: SurfaceRenderer) -> String? {
+        guard let surface = TerminalSurface(rows: 4, columns: 10) else {
+            return "the resize ground surface could not be made"
+        }
+        let savedStyle = renderer.style
+        defer { renderer.style = savedStyle }
+        renderer.style.defaultBackgroundRed = nil
+        renderer.style.defaultBackgroundGreen = nil
+        renderer.style.defaultBackgroundBlue = nil
+        surface.renderer = renderer
+        surface.feed(Data("\u{1B}]11;#446688\u{7}\u{1B}[?2026h".utf8))
+        guard let space = CGColorSpace(name: CGColorSpace.sRGB) else {
+            return "the resize ground has no RGB colour space"
+        }
+        for step in 1...6 {
+            if step == 4 {
+                surface.feed(Data("\u{1B}]11;#886644\u{7}".utf8))
+            }
+            surface.frame = CGRect(x: 0, y: 0, width: 200 + step * 11, height: 100 + step * 7)
+            let snapshot = surface.drive.readSnapshot()
+            guard let color = surface.metalLayer.backgroundColor?.converted(to: space, intent: .defaultIntent, options: nil),
+                let components = color.components, components.count == 4,
+                abs(components[0] - CGFloat(snapshot.defaultBackgroundRed)) < 0.002,
+                abs(components[1] - CGFloat(snapshot.defaultBackgroundGreen)) < 0.002,
+                abs(components[2] - CGFloat(snapshot.defaultBackgroundBlue)) < 0.002,
+                components[3] == 1
+            else {
+                return "resize step \(step) exposes no matching opaque palette ground while its frame is held"
+            }
+        }
+        surface.metalLayer.isOpaque = false
+        _ = renderer.encodeFrame(for: surface, into: surface.metalLayer)
+        guard surface.metalLayer.backgroundColor == nil else {
+            return "a translucent resize paints over the host's backdrop"
         }
         return nil
     }

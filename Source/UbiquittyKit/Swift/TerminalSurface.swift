@@ -5326,6 +5326,7 @@ public final class TerminalSurface: PlatformView {
     /// Each shell calls this from its own resize hook: AppKit's setFrameSize,
     /// UIKit's layoutSubviews. The body is the terminal's, and there is one.
     internal func surfaceDidResize(to newSize: CGSize) {
+        (renderer as? SurfaceRenderer)?.prepareResizeBackground(for: self, into: metalLayer)
         #if canImport(AppKit)
         if isPasswordPromptShown {
             layoutPasswordBadge()

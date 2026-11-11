@@ -2035,6 +2035,43 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
         layer.colorspace = CGColorSpace(name: style.usesDisplayP3 ? CGColorSpace.displayP3 : CGColorSpace.sRGB)
     }
 
+    /// The frame's ground, shared by the drawable clear and exposed layer bounds.
+    private func frameBackground(
+        in snapshot: borrowing Ubiquitty.Runtime.RuntimeSnapshot
+    ) -> (red: Double, green: Double, blue: Double, opacity: Double) {
+        if snapshot.isEdgeToEdge {
+            let color = snapshot.letterboxColor
+            return (Double((color >> 16) & 0xFF) / 255, Double((color >> 8) & 0xFF) / 255, Double(color & 0xFF) / 255, 1)
+        }
+        let red = Double(snapshot.defaultBackgroundRed)
+        let green = Double(snapshot.defaultBackgroundGreen)
+        let blue = Double(snapshot.defaultBackgroundBlue)
+        return (
+            style.defaultBackgroundRed ?? red,
+            style.defaultBackgroundGreen ?? green,
+            style.defaultBackgroundBlue ?? blue,
+            style.backgroundOpacity
+        )
+    }
+
+    /// Paints the bounds a stale drawable does not cover during a resize.
+    ///
+    /// An opaque layer with no background exposes black until the next drawable
+    /// arrives. A translucent layer keeps the host's backdrop unobstructed.
+    package func prepareResizeBackground(for surface: TerminalSurface, into layer: CAMetalLayer) {
+        let color: CGColor?
+        if layer.isOpaque {
+            let ground = frameBackground(in: surface.drive.readSnapshot())
+            let space = layer.colorspace ?? CGColorSpaceCreateDeviceRGB()
+            color = CGColor(colorSpace: space, components: [ground.red, ground.green, ground.blue, 1])
+        } else {
+            color = nil
+        }
+        if layer.backgroundColor != color {
+            layer.backgroundColor = color
+        }
+    }
+
     /// Draws one frame of the surface's terminal into its layer.
     ///
     /// The model lock brackets the capture only: the build and the encode read
@@ -2047,6 +2084,9 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
     /// - Returns: Whether a frame was drawn.
     @discardableResult
     func encodeFrame(for surface: TerminalSurface, into layer: CAMetalLayer) -> Bool {
+        if !layer.isOpaque, layer.backgroundColor != nil {
+            layer.backgroundColor = nil
+        }
         #if canImport(AppKit)
         let hadSecondaryPlane = surface.secondaryTextPlane != nil
         let previousSecondaryInk = surface.secondaryTextPlane?.secondaryInk
@@ -2957,29 +2997,17 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
         // as the fill is — the letterbox is the window the terminal is not
         // using, and the desktop showing through it is what the mode removes.
         let isLetterboxed = snapshot.isEdgeToEdge
-        let letterbox = snapshot.letterboxColor
-        let backgroundRed =
-            isLetterboxed
-            ? Double((letterbox >> 16) & 0xFF) / 255
-            : (style.defaultBackgroundRed ?? Double(snapshot.defaultBackgroundRed))
-        let backgroundGreen =
-            isLetterboxed
-            ? Double((letterbox >> 8) & 0xFF) / 255
-            : (style.defaultBackgroundGreen ?? Double(snapshot.defaultBackgroundGreen))
-        let backgroundBlue =
-            isLetterboxed
-            ? Double(letterbox & 0xFF) / 255
-            : (style.defaultBackgroundBlue ?? Double(snapshot.defaultBackgroundBlue))
-        let groundOpacity = isLetterboxed ? 1.0 : style.backgroundOpacity
+        let background = frameBackground(in: snapshot)
+        let groundOpacity = background.opacity
         // The pass clears to that same background at the frame's opacity,
         // rather than to black. The rounding between a grid of whole cells and
         // a target of whole pixels leaves a margin no quad covers, and a black
         // clear draws it as a border around the grid; an opaque clear under a
         // translucent frame is the desktop refused at the margin.
         var clearBackground = Ubiquitty.Rendering.Vec4()
-        clearBackground.x = Float(backgroundRed)
-        clearBackground.y = Float(backgroundGreen)
-        clearBackground.z = Float(backgroundBlue)
+        clearBackground.x = Float(background.red)
+        clearBackground.y = Float(background.green)
+        clearBackground.z = Float(background.blue)
         clearBackground.w = 1
         let passClearColor = TerminalRenderer.premultipliedClear(
             clearBackground,
@@ -2987,9 +3015,9 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
             straight: options.style.unifontScale > 0
         )
         var defaultBackground = Ubiquitty.Rendering.Vec4()
-        defaultBackground.x = Float(backgroundRed)
-        defaultBackground.y = Float(backgroundGreen)
-        defaultBackground.z = Float(backgroundBlue)
+        defaultBackground.x = Float(background.red)
+        defaultBackground.y = Float(background.green)
+        defaultBackground.z = Float(background.blue)
         defaultBackground.w = Float(isLetterboxed ? 1.0 : style.defaultBackgroundOpacity)
         applyFrameStyle(
             to: &options.style,
