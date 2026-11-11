@@ -24,3 +24,31 @@ func hasCompleteProtection(_ path: UnsafePointer<CChar>) -> Bool {
     }
     return values.fileProtection == .complete
 }
+
+/// Whether a file written with Complete protection, then set to it again,
+/// reads back as Complete on this device: the suite's premise, which every
+/// creator case depends on. Prints the class it read, or what refused it.
+///
+/// - Returns: Whether the class read back is Complete.
+@_cdecl("ubiquittyTestCompleteProtectionApplies")
+func completeProtectionApplies() -> Bool {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("ubq-protection-probe-\(UUID().uuidString)", isDirectory: true)
+    let url = directory.appendingPathComponent("probe", isDirectory: false)
+    var report: String
+    do {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        try Data().write(to: url, options: [.withoutOverwriting, .completeFileProtection])
+        let reference = url as NSURL
+        try reference.setResourceValue(URLFileProtection.complete, forKey: .fileProtectionKey)
+        reference.removeAllCachedResourceValues()
+        var protection: AnyObject?
+        try reference.getResourceValue(&protection, forKey: .fileProtectionKey)
+        report = (protection as? URLFileProtection)?.rawValue ?? (protection as? String) ?? "no protection value"
+    } catch {
+        report = "refused: \(error)"
+    }
+    try? FileManager.default.removeItem(at: directory)
+    print("probe: a file written with Complete protection reads back \(report)")
+    return report == URLFileProtection.complete.rawValue
+}
