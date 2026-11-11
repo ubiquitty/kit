@@ -1190,26 +1190,40 @@ enum SurfaceSmoke {
         // frames on its own schedule, stretching the chain by a frame. A
         // severed no-op guard fails this whatever the count: every re-assert
         // moves the epoch, and every frame replans full forever.
+        surface.drive.lockForRead()
+        let epochBeforeRepeat = surface.drive.borrowTerminal().map { $0.paletteEpoch }
+        surface.drive.unlockForRead()
         feed(surface.drive, "\u{1b}]4;33;rgb:ff/00/ff\u{07}")
-        var reusedAfterRepeat = false
-        for _ in 0..<6 {
-            waitForAdmittedFrame(surface)
-            guard renderer.encodeFrame(for: surface, into: layer) else {
-                return failed("repeated-OSC4 frame declined")
-            }
-            if renderer.didReuseLastFrame {
-                reusedAfterRepeat = true
-                break
-            }
-        }
         surface.drive.lockForRead()
         let epochAfterRepeat = surface.drive.borrowTerminal().map { $0.paletteEpoch }
         surface.drive.unlockForRead()
+        // The guard itself: the feed is applied before it returns, so the
+        // epoch read after it is the write's whole effect.
+        guard epochAfterRepeat == epochBeforeRepeat else {
+            return failed(
+                "re-asserting an unchanged palette colour moved the epoch"
+                    + " (\(String(describing: epochBeforeRepeat)) to \(String(describing: epochAfterRepeat)))"
+            )
+        }
+        // Reuse resuming is bounded by time, not by a frame count: on a slow
+        // host the prompt's output keeps landing between frames, and each
+        // full plan only re-arms the baseline for its successor. A severed
+        // guard never converges, whatever the bound.
+        var reusedAfterRepeat = false
+        var lastPlans: [String] = []
+        let reuseDeadline = Date(timeIntervalSinceNow: 3)
+        while !reusedAfterRepeat, Date() < reuseDeadline {
+            waitForAdmittedFrame(surface)
+            guard renderer.encodeFrame(for: surface, into: layer) else {
+                return failed("repeated-OSC4 frame declined: decline=\(renderer.lastFrameDecline.rawValue)")
+            }
+            reusedAfterRepeat = renderer.didReuseLastFrame
+            lastPlans = Array((lastPlans + ["\(renderer.lastFrameDirtyRows)/\(renderer.lastFramePlannedRows)"]).suffix(6))
+        }
         guard reusedAfterRepeat else {
             return failed(
                 "re-asserting an unchanged palette colour broke grid reuse"
-                    + " (epoch \(String(describing: epochAfterRepeat)),"
-                    + " dirty \(renderer.lastFrameDirtyRows)/\(renderer.lastFramePlannedRows))"
+                    + " (epoch \(String(describing: epochAfterRepeat)), last frames dirty/planned \(lastPlans))"
             )
         }
 
