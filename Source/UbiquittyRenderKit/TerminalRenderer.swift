@@ -287,6 +287,7 @@ package final class TerminalRenderer {
     ///     from the model.
     ///   - selectionSpans: The selection drawn over the captured frame.
     ///   - noSlotCount: The drain's count of captures it found no slot for.
+    // swift-only: the shared capture is passed only between in-package Swift renderers
     package func notePresented(
         capture: Ubiquitty.Rendering.FrameCapture?,
         selectionSpans: ArraySlice<Ubiquitty.Rendering.SelectionRowSpan>,
