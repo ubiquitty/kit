@@ -2158,6 +2158,16 @@ public final class RuntimeDrive {
         session.hintTicksUntilExpiry()
     }
 
+    /// Asks the owner to commit the storage tube's frame in progress, without
+    /// the model lock: the ingest-idle commit, so a stopped animation shows
+    /// its last strokes.
+    ///
+    /// The owner commits at its next turn and serves the view a frame of the
+    /// committed tube. Outside Tek mode the request does nothing.
+    package func requestTekFrameCommit() {
+        session.requestTekFrameCommit()
+    }
+
     /// Runs one pointer fact through Core's ladder — report, hilite,
     /// selection — and answers what remains for the view.
     ///

@@ -708,11 +708,17 @@ enum SurfaceSmoke {
         // flip would otherwise wait for a drain this leg never runs.
         feed(surface.drive, "\u{1b}[?38h\u{1d}\u{20}\u{60}\u{40}\u{40}\u{7f}\u{60}")
         surface.drive.republishSnapshot()
+        let tekFramesFromCaptureBefore = renderer.tekFramesFromCaptureCount
         guard renderer.encodeFrame(for: surface, into: layer) else {
             return failed("the Tek frame declined")
         }
         guard renderer.didDrawTekFrame else {
             return failed("DECSET 38 drew the cell grid, not the storage tube")
+        }
+        // The tube takes the lane as the grid does: the frame the view asked
+        // for is a capture of it, not a read of the model.
+        guard renderer.tekFramesFromCaptureCount > tekFramesFromCaptureBefore else {
+            return failed("the Tek frame read the tube from the model rather than a capture of it")
         }
         feed(surface.drive, "\u{1b}\u{03}")
         surface.drive.republishSnapshot()
