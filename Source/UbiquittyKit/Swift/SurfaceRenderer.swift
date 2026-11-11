@@ -3168,20 +3168,25 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
                 target: target
             )
         }
-        if !isDrawingStill,
+        let isRegisteredGeometryStale =
             surface.registeredSyncGeometryOrigin != captureOrigin
-                || surface.registeredSyncGeometrySize != drawableSize
-                || surface.registeredSyncGeometryScale != font.atlasScale
-                || surface.registeredSyncStyle != style
-                || surface.registeredSyncBackground != captureBackground
-                || surface.registeredSyncBackgroundOpacity != groundOpacity
-                || surface.isRegisteredSyncCursorFilled != options.isFocused
-                || registeredViewOffsetNow != surface.viewOffset
-                || surface.registeredSyncRaster != raster
-                || surface.registeredSyncCellWidth != frameMetrics.cellWidth
-                || surface.registeredSyncSheetKey != currentSheetKey
-                || isRegisteredSelectionColorStale
-        {
+            || surface.registeredSyncGeometrySize != drawableSize
+            || surface.registeredSyncGeometryScale != font.atlasScale
+            || surface.registeredSyncStyle != style
+            || surface.registeredSyncBackground != captureBackground
+            || surface.registeredSyncBackgroundOpacity != groundOpacity
+            || surface.isRegisteredSyncCursorFilled != options.isFocused
+            || surface.registeredSyncRaster != raster
+            || surface.registeredSyncCellWidth != frameMetrics.cellWidth
+            || surface.registeredSyncSheetKey != currentSheetKey
+            || isRegisteredSelectionColorStale
+        // A view that only moved tells the captures where it stands and
+        // keeps the registration, whose generation a whole registration would
+        // advance, retiring the capture made for the frame before.
+        if !isDrawingStill, !isRegisteredGeometryStale, registeredViewOffsetNow != surface.viewOffset {
+            surface.registerViewOffsetForCaptures()
+        }
+        if !isDrawingStill, isRegisteredGeometryStale {
             // The placement and style are the ones the live path below
             // applies — copied from the same assembled options, so the two
             // capture routes cannot drift a field apart.

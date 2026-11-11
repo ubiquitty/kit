@@ -1751,6 +1751,24 @@ public final class RuntimeDrive {
         session.setDesiredFocus(focus)
     }
 
+    /// Moves the view the session's captures are made for, and nothing else
+    /// of the registered geometry: the waiting capture is not retired, no
+    /// new generation starts, and the owner is asked for a capture at the
+    /// new position at once. Takes no model lock.
+    ///
+    /// - Parameters:
+    ///   - viewOffset: Rows of history above the tail the view shows.
+    ///   - isViewOffsetHeld: Whether the view holds its rows while output
+    ///     arrives below them.
+    ///   - viewHistory: The history the offset was judged against.
+    package func setSyncFrameViewOffset(
+        _ viewOffset: Int,
+        isViewOffsetHeld: Bool,
+        viewHistory: Ubiquitty.Screen.HistoryFacts
+    ) {
+        session.setSyncFrameViewOffset(Int32(viewOffset), isViewOffsetHeld ? .hold : .follow, viewHistory)
+    }
+
     /// Registers the durable knobs the session's boundary capture is steered
     /// by, and arms it.
     ///

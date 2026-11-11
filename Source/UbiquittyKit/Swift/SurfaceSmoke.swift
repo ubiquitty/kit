@@ -1030,6 +1030,13 @@ enum SurfaceSmoke {
             return failed(failure)
         }
 
+        // The momentum leg: a viewport moved a line at every tick, as a
+        // trackpad flick's momentum moves it, draws each tick at the offset
+        // it was asked for, with the shell idle.
+        if let failure = momentumScrollFailure(surface, renderer: renderer, layer: layer) {
+            return failed(failure)
+        }
+
         // The captured tiers leg: trigger highlights and the hilite band are
         // drawn over a captured frame from the pane's publications.
         if let failure = capturedTiersFailure(surface, renderer: renderer, layer: layer) {
@@ -2605,6 +2612,63 @@ enum SurfaceSmoke {
         }
         guard encodeAfterFontPreparation(renderer, for: surface, into: layer) else {
             return "the frame after the search ended declined: decline=\(renderer.lastFrameDecline.rawValue)"
+        }
+        return nil
+    }
+
+    /// Moves the viewport one line up at every tick, as the momentum after a
+    /// trackpad flick does, with the shell idle, and draws each tick.
+    ///
+    /// Each tick's frame must draw, and show the rows at the offset that
+    /// tick asked for, or one a tick behind it: a frame that keeps an older
+    /// offset while the scroll bar moves is the content standing still under
+    /// a scroll.
+    ///
+    /// - Parameters:
+    ///   - surface: The surface, its shell awake and idle, with history.
+    ///   - renderer: The surface renderer.
+    ///   - layer: The layer to present into.
+    /// - Returns: Why the leg failed, or nil.
+    private static func momentumScrollFailure(
+        _ surface: TerminalSurface,
+        renderer: SurfaceRenderer,
+        layer: CAMetalLayer
+    ) -> String? {
+        let steps = 30
+        let rows = Int(surface.drive.readSnapshot().rows)
+        feed(surface.drive, String(repeating: "momentum history\r\n", count: steps + 2 * rows))
+        surface.followTailOrHoldViewport()
+        surface.setViewOffset(absolute: 0)
+        surface.isFrameLinkHeldOffForTesting = true
+        defer {
+            surface.isFrameLinkHeldOffForTesting = false
+            surface.setViewOffset(absolute: 0)
+        }
+        waitForAdmittedFrame(surface)
+        guard encodeAfterFontPreparation(renderer, for: surface, into: layer) else {
+            return "the frame before the momentum declined: decline=\(renderer.lastFrameDecline.rawValue)"
+        }
+        let tailTopRow = renderer.lastFrameFirstAbsoluteRow
+        var drawnTicks = 0
+        var worstLag = 0
+        var lagReport: [String] = []
+        for step in 1...steps {
+            surface.offsetView(byLines: 1)
+            RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 1.0 / 60))
+            guard renderer.encodeFrame(for: surface, into: layer) else {
+                lagReport.append("\(step):\(renderer.lastFrameDecline.rawValue)")
+                continue
+            }
+            drawnTicks += 1
+            let shownOffset = tailTopRow - renderer.lastFrameFirstAbsoluteRow
+            worstLag = max(worstLag, surface.viewOffset - shownOffset)
+            if surface.viewOffset - shownOffset > 1 {
+                lagReport.append("\(step):asked \(surface.viewOffset) shown \(shownOffset)")
+            }
+        }
+        guard drawnTicks >= steps - 2, worstLag <= 1 else {
+            return "a viewport moved a line a tick drew \(drawnTicks) of \(steps) ticks, at most \(worstLag) lines behind:"
+                + " \(lagReport.prefix(8).joined(separator: ", "))"
         }
         return nil
     }

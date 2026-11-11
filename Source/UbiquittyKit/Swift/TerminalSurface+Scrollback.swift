@@ -133,6 +133,27 @@ extension TerminalSurface {
         }
     }
 
+    /// Tells the session's captures where the view now stands, without
+    /// registering the capture geometry again.
+    ///
+    /// A move registers at the scroll itself, so the frame the next tick
+    /// asks for is captured at the new offset: a momentum flick moves the
+    /// view at every tick, and a whole registration at each would retire the
+    /// capture made for the tick before. Nothing is registered before the
+    /// first frame registers the geometry, which carries the offset.
+    internal func registerViewOffsetForCaptures() {
+        guard registeredSyncGeometrySize != nil else {
+            return
+        }
+        let session = selectionModel.session
+        let history = session.pointee.viewportObservedHistory
+        let isHeld = Ubiquitty.Selection.isViewOffsetHeldByHistory(session.pointee)
+        drive.setSyncFrameViewOffset(viewOffset, isViewOffsetHeld: isHeld, viewHistory: history)
+        registeredSyncViewOffset = viewOffset
+        registeredSyncViewHistory = history
+        isRegisteredSyncViewOffsetHeld = isHeld
+    }
+
     /// Publishes a viewport move: the schedule's conservative blink arm, the
     /// scroll bar, and a repaint all follow the new offset.
     internal func noteScrollMovement() {
@@ -140,6 +161,7 @@ extension TerminalSurface {
             drive.observeSelectionViewport(&$0, viewOffset: viewOffset)
         }
         drive.setPresentedViewOffset(viewOffset)
+        registerViewOffsetForCaptures()
         // The projection reads the viewed rows, so a viewport move stales it.
         noteAccessibilityContentChanged()
         updateScrollbackChrome(viewOffsetLines: viewOffset, reveal: true)
