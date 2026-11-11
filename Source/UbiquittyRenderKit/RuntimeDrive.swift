@@ -2161,16 +2161,24 @@ public final class RuntimeDrive {
     /// Runs one pointer fact through Core's ladder — report, hilite,
     /// selection — and answers what remains for the view.
     ///
+    /// A plain selection's press, drag and release expand over `presented`
+    /// without the model lock when no rung above the selection would take
+    /// them; any other fact, and every fact with no frame or over one that
+    /// cannot take the gesture, runs the ladder under the lock.
+    ///
     /// - Parameters:
-    ///   - fact: The event's facts.
+    ///   - fact: The event's facts, in the presented frame's visible rows.
     ///   - selection: The caller-owned selection session.
+    ///   - presented: The captured frame the view presents, or nil for a view
+    ///     whose glass shows a frame read from the model or none at all.
     /// - Returns: What to repaint and notify.
     // swift-only: the printer cannot represent the selection pointer, and the only callers are in-package Swift
     package func pointerFact(
         _ fact: Ubiquitty.Runtime.TerminalSession.PointerFact,
-        selection: UnsafeMutablePointer<Ubiquitty.Selection.Session>
+        selection: UnsafeMutablePointer<Ubiquitty.Selection.Session>,
+        presented: Ubiquitty.Rendering.FrameCapture? = nil
     ) -> Ubiquitty.Runtime.TerminalSession.PointerOutcome {
-        session.pointerFact(fact, selection)
+        session.pointerFact(fact, selection, presented)
     }
 
     /// Tells the DEC locator where a pointer that has not moved is, and
