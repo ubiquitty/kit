@@ -1761,6 +1761,7 @@ public final class RuntimeDrive {
     ///   - isViewOffsetHeld: Whether the view holds its rows while output
     ///     arrives below them.
     ///   - viewHistory: The history the offset was judged against.
+    // swift-only: the printer cannot represent HistoryFacts, and only the Kit's Swift scroll path calls this helper
     package func setSyncFrameViewOffset(
         _ viewOffset: Int,
         isViewOffsetHeld: Bool,
