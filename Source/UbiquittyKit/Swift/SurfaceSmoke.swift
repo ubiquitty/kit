@@ -1428,18 +1428,29 @@ enum SurfaceSmoke {
         guard renderer.lastFrameBlinkTicks == 1234 else {
             return failed("the live route's options carried tick \(renderer.lastFrameBlinkTicks), not the pin")
         }
+        // The surface's own link would take the capture this leg reads, so it
+        // stays off until the leg has it.
+        surface.isFrameLinkHeldOffForTesting = true
+        let seenBeforeClock = surface.drive.syncClearSeenCount
+        let publishedBeforeClock = surface.drive.syncFramePublicationCount
         surface.send("printf '\\033[?2026hclock-leg\\033[?2026l\\n'\n")
-        // Polled on the boundary slot itself, not on screen updates: the
-        // resize leg's SIGWINCH redraw lands updates of its own, and a poll
-        // satisfied by one reads the slot before the boundary fills it.
+        // Waited on the parser closing the update, not on screen updates: the
+        // resize leg's SIGWINCH redraw lands updates of its own, and a wait
+        // satisfied by one asks before the update closes. The view then asks
+        // for its frame, as a tick does, and the owner captures it.
         let clockDeadline = Date(timeIntervalSinceNow: 5)
-        var clocked: Ubiquitty.Rendering.FrameCapture?
-        while clocked == nil, Date() < clockDeadline {
+        while surface.drive.syncClearSeenCount == seenBeforeClock, Date() < clockDeadline {
             RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.05))
-            clocked = surface.drive.takeSyncFrame()
         }
+        _ = asksForCapture(surface, publishedBefore: publishedBeforeClock)
+        let clocked = surface.drive.takeSyncFrame()
+        surface.isFrameLinkHeldOffForTesting = false
         guard let clocked else {
-            return failed("no boundary capture followed the pinned-tick feed")
+            return failed(
+                "no boundary capture followed the pinned-tick feed"
+                    + " (parser saw \(surface.drive.syncClearSeenCount - seenBeforeClock),"
+                    + " published \(surface.drive.syncFramePublicationCount - publishedBeforeClock))"
+            )
         }
         guard clocked.blinkTicks() == 1234 else {
             return failed("the boundary capture carried tick \(clocked.blinkTicks()), not the pin")
