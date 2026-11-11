@@ -993,8 +993,14 @@ enum SurfaceSmoke {
         guard surface.drive.syncClearSeenCount > seenBeforeSecond else {
             return failed("the shell's second 2026 block never reached the parser")
         }
+        // The parser counts the block's close before the pass that captures
+        // it ends, and a live shell's output is held for its read to go
+        // quiet: an encode at once can be refused for a hold a slower host
+        // has not yet released. Each hold is waited out as the frame link
+        // would; any other refusal fails with its reason.
+        waitForAdmittedFrame(surface)
         guard encodeAfterFontPreparation(renderer, for: surface, into: layer) else {
-            return failed("sync-boundary frame declined")
+            return failed("sync-boundary frame declined: decline=\(renderer.lastFrameDecline.rawValue)")
         }
         guard surface.drive.takeSyncFrame() == nil else {
             return failed("the encode left the boundary frame undrained")
