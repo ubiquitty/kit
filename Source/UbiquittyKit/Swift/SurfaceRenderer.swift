@@ -651,6 +651,34 @@ extension SurfaceSelectionModel {
     }
 }
 
+extension SurfaceSelectionModel {
+    /// The view's own selection over a capture Core made apart from the lane,
+    /// written to ``spanScratch`` without the model lock.
+    ///
+    /// A still has no selection the drain resolved for it, so the view's
+    /// selection is resolved over the still's own grid.
+    ///
+    /// - Parameters:
+    ///   - still: The capture, held.
+    ///   - drive: The view's drive.
+    /// - Returns: How many spans were written, and where the selection
+    ///   begins and ends on the still.
+    func selectionOverStill(
+        _ still: Ubiquitty.Rendering.FrameCapture,
+        drive: RuntimeDrive
+    ) -> (count: Int, ends: Ubiquitty.Selection.ViewportEnds) {
+        let capacity = max(Int(Ubiquitty.Selection.viewportSpanCapacity(still.rows(), still.columns())), spansNeeded)
+        if spanScratch.count < capacity {
+            spanScratch = Array(repeating: Ubiquitty.Rendering.SelectionRowSpan(), count: capacity)
+        }
+        var ends = Ubiquitty.Selection.ViewportEnds()
+        let answer = spanScratch.withUnsafeMutableBufferPointer { spans in
+            drive.viewSelectionOverCapture(&session.pointee, still, Ubiquitty.Selection.ViewportSpans(spans), &ends)
+        }
+        return (Int(answer.count), ends)
+    }
+}
+
 /// Draws terminal surfaces through the Swift renderer, one font configuration
 /// per instance.
 ///
@@ -1156,6 +1184,10 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
 
     /// Pictures drawn from the captured frame the view last presented.
     package private(set) var stillsFromPresentedCaptureCount = 0
+
+    /// Frames drawn from a capture Core made of the model apart from the lane:
+    /// a still with no presented frame to draw, or a lane Core does not serve.
+    package private(set) var framesFromStillCaptureCount = 0
 
     /// Refuses the next drawable a frame asks the layer for, as a layer with
     /// none free does, for a smoke that needs a frame built and not shown.
@@ -2259,18 +2291,24 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
         }
     }
 
-    /// Draws the captured frame the view last presented into a target the
-    /// glass never shows, for a picture of the pane such as a thumbnail.
+    /// Draws a capture that is not the lane's next frame, building every row
+    /// onto its target.
     ///
-    /// The frame is the one on the glass: its rows, and the selection the
-    /// view drew over them. The search, trigger and hilite tiers are the
-    /// pane's published ones now. Nothing here takes the slot's capture or
-    /// waits on the model.
+    /// For a picture of the pane such as a thumbnail, the capture is the one
+    /// on the glass: its rows, and the selection the view drew over them. A
+    /// view with none, and a lane Core does not serve, draw a capture Core
+    /// made of the model apart from the lane, with the view's selection over
+    /// its grid. The search, trigger and hilite tiers are the pane's
+    /// published ones now. Nothing here takes the slot's capture or waits on
+    /// the model.
     ///
     /// - Parameters:
-    ///   - capture: The view's presented capture.
+    ///   - capture: The capture to draw.
+    ///   - selectionSpans: The selection drawn over it, in its visible rows.
+    ///   - isPresentedCapture: Whether it is the view's presented capture
+    ///     rather than one made apart from the lane.
     ///   - surface: The surface.
-    ///   - renderer: Its frame renderer, which holds the capture.
+    ///   - renderer: Its frame renderer.
     ///   - clip: The frame's presentation clip in the target.
     ///   - cursorMixAlpha: The cursor's weight in the picture.
     ///   - clearColor: The pass's clear colour.
@@ -2278,6 +2316,8 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
     /// - Returns: Whether a frame was encoded.
     private func encodeStill(
         _ capture: Ubiquitty.Rendering.FrameCapture,
+        selectionSpans: ArraySlice<Ubiquitty.Rendering.SelectionRowSpan>,
+        isPresentedCapture: Bool,
         for surface: TerminalSurface,
         renderer: TerminalRenderer,
         clip: CGRect?,
@@ -2300,7 +2340,7 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
         var tiers = Ubiquitty.Rendering.OverlaySpanCounts()
         let built = buildFrameOverCapture(
             capture,
-            selectionSpans: renderer.presentedSelectionSpans[...],
+            selectionSpans: selectionSpans,
             for: surface,
             renderer: renderer,
             tiers: &tiers
@@ -2333,7 +2373,11 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
             backgroundDrawable: target.backgroundDrawable,
             transactionally: false
         )
-        stillsFromPresentedCaptureCount += 1
+        if isPresentedCapture {
+            stillsFromPresentedCaptureCount += 1
+        } else {
+            framesFromStillCaptureCount += 1
+        }
         return true
     }
 
@@ -2652,9 +2696,9 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
             }
             // The tube a capture froze, taken through Core's frame decision
             // as a grid frame is: the owner commits and captures it, and the
-            // view never waits on the parser for it. A still, a lane with no
-            // captures armed, and a capture of the grid taken across the
-            // mode's edge read the tube from the model under its lock.
+            // view never waits on the parser for it. A still, a lane Core does
+            // not serve, and a capture of the grid taken across the mode's
+            // edge draw the tube Core captures apart from the lane.
             var tube: Ubiquitty.Rendering.FrameCapture?
             if !isDrawingStill {
                 var supply = Ubiquitty.Runtime.FrameSupply()
@@ -2674,6 +2718,16 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
                 if let taken, taken.isTekFrame() {
                     tube = taken
                 }
+            }
+            if tube == nil, let still = surface.drive.captureStill(), still.isTekFrame() {
+                tube = still
+            }
+            guard let tube else {
+                if !isDrawingStill {
+                    surface.awaitCapture(askAgainTicks: 1)
+                }
+                lastFrameDecline = .tek
+                return false
             }
             guard let target = target(),
                 let commands = encodeTekFrame(
@@ -2700,9 +2754,7 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
                 clear.endEncoding()
             }
             didDrawTekFrame = true
-            if tube != nil {
-                tekFramesFromCaptureCount += 1
-            }
+            tekFramesFromCaptureCount += 1
             if !isDrawingStill {
                 surface.presentedFrameGeometry = nil
                 surface.remotePanOffsetInPoints = .zero
@@ -3039,7 +3091,7 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
         linkHoverColor.y = Float(hasHostHoverColor ? style.linkHoverColorGreen : accent.green)
         linkHoverColor.z = Float(hasHostHoverColor ? style.linkHoverColorBlue : accent.blue)
         linkHoverColor.w = Float(style.linkHoverColorAlpha)
-        var frameLinks = FrameLinkInputs(
+        let frameLinks = FrameLinkInputs(
             shouldUnderlineLinks: style.shouldUnderlineLinks,
             linkStyleIndex: Int32(style.linkStyleIndex),
             shouldResolveLinkKindsPerKind: style.shouldStyleLinksPerKind,
@@ -3099,13 +3151,15 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
         // A picture nobody presents, such as a thumbnail, draws the captured
         // frame the view last presented, when it is of this grid: the slot,
         // the registration and the lineage the drain captures against stay
-        // the view's. A view whose glass shows a frame read from the model
-        // reads the model again below, without taking the slot's capture.
+        // the view's. A view with no such frame draws a capture Core makes
+        // apart from the lane, below, without taking the slot's capture.
         if isDrawingStill, let held = renderer.presentedCapture,
             Int(held.rows()) == Int(snapshot.rows), Int(held.columns()) == Int(snapshot.columns)
         {
             return encodeStill(
                 held,
+                selectionSpans: renderer.presentedSelectionSpans[...],
+                isPresentedCapture: true,
                 for: surface,
                 renderer: renderer,
                 clip: presentation.clip,
@@ -3399,6 +3453,7 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
                 perfFrame.commitSeconds = finishedAt - commitStartedAt
                 notePerfFrame(perfFrame, for: surface, renderer: renderer)
             }
+            noteFrameEncoded(for: surface, encodeStartedAt: encodeStartedAt)
             return true
         }
 
@@ -3408,405 +3463,61 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
             return false
         }
 
-        let lockStartedAt = isPerfLogged ? CACurrentMediaTime() : 0
-        surface.drive.lockForRead()
-        var didCaptureFrame = false
-        var liveFrameDrawsSelection = false
-        var lockedStamp: RetainedStamp?
-        if let terminal = surface.drive.borrowTerminal() {
-            // The parser can open an update or erase the screen after the
-            // published check. Core rechecks under the read's lock before it
-            // consumes damage or cursor state. A full-screen program answers
-            // each resize step with an erase and a repaint that reaches the
-            // parser over many reads; a step drawn between them would present
-            // the erased screen, so the previous frame stays on the glass until
-            // the drain has caught up with the repaint.
-            var lockedDemand = Ubiquitty.Runtime.FrameDemand()
-            lockedDemand.nowTicks = Ubiquitty.Ticks(TerminalSurface.monotonicTicksNow())
-            lockedDemand.isResizing = isResizing
-            let answer = surface.drive.liveReadDecline(terminal, lockedDemand)
-            switch answer.decline {
-            case .BlockOpenUnderLock:
-                surface.drive.unlockForRead()
-                surface.deferHeldPresentation(askAgainTicks: answer.askAgainTicks)
-                lastFrameDecline = .blockOpenUnderLock
-                return false
-            case .RedrawArriving:
-                surface.drive.unlockForRead()
-                surface.deferPresentationForArrivingRedraw(askAgainTicks: answer.askAgainTicks)
-                lastFrameDecline = .redrawArriving
-                return false
-            default:
-                break
+        // Core answered with a read of the model: a still of a view that has
+        // presented no captured frame, or a lane Core does not serve, one not
+        // presented or whose captures are not armed. Core captures the model
+        // for it under the model lock, apart from the lane: no frame the view
+        // would take is consumed and the lineage does not advance. A presented
+        // view's tick never comes here.
+        guard let still = surface.drive.captureStill() else {
+            if !isDrawingStill {
+                surface.awaitCapture(askAgainTicks: 1)
             }
-            // The rows the frame shows, read under the lock the capture reads
-            // under and by the rule the drain's captures stand by: a view held
-            // back stands over the rows the drain appended since the view last
-            // took output, so this frame and a captured one show the same
-            // rows. The cells, the damage plan, the links, the status row, the
-            // images, the overlay tiers and the selection all read it.
-            options.viewOffset = Ubiquitty.Selection.frameViewOffset(
-                surface.selectionModel.session.pointee,
-                terminal,
-                Int32(surface.viewOffset)
-            )
-            // The frame's origin is Core's. Under DECSET 7402's colour
-            // letterbox the padding is absent, and the capture zeroes whatever
-            // origin it is handed; read here, under the lock the capture reads
-            // under, so the retained plan's row mapping and the image layer's
-            // origin describe the frame the capture will paint rather than the
-            // one before the mode moved.
-            let isEdgeToEdge = Ubiquitty.Rendering.isFrameEdgeToEdge(terminal)
-            if isEdgeToEdge {
-                options.originInPixels = Ubiquitty.FloatPoint(x: 0, y: 0)
-            }
-            // Link addresses and captured cells must use the same history depth.
-            frameLinks.scrollbackCount = terminal.scrollbackCount
-            frameLinks.viewOffset = options.viewOffset
-            applyFrameLinks(to: &options, frameLinks)
-            surface.noteFrameHoverRun(
-                isActive: options.isHoverLinkActive,
-                rowFirst: options.hoverLinkRowFirst,
-                rowLast: options.hoverLinkRowLast,
-                columnFirst: options.hoverLinkColumnFirst,
-                columnLast: options.hoverLinkColumnLast,
-                color: (options.linkHoverColor.x, options.linkHoverColor.y, options.linkHoverColor.z)
-            )
-            // The highlight spans are resolved under the same lock the capture
-            // reads under, into surface-owned scratch the options borrow only
-            // for the capture call.
-            let selection = surface.selectionModel
-            let rows = Int(snapshot.rows)
-            let metrics = frameMetrics
-            // Core plans the retained frame under the same lock the capture
-            // reads under, and the one plan decides both halves: which rows the
-            // capture re-reads, and whether the encode Loads the target. Planned
-            // here rather than in the renderer because the drain mutates the grid
-            // and the lock is held exactly here.
-            // The stamp joins the size in the target verdict: a retained
-            // texture drawn under a replaced styling or a superseded palette
-            // is wrong the way a wrong-sized one is — its pixels do not
-            // describe this frame — and the full plan is the same cure.
-            // The model epoch is read under the same lock the capture reads
-            // under: OSC 4 moves it on the ingest thread, and this frame's
-            // verdict must see the move the capture will paint.
-            let stamp = RetainedStamp(
-                style: style,
-                contentEpoch: surface.retainedContentEpoch,
-                origin: CGPoint(x: CGFloat(options.originInPixels.x), y: CGFloat(options.originInPixels.y)),
-                paletteEpoch: terminal.paletteEpoch,
-                isEdgeToEdge: isEdgeToEdge
-            )
-            let isRetainedContentCurrent = retainedStamps[ObjectIdentifier(renderer)] == stamp
-            lockedStamp = stamp
-            // A renderer whose sheets refused a slot, or whose pins have grown
-            // to crowd the next frame, asks for a build that touches every
-            // row: the retained set only re-baselines exactly against one, and
-            // dropping the pins under a partial build would strip the clean
-            // rows' protection while their quads still sample the sheets. The
-            // grant is refusing the retained target for this frame, and the
-            // re-baseline goes with it — a request nothing answers leaves the
-            // pins to accumulate until the sheets refuse for good.
-            // The backdrop is installed before the grant is read: a backdrop
-            // removed or replaced asks for a whole frame, and this is it.
-            renderer.setBackdrop(
-                texture: backdropTexture,
-                opacity: backdropOpacity,
-                mode: backdropMode,
-                pixelWidth: backdropPixelWidth,
-                pixelHeight: backdropPixelHeight
-            )
-            let grantsFullRebuild = renderer.wantsFullRebuild
-            // A boundary frame changed which rows of the target hold a view
-            // tier behind the live capture's record of what it baked, so the
-            // rows that record would repaint are not the rows that differ.
-            let owesTierRows = renderer.hasTiersUnknownToLiveCapture
-            let reusesRetainedContent =
-                isRetainedContentCurrent
-                && renderer.gridMatches(
-                    widthInPixels: Int(drawableSize.width),
-                    heightInPixels: Int(drawableSize.height),
-                    // The numbers this frame's uniforms will carry, so the
-                    // verdict and the encode cannot answer differently.
-                    cellWidthInPixels: metrics.cellWidth,
-                    cellHeightInPixels: metrics.cellHeight
-                )
-            // Under the opaque letterbox no pixel reads a cell: Core hands back
-            // a plan that drains nothing and copies nothing, and leaves the
-            // baseline gone so the first frame after the mode re-reads every
-            // row. The builder paints the letterbox from the mode, so the
-            // cells the capture keeps are never read.
-            let skipsGridCapture = Ubiquitty.Rendering.canSkipGridCapture(
-                terminal,
-                SurfaceRenderer.isOcclusionSkipEnabled ? .Enabled : .Disabled
-            )
-            let plan: Ubiquitty.Rendering.RetainedFramePlan
-            if isDrawingStill {
-                plan = Ubiquitty.Rendering.makeFullRebuildPlan()
-            } else if skipsGridCapture {
-                gridCaptureSkipCount += 1
-                plan = surface.planSkippedGridFrame(
-                    terminal,
-                    rows: rows,
-                    columns: Int(snapshot.columns),
-                    viewOffset: options.viewOffset
-                )
-            } else {
-                plan = surface.planRetainedFrame(
-                    terminal,
-                    rows: rows,
-                    columns: Int(snapshot.columns),
-                    viewOffset: options.viewOffset,
-                    target: !grantsFullRebuild && !owesTierRows && !renderer.owesWholeFrame && reusesRetainedContent,
-                    hasBackdrop: backdropTexture != nil,
-                    cellHeightInPixels: Int(metrics.cellHeight.rounded()),
-                    originYInPixels: Int(options.originInPixels.y.rounded()),
-                    textureHeightInPixels: Int(drawableSize.height)
-                )
-            }
-            // The plan's verdict, not this side's guess: Core refuses the
-            // retained target for reasons the two locals above cannot see — a
-            // blink phase, a status row, a drain that lost the damage — and
-            // every one of those frames rebuilds every row. A full rebuild
-            // whose touches are ACCUMULATED instead of re-baselined pins the
-            // whole screen's strips on top of the old set, which reaches the
-            // sheet's crowding line in a handful of blinks.
-            if !plan.shouldLoadRetainedTarget {
-                renderer.rebaselineRetainedFrame()
-            }
-            didReuseLastFrame = plan.shouldLoadRetainedTarget
-            didTrustDirtySetLastFrame = plan.refresh.canReuseRows
-            if !plan.refresh.canReuseRows {
-                gridFullRereadCount += 1
-            }
-            if SurfaceRenderer.isPhaseLogEnabled {
-                var terms: [String] = []
-                if skipsGridCapture { terms.append("letterbox") }
-                if grantsFullRebuild { terms.append("sheets") }
-                if owesTierRows { terms.append("tiers") }
-                if !isRetainedContentCurrent { terms.append("stamp") }
-                if !reusesRetainedContent && isRetainedContentCurrent { terms.append("grid") }
-                if !plan.shouldLoadRetainedTarget && !grantsFullRebuild && !owesTierRows && reusesRetainedContent {
-                    terms.append("core")
-                }
-                phaseLogReuseTerms = terms.joined(separator: "+")
-            }
-            lastFramePlannedRows = rows
-            lastFrameDirtyRows = surface.rowDirtyScratch.reduce(0) { $0 + ($1 != 0 ? 1 : 0) }
-            if SurfaceRenderer.isPhaseLogEnabled {
-                phaseLogRowSignature = SurfaceRenderer.rowSignature(of: terminal, rows: rows, columns: Int(snapshot.columns))
-            }
-            if framesToReportAfterAdopt > 0 {
-                framesToReportAfterAdopt -= 1
-                NSLog(
-                    "UBQ_FONTLOG frame reused=%@ planned=%d dirty=%d",
-                    plan.shouldLoadRetainedTarget ? "1" : "0",
-                    rows,
-                    lastFrameDirtyRows
-                )
-            }
-            // The status row rides the same lock the capture reads under,
-            // into surface-owned stable bytes the options borrow for the
-            // capture call — the highlight spans' pattern.
-            let columns = Int(snapshot.columns)
-            lastFrameHadStatusRow = false
-            if columns > 0 {
-                let scratch = surface.statusRowScratch(capacity: columns)
-                if Ubiquitty.Rendering.fillStatusRow(
-                    terminal,
-                    Int32(rows),
-                    Int32(columns),
-                    options.viewOffset,
-                    Ubiquitty.Rendering.StatusRowCells(scratch)
-                ) {
-                    options.statusRowCells = UnsafePointer(scratch.baseAddress)
-                    options.statusRowColumns = Int32(columns)
-                    lastFrameHadStatusRow = true
-                }
-            }
-            // The inline images, synced and resolved under the same lock the
-            // capture reads under, so the layer and the cells are one frame.
-            let images = renderer.imageStore.layer(
-                for: terminal,
-                cellSizeInPixels: Ubiquitty.FloatSize(width: metrics.cellWidth, height: metrics.cellHeight),
-                origin: options.originInPixels,
-                scale: metrics.deviceScale,
-                presentationScale: presentation.scale,
-                viewOffset: options.viewOffset,
-                drawableSizeInPixels: options.viewportSizeInPixels,
-                isHoldingForResize: surface.isHoldingImageGapsForResize
-            )
-            surface.noteFrameImageQuads(Int32(images?.quadCount ?? 0))
-            // All overlay and selection borrows enclose the CAPTURE that consumes
-            // them, under the terminal's model lock. The build does not run here:
-            // the capture copies the rows into storage it owns, so the builder —
-            // the expensive half — reads that copy instead, and holding the lock
-            // across it would block the ingest thread for the whole frame rather
-            // than for the copy.
-            didCaptureFrame = selection.withOverlayTiers(
-                terminal,
-                viewOffset: options.viewOffset,
-                rows: rows,
-                options: options
-            ) { options in
-                var options = options
-                // The tiers this capture draws, resolved under its lock: the
-                // search record is what the next frame's route reads.
-                surface.didLastFrameDrawSearch = options.searchMatchSpanCount > 0 || options.otherSearchMatchSpanCount > 0
-                let capturesSelection = Ubiquitty.Selection.hasSelection(selection.session.pointee) && rows > 0
-                liveFrameDrawsSelection = capturesSelection
-                guard capturesSelection else {
-                    selection.visibleEnds = nil
-                    return renderer.captureFrame(
-                        terminal,
-                        options: options,
-                        metrics: metrics,
-                        plan: plan,
-                        images: images
-                    )
-                }
-                // Room for every span and piece Core can make of the grid: a
-                // rich text block cuts a row's span around its covered cells,
-                // and a sized block adds a piece for each run of its cells.
-                let spanCapacity = Int(Ubiquitty.Selection.viewportSpanCapacity(Int32(rows), Int32(columns)))
-                if selection.spanScratch.count < spanCapacity {
-                    selection.spanScratch = Array(repeating: Ubiquitty.Rendering.SelectionRowSpan(), count: spanCapacity)
-                }
-                if selection.blockScratch.isEmpty {
-                    selection.blockScratch = Array(
-                        repeating: Ubiquitty.RichText.BlockSelection(),
-                        count: 2 * Int(Ubiquitty.RichText.maxBlocksPerScreen)
-                    )
-                }
-                return selection.spanScratch.withUnsafeMutableBufferPointer { spans -> Bool in
-                    var ends = Ubiquitty.Selection.ViewportEnds()
-                    let count = Ubiquitty.Selection.viewportSpansAndEnds(
-                        &selection.session.pointee,
-                        terminal,
-                        options.viewOffset,
-                        Ubiquitty.Selection.ViewportSpans(spans),
-                        &ends
-                    )
-                    options.selectionSpans = UnsafePointer(spans.baseAddress)
-                    options.selectionSpanCount = count
-                    // The selection's own ends, which the highlight's spans are
-                    // not: a sized block adds pieces that are neither.
-                    selection.visibleEnds =
-                        ends.isVisible
-                        ? ((Int(ends.startRow), Int(ends.startColumn)), (Int(ends.endRow), Int(ends.endColumn)))
-                        : nil
-                    return selection.blockScratch.withUnsafeMutableBufferPointer { blocks -> Bool in
-                        let selections = Ubiquitty.RichText.BlockSelections(blocks)
-                        options.richTextSelectionCount = Ubiquitty.Selection.blockSelections(
-                            &selection.session.pointee,
-                            terminal,
-                            selections
-                        )
-                        options.richTextSelections = selections
-                        return renderer.captureFrame(
-                            terminal,
-                            options: options,
-                            metrics: metrics,
-                            plan: plan,
-                            images: images
-                        )
-                    }
-                }
-            }
-        }
-        surface.drive.unlockForRead()
-        // The model this frame shows is taken: the present leg runs from
-        // here to the glass, and the snapshot share is what came before.
-        let modelTakenAt = isPerfLogged ? CACurrentMediaTime() : 0
-        // Off the lock, against the copy the capture owns: the ingest thread
-        // runs through this, and the builder reads no model state.
-        let pending = didCaptureFrame ? renderer.buildCapturedFrame() : nil
-        cellRefusalsAfterTrust = renderer.retainedCellRefusalsAfterTrust
-        lastFrameCounts = renderer.counts
-        // The pixels the sync copied out of the model, moved to their textures
-        // now that the parser is no longer waiting on this thread. Before the
-        // commit below, so this frame draws them.
-        renderer.imageStore.uploadStagedPixels()
-
-        guard var pending else {
-            if renderer.didDeferForFontPreparation {
-                noteFrameNotPresented(renderer: renderer)
-            }
-            // The frame reproduced the glass: nothing is composited, the
-            // verdicts already read reused with no dirty row, and no retry is
-            // asked.
-            if renderer.didLastFramePresentNothing {
-                phaseLogReuseTerms = "skipped"
-                skippedAsReproducingGlassCount += 1
-                return true
-            }
-            lastFrameDecline = didCaptureFrame ? .build : .capture
+            lastFrameDecline = .capture
             return false
         }
-        // The target this frame drew carries this frame's styling and palette;
-        // stamped only on success, so a declined frame keeps forcing the full
-        // plan rather than certifying a target it never wrote. The lock-time
-        // stamp, not a fresh reading: an epoch that moved mid-encode belongs
-        // to the next frame's verdict, and re-reading it here would certify
-        // a target against colours it never painted.
-        pending.viewportClipInPixels = presentation.clip
-        if let lockedStamp {
-            retainedStamps[ObjectIdentifier(renderer)] = lockedStamp
-        }
-        isFocusedMatchBouncing = renderer.isFocusedMatchBouncing
-        // The drawable is asked for with the frame built and the lock
-        // released: the wait for one never delays the capture. A frame denied
-        // one was built and not shown, and the renderer must not count it as
-        // what the glass holds.
-        let waitStartedAt = isPerfLogged ? CACurrentMediaTime() : 0
-        guard let target = target() else {
-            noteFrameNotPresented(renderer: renderer)
-            lastFrameDecline = .drawable
-            return false
-        }
-        target.descriptor.colorAttachments[0].clearColor = passClearColor
-        let passEncodeStartedAt = isPerfLogged ? CACurrentMediaTime() : 0
+        let (spanCount, ends) = surface.selectionModel.selectionOverStill(still, drive: surface.drive)
         guard
-            let commands = renderer.encode(
-                pending,
-                secondaryDescriptor: target.secondaryDescriptor,
-                backgroundDescriptor: target.backgroundDescriptor,
-                into: target.descriptor
+            encodeStill(
+                still,
+                selectionSpans: surface.selectionModel.spanScratch.prefix(spanCount),
+                isPresentedCapture: false,
+                for: surface,
+                renderer: renderer,
+                clip: presentation.clip,
+                cursorMixAlpha: options.cursorMixAlpha,
+                clearColor: passClearColor,
+                target: target
             )
         else {
-            noteFrameNotPresented(renderer: renderer)
-            lastFrameDecline = .encode
             return false
         }
-        let commitStartedAt = isPerfLogged ? CACurrentMediaTime() : 0
-        if isPerfLogged {
-            presentLeg.arm(modelTakenAt)
-        }
-        commit(
-            commands,
-            presenting: target.drawable,
-            secondaryDrawable: target.secondaryDrawable,
-            backgroundDrawable: target.backgroundDrawable,
-            transactionally: presentsWithTransaction
-        )
-        notePresentedGeometry(for: surface, frame: pending, deviceScale: deviceScale, panOffset: presentation.panOffset)
-        if target.drawable != nil {
+        if !isDrawingStill {
+            // The glass shows a frame the lane never served, so nothing is
+            // leased as the frame presented.
             renderer.notePresented(capture: nil, selectionSpans: [])
+            surface.selectionModel.visibleEnds =
+                ends.isVisible
+                ? ((Int(ends.startRow), Int(ends.startColumn)), (Int(ends.endRow), Int(ends.endColumn)))
+                : nil
+            lastFrameFirstAbsoluteRow = Int(still.firstAbsoluteRow())
+            surface.didLastFrameDrawSelection = spanCount > 0
+            noteFrameEncoded(for: surface, encodeStartedAt: encodeStartedAt)
         }
-        lastFrameFirstAbsoluteRow = renderer.capturedFirstAbsoluteRow
-        surface.didLastFrameDrawSelection = liveFrameDrawsSelection
-        if isPerfLogged {
-            let finishedAt = CACurrentMediaTime()
-            perfFrame.drawSeconds = finishedAt - modelTakenAt
-            perfFrame.snapshotSeconds = modelTakenAt - lockStartedAt
-            perfFrame.drawableWaitSeconds = passEncodeStartedAt - waitStartedAt
-            perfFrame.encodeSeconds = commitStartedAt - passEncodeStartedAt
-            perfFrame.commitSeconds = finishedAt - commitStartedAt
-            notePerfFrame(perfFrame, for: surface, renderer: renderer)
-        }
-        // Counted where a frame is finished rather than where its options were
-        // filled: the encode is nearly all of what follows that point, and a
-        // stamp taken mid-build reports a prefix as a frame.
+        return true
+    }
+
+    /// Counts a frame finished on the glass, and pairs a live-resize step's
+    /// reflow with the draw that showed it.
+    ///
+    /// Counted where a frame is finished rather than where its options were
+    /// filled: the encode is nearly all of what follows that point, and a
+    /// stamp taken mid-build reports a prefix as a frame.
+    ///
+    /// - Parameters:
+    ///   - surface: The surface whose frame was drawn.
+    ///   - encodeStartedAt: When the frame's encode began, in system uptime.
+    private func noteFrameEncoded(for surface: TerminalSurface, encodeStartedAt: TimeInterval) {
         surface.framesEncodedForTesting += 1
         let encodeSeconds = ProcessInfo.processInfo.systemUptime - encodeStartedAt
         surface.frameEncodeSecondsForTesting += encodeSeconds
@@ -3830,7 +3541,6 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
                 )
             }
         }
-        return true
     }
 
     /// Assembles and encodes one Tektronix frame.
@@ -3839,16 +3549,13 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
     /// resolvers, the beam thickness, the glyph baseline — and the pass
     /// strokes the display list through Core's one walk, so a disagreement
     /// with the Metal arm's view is geometry the pass owns rather than a
-    /// setting read twice. A captured tube carries its display list, its
-    /// crosshair and the host's colour requests, frozen with the frame; with
-    /// none, the live display list, which the ingest thread mutates, is read
-    /// under the model lock for the whole assembly.
+    /// setting read twice. The captured tube carries its display list, its
+    /// crosshair and the host's colour requests, frozen with the frame.
     ///
     /// - Parameters:
     ///   - surface: The surface whose terminal is in Tek mode.
     ///   - renderer: The surface's frame renderer, whose Tek pass encodes.
-    ///   - tube: The capture whose tube the frame shows, or nil to read the
-    ///     model's.
+    ///   - tube: The capture whose tube the frame shows.
     ///   - deviceScale: Backing pixels per point, which sizes the beam, its
     ///     halo and the projection's edge inset through Core's beam geometry.
     ///   - descriptor: The pass to encode into.
@@ -3856,7 +3563,7 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
     private func encodeTekFrame(
         for surface: TerminalSurface,
         renderer: TerminalRenderer,
-        tube: Ubiquitty.Rendering.FrameCapture?,
+        tube: Ubiquitty.Rendering.FrameCapture,
         deviceScale: Double,
         into descriptor: MTLRenderPassDescriptor
     ) -> MTLCommandBuffer? {
@@ -3875,83 +3582,32 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
         uniforms.backgroundOpacity = Float(style.backgroundOpacity)
         uniforms.bitmapTier = font.unifontScale > 0 ? 1 : 0
 
-        // The model's palette carries 16-bit channels; the resolvers take the
-        // 8-bit theme colour and widen, so the narrowing divides by the same
-        // 257 the widening multiplies by — lossless for a theme that arrived
-        // as 8-bit, which is every theme the config can express.
-        func encode(_ frame: TekFrameInputs, _ primitives: Ubiquitty.Tek.PrimitiveSpan) -> MTLCommandBuffer? {
-            uniforms.defaultBackground = Self.tekFloat4(frame.background)
-            return renderer.encodeTekFrame(
-                uniforms: uniforms,
-                primitives: primitives.size() > 0 ? primitives.__dataUnsafe() : nil,
-                primitiveCount: Int32(primitives.size()),
-                tekWidth: frame.width,
-                tekHeight: frame.height,
-                isGINActive: frame.isGraphicInputActive,
-                ginX: frame.graphicInputX,
-                ginY: frame.graphicInputY,
-                drawsBrightPen: frame.drawsBrightPen,
-                beam: Self.tekFloat4(frame.beam),
-                cursor: Self.tekFloat4(frame.cursor),
-                deviceScale: Float(deviceScale),
-                drawsGlow: tekSettings.drawsGlowVectors,
-                into: descriptor
-            )
-        }
-
-        if let tube {
-            let requests = tube.tekHostColorRequests()
-            let beam = Ubiquitty.Tek.tekBeam(requests, Self.narrowColor(tube.tekThemeForeground()), preference)
-            return encode(
-                TekFrameInputs(
-                    width: Int32(tube.tekScreenWidth()),
-                    height: Int32(tube.tekScreenHeight()),
-                    isGraphicInputActive: tube.isTekGraphicInputActive(),
-                    graphicInputX: Int32(tube.tekGraphicInputX()),
-                    graphicInputY: Int32(tube.tekGraphicInputY()),
-                    background: Ubiquitty.Tek.tekBackground(requests, Self.narrowColor(tube.tekThemeBackground()), preference),
-                    beam: beam,
-                    cursor: Ubiquitty.Tek.tekCursor(requests, beam),
-                    drawsBrightPen: Ubiquitty.Tek.isWritingSpotDrawn(requests, spotSetting)
-                ),
-                tube.tekPrimitives()
-            )
-        }
-        surface.drive.lockForRead()
-        defer { surface.drive.unlockForRead() }
-        guard let terminal = surface.drive.borrowTerminal() else {
-            return nil
-        }
-        let beam = Ubiquitty.Tek.tekBeam(terminal, Self.narrowColor(terminal.palette.defaultForeground), preference)
-        return encode(
-            TekFrameInputs(
-                width: Int32(Ubiquitty.tekScreenWidth(terminal)),
-                height: Int32(Ubiquitty.tekScreenHeight(terminal)),
-                isGraphicInputActive: Ubiquitty.tekGINActive(terminal),
-                graphicInputX: Int32(Ubiquitty.tekGINX(terminal)),
-                graphicInputY: Int32(Ubiquitty.tekGINY(terminal)),
-                background: Ubiquitty.Tek.tekBackground(terminal, Self.narrowColor(terminal.palette.defaultBackground), preference),
-                beam: beam,
-                cursor: Ubiquitty.Tek.tekCursor(terminal, beam),
-                drawsBrightPen: Ubiquitty.Tek.isWritingSpotDrawn(terminal, spotSetting)
-            ),
-            Ubiquitty.tekVisiblePrimitives(terminal)
+        // The tube's theme colours carry 16-bit channels; the resolvers take
+        // the 8-bit theme colour and widen, so the narrowing divides by the
+        // same 257 the widening multiplies by — lossless for a theme that
+        // arrived as 8-bit, which is every theme the config can express.
+        let requests = tube.tekHostColorRequests()
+        let background = Ubiquitty.Tek.tekBackground(requests, Self.narrowColor(tube.tekThemeBackground()), preference)
+        let beam = Ubiquitty.Tek.tekBeam(requests, Self.narrowColor(tube.tekThemeForeground()), preference)
+        let cursor = Ubiquitty.Tek.tekCursor(requests, beam)
+        uniforms.defaultBackground = Self.tekFloat4(background)
+        let primitives = tube.tekPrimitives()
+        return renderer.encodeTekFrame(
+            uniforms: uniforms,
+            primitives: primitives.size() > 0 ? primitives.__dataUnsafe() : nil,
+            primitiveCount: Int32(primitives.size()),
+            tekWidth: Int32(tube.tekScreenWidth()),
+            tekHeight: Int32(tube.tekScreenHeight()),
+            isGINActive: tube.isTekGraphicInputActive(),
+            ginX: Int32(tube.tekGraphicInputX()),
+            ginY: Int32(tube.tekGraphicInputY()),
+            drawsBrightPen: Ubiquitty.Tek.isWritingSpotDrawn(requests, spotSetting),
+            beam: Self.tekFloat4(beam),
+            cursor: Self.tekFloat4(cursor),
+            deviceScale: Float(deviceScale),
+            drawsGlow: tekSettings.drawsGlowVectors,
+            into: descriptor
         )
-    }
-
-    /// Where one Tektronix frame strokes and in which colours, from a
-    /// captured tube or the model's; its display list is passed beside it,
-    /// borrowed from whichever holds it.
-    private struct TekFrameInputs {
-        let width: Int32
-        let height: Int32
-        let isGraphicInputActive: Bool
-        let graphicInputX: Int32
-        let graphicInputY: Int32
-        let background: Ubiquitty.Tek.TekColor
-        let beam: Ubiquitty.Tek.TekColor
-        let cursor: Ubiquitty.Tek.TekColor
-        let drawsBrightPen: Bool
     }
 
     /// Records why Core declined a frame, and arms what asks for it again.

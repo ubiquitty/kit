@@ -2812,11 +2812,17 @@ enum SurfaceSmoke {
             return "Metal refused the picture's texture"
         }
         let stillsBefore = renderer.stillsFromPresentedCaptureCount
+        let stillCapturesBefore = renderer.framesFromStillCaptureCount
+        let held = renderer.presentedCapture(for: surface)
+        let snapshot = surface.drive.readSnapshot()
         guard renderer.renderDetached(surface, into: texture, contentScale: Double(layer.contentsScale)) else {
             return "the picture of the pane declined: decline=\(renderer.lastFrameDecline.rawValue)"
         }
         guard renderer.stillsFromPresentedCaptureCount == stillsBefore + 1 else {
             return "the picture was not drawn from the captured frame the view presented"
+                + " (held \(held.map { "\($0.rows())x\($0.columns())" } ?? "none"),"
+                + " grid \(snapshot.rows)x\(snapshot.columns),"
+                + " still captures \(renderer.framesFromStillCaptureCount - stillCapturesBefore))"
         }
         let presentedBefore = renderer.presentedBoundaryFrameCount
         waitForAdmittedFrame(surface)

@@ -1791,6 +1791,18 @@ public final class RuntimeDrive {
         session.takeSyncFrame()
     }
 
+    /// A capture of the model as it stands, for a still or a lane Core does
+    /// not serve: built under the model lock, which it may wait for, and
+    /// apart from the lane, so no frame the view would take is consumed and
+    /// the lineage does not advance.
+    ///
+    /// - Returns: The capture, retained, or nil with no capture geometry
+    ///   registered or no model.
+    // swift-only: the shared capture is passed only to in-package Swift renderers
+    package func captureStill() -> Ubiquitty.Rendering.FrameCapture? {
+        session.captureStill()
+    }
+
     /// Decides which frame the view presents at this tick, as every frontend
     /// decides it: the newest frame the drain captured, a read of the model,
     /// or nothing, and why.
@@ -1811,22 +1823,6 @@ public final class RuntimeDrive {
         _ supply: inout Ubiquitty.Runtime.FrameSupply
     ) -> Ubiquitty.Rendering.FrameCapture? {
         session.takeFrame(demand, &supply)
-    }
-
-    /// The live read's own check, under the model lock the caller holds for
-    /// it, after ``takeFrame(_:_:)`` answered the live route: an update the
-    /// parser opened, or a screen it erased, since the published check.
-    ///
-    /// - Parameters:
-    ///   - terminal: The model, borrowed under the caller's lock.
-    ///   - demand: The view's facts at this tick.
-    /// - Returns: Why the read presents nothing, and when to ask again.
-    // swift-only: the demand carries the selection pointer, which the printer cannot represent
-    package func liveReadDecline(
-        _ terminal: Ubiquitty.Terminal,
-        _ demand: Ubiquitty.Runtime.FrameDemand
-    ) -> Ubiquitty.Runtime.LiveReadAnswer {
-        session.liveReadDecline(terminal, demand)
     }
 
     /// Boundary frames retired before the display promoted them.
