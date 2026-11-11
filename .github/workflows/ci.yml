@@ -153,8 +153,11 @@ jobs:
         include:
           - group: gcc
             stages: --only setup --only quic --only host-tests --only portable-build --only portable-snapshots --only host-glibc --only agent-smokes --only host-musl
+          # The Linux pgo stage is not hosted (Stage.hosted): its profile is
+          # stamped with the image it was trained in, which this runner never
+          # has.
           - group: clang
-            stages: --only setup --only quic --only fuzz --only pgo --only sanitizers
+            stages: --only setup --only quic --only fuzz --only sanitizers
           - group: wasm
             stages: --only setup --only wasm-tools --only wasm-smoke
     env:
@@ -512,18 +515,18 @@ jobs:
           path: ${{ runner.temp }}/ubq-ci-linux-image.tar
           key: ci-linux-image-${{ steps.image.outputs.digest }}
       # The GTK frontend built with this Kit and driven by its headless smoke
-      # battery and native snapshots under Xvfb, as the app's Linux battery runs
-      # them.
+      # battery under Xvfb, as the app's Linux battery runs it. The native
+      # snapshots are not hosted (Stage.hosted): their goldens are minted on hub.
       - name: App's Linux stages
         working-directory: app
         env:
           UBQ_CI_IMAGE_ARCHIVE: ${{ runner.temp }}/ubq-ci-linux-image.tar
           UBQ_CI_LINUX_IMAGE: "true"
-        run: '"$CORE_CHECKOUT/Scripts/ci-linux-image.sh" --source-root "$APP_CHECKOUT" python3 "$CORE_CHECKOUT/Scripts/ci_batteries.py" run linux --source-root "$APP_CHECKOUT" --only setup --only frontend-tools --only quic --only linux-build --only linux-smokes --only linux-snapshots'
+        run: '"$CORE_CHECKOUT/Scripts/ci-linux-image.sh" --source-root "$APP_CHECKOUT" python3 "$CORE_CHECKOUT/Scripts/ci_batteries.py" run linux --source-root "$APP_CHECKOUT" --only setup --only frontend-tools --only quic --only linux-build --only linux-smokes'
       - name: Report the app's Linux stages
         if: always()
         working-directory: app
-        run: python3 "$CORE_CHECKOUT/Scripts/ci_batteries.py" report linux --source-root "$APP_CHECKOUT" --only setup --only frontend-tools --only quic --only linux-build --only linux-smokes --only linux-snapshots
+        run: python3 "$CORE_CHECKOUT/Scripts/ci_batteries.py" report linux --source-root "$APP_CHECKOUT" --only setup --only frontend-tools --only quic --only linux-build --only linux-smokes
       - name: Print the failed stage logs
         if: failure()
         run: |
