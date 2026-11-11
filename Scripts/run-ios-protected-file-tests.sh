@@ -52,4 +52,32 @@ xcrun --sdk iphonesimulator swiftc -parse-as-library -O -warnings-as-errors \
     "$ROOT/Tests/Platform/test_ios_protected_file_probe.swift" \
     "$OUTPUT/test_ios_protected_file.cpp.o" "$OUTPUT/SystemPAL.cpp.o" \
     -lc++ -framework Foundation -Xlinker -dead_strip -o "$OUTPUT/test_ios_protected_file"
+# Complete protection needs a device that applies it. A simulator that cannot
+# stores a file asked for with Complete under its default class, and the
+# creator then refuses every file, as it must; the suite's first case names the
+# class it read back. Only that measured class, other than Complete, is this
+# precondition, reported and counted as a skip. A probe that did not run, or
+# read back no class, fails the stage.
+complete="NSURLFileProtectionComplete"
+probeStatus=0
+xcrun simctl spawn "$DEVICE" "$OUTPUT/test_ios_protected_file" theDeviceAppliesCompleteProtection \
+    >"$OUTPUT/probe.log" 2>&1 || probeStatus=$?
+cat "$OUTPUT/probe.log"
+readBack="$(sed -n 's/^probe: a file written with Complete protection reads back //p' "$OUTPUT/probe.log" | head -n 1)"
+if [[ $probeStatus -ne 0 ]]; then
+    if [[ "$readBack" == NSURLFileProtection* && "$readBack" != "$complete" ]]; then
+        skip="iOS protected file: SKIPPED — this simulator does not apply Complete protection: a file written with it reads back $readBack"
+        echo "$skip"
+        if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
+            echo "::warning title=iOS protected file skipped::$skip"
+        fi
+        exit 0
+    fi
+    echo "iOS protected file: the probe failed (exit $probeStatus) without reading back a protection class" >&2
+    exit 1
+fi
+if [[ "$readBack" != "$complete" ]]; then
+    echo "iOS protected file: the probe passed but read back '${readBack:-nothing}', not $complete" >&2
+    exit 1
+fi
 xcrun simctl spawn "$DEVICE" "$OUTPUT/test_ios_protected_file" 2>&1 | tee "$OUTPUT/tests.log"
