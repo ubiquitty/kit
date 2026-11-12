@@ -178,6 +178,8 @@ import json, os, re, sys
 home = os.path.expanduser("~")
 for runtime, rows in json.load(sys.stdin)["devices"].items():
     for device in rows:
+        if device.get("state") != "Shutdown":
+            continue
         name = device.get("name", "")
         if name == "ubq-ios-test":
             print(device["udid"], name)

@@ -269,4 +269,8 @@ endif()
 # without CTest, and ctest-covered.txt names the entries ctest has run so a full
 # driver run does not repeat them.
 ubiquitty_schedule_shell_stanzas(DRIVER ${UBIQUITTY_KIT_SOURCE_DIR}/Scripts/run-tests.sh)
+add_test(NAME test_ios_simulator_ownership
+    COMMAND "${Python3_EXECUTABLE}" "${UBIQUITTY_KIT_SOURCE_DIR}/Tests/Tools/test_ios_simulator.py")
+ubiquitty_set_test_entry_properties(test_ios_simulator_ownership)
+
 ubiquitty_finish_host_tests(DRIVER ${UBIQUITTY_KIT_SOURCE_DIR}/Scripts/run-tests.sh)
