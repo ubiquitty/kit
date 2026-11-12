@@ -1102,7 +1102,14 @@ enum SurfaceSmoke {
         guard surface.drive.syncClearSeenCount > seenBeforeStyled else {
             return failed("the shell's styled 2026 block never reached the parser")
         }
-        guard let styled = surface.drive.takeSyncFrame() else {
+        // The parser's clear counter precedes the asynchronous frame
+        // publication. Wait for that publication within the same deadline.
+        var styledCapture = surface.drive.takeSyncFrame()
+        while styledCapture == nil, Date() < styledDeadline {
+            RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.01))
+            styledCapture = surface.drive.takeSyncFrame()
+        }
+        guard let styled = styledCapture else {
             return failed("no boundary capture followed the style change")
         }
         let uniforms = styled.uniforms()
