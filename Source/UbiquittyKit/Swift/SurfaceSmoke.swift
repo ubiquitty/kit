@@ -2672,15 +2672,15 @@ enum SurfaceSmoke {
         var drawnTicks = 0
         var worstLag = 0
         var lagReport: [String] = []
-        let tickStart = Date()
         for step in 1...steps {
             surface.offsetView(byLines: 1)
             guard surface.viewOffset == step else {
                 return "momentum step \(step) moved the viewport to \(surface.viewOffset)"
             }
-            // A mode run can return after one source. Wait through the scheduled
-            // tick so callbacks cannot compress the frame intervals.
-            RunLoop.main.run(until: tickStart.addingTimeInterval(Double(step) / 60))
+            // A display clock drops missed ticks. Give each move its frame
+            // interval instead of replaying overdue ticks back to back after
+            // a slow encode or a descheduled test runner.
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 1.0 / 60))
             guard renderer.encodeFrame(for: surface, into: layer) else {
                 lagReport.append("\(step):\(renderer.lastFrameDecline.rawValue)")
                 continue
