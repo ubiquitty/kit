@@ -1815,8 +1815,8 @@ public final class RuntimeDrive {
     /// apart from the lane, so no frame the view would take is consumed and
     /// the lineage does not advance.
     ///
-    /// - Returns: The capture, retained, or nil with no capture geometry
-    ///   registered or no model.
+    /// - Returns: The capture, retained, or nil with no model or no text
+    ///   geometry outside Tek mode. A tube needs no text-grid registration.
     // swift-only: the shared capture is passed only to in-package Swift renderers
     package func captureStill() -> Ubiquitty.Rendering.FrameCapture? {
         session.captureStill()

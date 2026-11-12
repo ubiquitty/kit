@@ -3226,6 +3226,7 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
             // Focus rides the same assembled options as the style, so the
             // boundary route's cursor and the live route's agree.
             geometry.isFocused = options.isFocused
+            geometry.shouldDrawPasswordLock = options.shouldDrawPasswordLock
             geometry.shouldCursorInvertText = options.shouldCursorInvertText
             geometry.shouldUseSubpixelGlyphs = options.shouldUseSubpixelGlyphs
             geometry.originInPixels = options.originInPixels
@@ -3259,7 +3260,10 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
             // hover stays out of the registration on purpose — it would
             // outlive the pointer position it recorded.
             geometry.shouldUnderlineLinks = options.shouldUnderlineLinks
+            geometry.shouldResolveLinkKindsFromSource = options.shouldResolveLinkKindsFromSource
             geometry.linkUnderlineStyle = options.linkUnderlineStyle
+            geometry.linkUnderlineStyleFile = options.linkUnderlineStyleFile
+            geometry.linkUnderlineStyleMailto = options.linkUnderlineStyleMailto
             geometry.linkColor = options.linkColor
             geometry.linkHoverColor = options.linkHoverColor
             // The frame's metrics, DECCOLM's compression included, so the
