@@ -84,6 +84,12 @@ enum SurfaceSmoke {
         guard let library = MetalPipelines.moduleShaderLibrary(for: device) else {
             return failed("no module shader library")
         }
+        if ProcessInfo.processInfo.environment["UBIQUITTY_SURFACE_SMOKE_ONLY"] == "link-hover" {
+            if let failure = linkHoverClearFailure(device: device, library: library) {
+                return failed(failure)
+            }
+            return passed("idle alternate-screen link hover clears from retained pixels")
+        }
         // Every pipeline this device will build, asked before anything draws. A
         // state that fails costs its own pass, the encoder skips a nil pipeline
         // without reporting it, and the frame arrives missing a whole layer
@@ -95,6 +101,9 @@ enum SurfaceSmoke {
         guard pipelines.unbuiltPipelines.isEmpty else {
             let names = pipelines.unbuiltPipelines.joined(separator: ", ")
             return failed("pipelines this device could not build: \(names)")
+        }
+        if let failure = linkHoverClearFailure(device: device, library: library) {
+            return failed(failure)
         }
         guard let surface = TerminalSurface(rows: 24, columns: 80) else {
             return failed("no surface session")
@@ -2425,6 +2434,117 @@ enum SurfaceSmoke {
         let facts = drive.borrowTerminal().map { Ubiquitty.Screen.historyFacts($0) } ?? Ubiquitty.Screen.HistoryFacts()
         drive.unlockForRead()
         return facts
+    }
+
+    /// Checks hover-only changes against the retained target, without a new
+    /// parser write or a forced rebuild that could conceal stale pixels.
+    private static func linkHoverClearFailure(device: MTLDevice, library: MTLLibrary) -> String? {
+        guard let surface = TerminalSurface(rows: 8, columns: 64),
+            let renderer = SurfaceRenderer(device: device, library: library, familyName: "Menlo", pointSize: 12)
+        else {
+            return "link hover: no surface or renderer"
+        }
+        // A bare renderer leaves link styling off. The positive control
+        // needs distinct resting and hovered ink before either is captured.
+        renderer.style = SurfaceStyle(
+            shouldUnderlineLinks: true,
+            linkColorRed: 0.125,
+            linkColorGreen: 0.375,
+            linkColorBlue: 0.75,
+            linkHoverColorRed: 1.0,
+            linkHoverColorGreen: 0.25,
+            linkHoverColorBlue: 0.125
+        )
+        surface.renderer = renderer
+        surface.isFrameLinkHeldOffForTesting = true
+        surface.frame = CGRect(x: 0, y: 0, width: 640, height: 192)
+        let layer = CAMetalLayer()
+        renderer.prepare(layer)
+        layer.frame = surface.bounds
+        layer.contentsScale = 2
+        layer.drawableSize = CGSize(width: 1280, height: 384)
+
+        feed(
+            surface.drive,
+            "\u{1b}[?1049h\u{1b}[?25l\u{1b}[2J\u{1b}[H"
+                + "\u{1b}]8;;https://example.com/hover-clear\u{1b}\\HOVERLINK\u{1b}]8;;\u{1b}\\ plain"
+        )
+        guard surface.drive.withTerminal({ $0.screens.isUsingAlternateScreen }) == true else {
+            return "link hover: the fixture did not enter the alternate screen"
+        }
+        waitForAdmittedFrame(surface)
+
+        func pixelsAfterFrame() -> Data? {
+            guard encodeAfterFontPreparation(renderer, for: surface, into: layer) else { return nil }
+            return renderer.retainedGridPixelsForTesting(for: surface)
+        }
+
+        // Warm the same capture/retained-target route used below. No model
+        // bytes arrive after this point, so only a hover transition can
+        // change the hidden-cursor grid.
+        guard pixelsAfterFrame() != nil, let resting = pixelsAfterFrame(),
+            let onLink = surface.viewPoint(forRow: 0, column: 3),
+            let offLink = surface.viewPoint(forRow: 0, column: 20)
+        else {
+            return "link hover: no resting retained frame or cell geometry"
+        }
+
+        func returnsToRestingPixels() -> Bool {
+            // An already queued capture may predate the pointer edge. Its
+            // ordinary next ask must retire that picture; no redraw input or
+            // cache reset is supplied to make it converge.
+            for _ in 0..<3 {
+                guard let pixels = pixelsAfterFrame() else { return false }
+                if pixels == resting { return true }
+            }
+            return false
+        }
+
+        for pass in 0..<4 {
+            surface.updateLinkAffordance(atViewPoint: onLink, isCommandHeld: true)
+            guard surface.hoveredLinkRun != nil else {
+                return "link hover: the declared link did not resolve on pass \(pass)"
+            }
+            var didDrawHover = false
+            for _ in 0..<3 {
+                guard let hovered = pixelsAfterFrame() else {
+                    return "link hover: the hover frame declined (\(renderer.lastFrameDecline.rawValue))"
+                }
+                if hovered != resting {
+                    didDrawHover = true
+                    break
+                }
+            }
+            guard didDrawHover else { return "link hover: a resolved hover never changed the retained pixels" }
+
+            if pass == 3 {
+                // A detached surface has no live pointer to resolve. This
+                // edge must clear its existing hover without an AppKit
+                // mouse-exited event or another read of global pointer state.
+                guard surface.window == nil else { return "link hover: the detached fixture acquired a window" }
+                surface.updateLinkAffordanceAtLivePointer()
+            } else if pass.isMultiple(of: 2) {
+                surface.updateLinkAffordance(atViewPoint: offLink, isCommandHeld: true)
+            } else {
+                surface.clearLinkAffordance()
+            }
+            guard surface.hoveredLinkRun == nil else { return "link hover: moving away kept the resolved run" }
+            guard returnsToRestingPixels() else {
+                return "link hover: clearing the run left accent pixels after the next capture (pass \(pass))"
+            }
+
+            // Coalesced motion may enter and leave several times between
+            // display turns. The final leave owes resting pixels even when
+            // no intermediate hover is presented.
+            for _ in 0..<8 {
+                surface.updateLinkAffordance(atViewPoint: onLink, isCommandHeld: true)
+                surface.updateLinkAffordance(atViewPoint: offLink, isCommandHeld: true)
+            }
+            guard surface.hoveredLinkRun == nil, returnsToRestingPixels() else {
+                return "link hover: rapid enter/leave left accent pixels on an idle alternate screen"
+            }
+        }
+        return nil
     }
 
     static func feed(_ drive: RuntimeDrive, _ text: String) {

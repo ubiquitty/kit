@@ -297,14 +297,20 @@ extension TerminalSurface {
     /// Whether to ask at all is Core's `Input::shouldReResolveLinkHover`, over
     /// four facts only a view knows.
     internal func updateLinkAffordanceAtLivePointer() {
-        guard let window else { return }
+        guard let window else {
+            clearLinkAffordance()
+            return
+        }
         let point = convert(window.mouseLocationOutsideOfEventStream, from: nil)
         var facts = Ubiquitty.Input.HoverReResolveFacts()
         facts.isSelecting = isSelectionDragInFlight
         facts.isPointerHiddenForTyping = pointerIsHiddenForTyping
         facts.isWindowKey = window.isKeyWindow
         facts.isPointerInsideView = bounds.contains(point)
-        guard Ubiquitty.Input.shouldReResolveLinkHover(facts) else { return }
+        guard Ubiquitty.Input.shouldReResolveLinkHover(facts) else {
+            clearLinkAffordance()
+            return
+        }
         updateLinkAffordance(
             atViewPoint: point,
             isCommandHeld: NSEvent.modifierFlags.contains(.command)
