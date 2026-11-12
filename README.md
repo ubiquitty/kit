@@ -3,6 +3,39 @@
 
 # UbiquittyKit
 
+**A native terminal view for your app.**
+
+Put `TerminalView` in an AppKit or UIKit app, or use `Terminal()` in SwiftUI.
+The view owns input, selection, accessibility and Metal rendering. Import one
+Swift module; the public interface needs no C++ interoperability flag.
+Local shells and remote host sessions use the same terminal model. Linux apps
+use the Vulkan, FreeType, software and GTK libraries.
+
+[Embed a view](#embed-terminalview) · [API reference](Docs/ubiquittykit-api.md) · [Build the framework](#build) · [Get the apps](https://ubiquitty.org/)
+
+UbiquittyKit uses Ubiquitty Core, the most conformant engine in our recorded
+comparison:
+
+**100% conformance: 4,532 / 4,532 applicable cases passed, versus about 66% for the next-best tested engine in our recorded comparison.**
+
+**The fastest parser in our comparative benchmarks, as of 7 November 2026.** [Conformance scope](https://github.com/ubiquitty/ubiquitty#conformance) · [Benchmark methods](https://github.com/ubiquitty/ubiquitty#benchmarks)
+
+Ligatures, color emoji, proportional and sized text, rich text blocks, styled
+underlines and inline images share the same terminal model. That includes
+animated Kitty graphics, the Kitty keyboard protocol, Sixel, OSC 8 links,
+synchronized output and the less familiar corners of DEC terminal behavior.
+
+![Ubiquitty typography: styled underlines, superscripts, subscripts and mathematical expressions](https://raw.githubusercontent.com/ubiquitty/ubiquitty/main/Docs/images/polish.png)
+
+Legacy terminal software renders correctly, including double-height text,
+national character sets, protected cells and DEC rectangular screen editing.
+Extended DECPS adds eight musical channels, waveform voices, WAV samples,
+envelopes, filters, reverb and tracker effects. Programs can use it for
+instruments, sequencers and game audio; the Mac app supplies playback.
+[Sound protocol](https://ubiquitty.org/features/sound/).
+
+## Choose your layer
+
 | You are building | Reach for | Repository |
 |---|---|---|
 | A terminal view to drop into a macOS or iOS app | UbiquittyKit's `TerminalView`, or `Terminal` in SwiftUI | [ubiquitty-kit](https://github.com/ubiquitty/kit) |
