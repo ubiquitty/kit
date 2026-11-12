@@ -2622,8 +2622,8 @@ enum SurfaceSmoke {
     /// Moves the viewport one line up at every tick, as the momentum after a
     /// trackpad flick does, with the shell idle, and draws each tick.
     ///
-    /// Each tick's frame must draw, and show the rows at the offset that
-    /// tick asked for, or one a tick behind it: a frame that keeps an older
+    /// Each tick's frame must draw, and show rows within one line of the offset
+    /// that tick asked for: a frame that keeps an older
     /// offset while the scroll bar moves is the content standing still under
     /// a scroll.
     ///
@@ -2647,16 +2647,31 @@ enum SurfaceSmoke {
             surface.isFrameLinkHeldOffForTesting = false
             surface.setViewOffset(absolute: 0)
         }
-        waitForAdmittedFrame(surface)
-        guard encodeAfterFontPreparation(renderer, for: surface, into: layer) else {
-            return "the frame before the momentum declined: decline=\(renderer.lastFrameDecline.rawValue)"
+        // A queued capture can still belong to the preceding leg. Establish
+        // the tail from the fed model, then wait for that row to be presented.
+        let tailTopRow = Int(historyFacts(surface.drive).retainedRows)
+        let setupDeadline = Date(timeIntervalSinceNow: 5)
+        while true {
+            waitForAdmittedFrame(surface)
+            guard encodeAfterFontPreparation(renderer, for: surface, into: layer) else {
+                return "the frame before the momentum declined: decline=\(renderer.lastFrameDecline.rawValue)"
+            }
+            if renderer.lastFrameFirstAbsoluteRow == tailTopRow {
+                break
+            }
+            guard Date() < setupDeadline else {
+                return "the momentum setup showed row \(renderer.lastFrameFirstAbsoluteRow), expected tail row \(tailTopRow)"
+            }
+            RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.005))
         }
-        let tailTopRow = renderer.lastFrameFirstAbsoluteRow
         var drawnTicks = 0
         var worstLag = 0
         var lagReport: [String] = []
         for step in 1...steps {
             surface.offsetView(byLines: 1)
+            guard surface.viewOffset == step else {
+                return "momentum step \(step) moved the viewport to \(surface.viewOffset)"
+            }
             RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 1.0 / 60))
             guard renderer.encodeFrame(for: surface, into: layer) else {
                 lagReport.append("\(step):\(renderer.lastFrameDecline.rawValue)")
@@ -2664,13 +2679,14 @@ enum SurfaceSmoke {
             }
             drawnTicks += 1
             let shownOffset = tailTopRow - renderer.lastFrameFirstAbsoluteRow
-            worstLag = max(worstLag, surface.viewOffset - shownOffset)
-            if surface.viewOffset - shownOffset > 1 {
+            let distance = abs(step - shownOffset)
+            worstLag = max(worstLag, distance)
+            if distance > 1 {
                 lagReport.append("\(step):asked \(surface.viewOffset) shown \(shownOffset)")
             }
         }
         guard drawnTicks >= steps - 2, worstLag <= 1 else {
-            return "a viewport moved a line a tick drew \(drawnTicks) of \(steps) ticks, at most \(worstLag) lines behind:"
+            return "a viewport moved a line a tick drew \(drawnTicks) of \(steps) ticks, at most \(worstLag) lines from its requested row:"
                 + " \(lagReport.prefix(8).joined(separator: ", "))"
         }
         return nil
