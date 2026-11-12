@@ -3726,8 +3726,8 @@ public struct SurfaceTekSettings: Hashable, Sendable {
     ///   - drawsGlowVectors: Whether the bloom pass runs.
     public init(
         usesCustomColors: Bool = false,
-        customBeamRGB: UInt32 = 0x33FF33,
-        customBackgroundRGB: UInt32 = 0x001100,
+        customBeamRGB: UInt32 = 0x66DD94,
+        customBackgroundRGB: UInt32 = 0x051603,
         drawsWritingSpot: Bool = true,
         drawsGlowVectors: Bool = false
     ) {
