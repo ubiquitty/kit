@@ -2838,7 +2838,8 @@ enum SurfaceSmoke {
         let selectedFrames = renderer.selectedBoundaryFrameCount - selectedBefore
         let selectionAfter = surface.selectedText
         surface.clearSelection()
-        surface.send("printf '\\033[r\\033[2J\\033[H'\n")
+        // The next fixture must not race an erase still in the shell's input.
+        feed(surface.drive, "\u{1b}[r\u{1b}[2J\u{1b}[H")
 
         guard isDone else {
             return "the flood never finished: \(drawnFrames) frames drawn, \(freshFrames) fresh"
