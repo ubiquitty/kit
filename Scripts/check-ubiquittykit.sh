@@ -2070,11 +2070,20 @@ let passed = MainActor.assumeIsolated { () -> Bool in
     guard heard.titles.contains("swiftui-title") else {
         return refuse("onTerminalTitleChange heard \(heard.titles), not the command's title")
     }
-    guard spinRevealing(hosting, seconds: 5, until: { terminal(in: hosting, showing: "swiftui-command") != nil }),
+    // The accessibility text can arrive before the first frame is presented.
+    guard spinRevealing(hosting, seconds: 5, until: {
+        guard let surface = terminal(in: hosting, showing: "swiftui-command")?.surface,
+            let renderer = surface.renderer else { return false }
+        return renderer.presentedGeometry(for: surface) != nil
+    }),
         let command = terminal(in: hosting, showing: "swiftui-command"), let commandSurface = command.surface,
         let commandRenderer = commandSurface.renderer, commandRenderer.presentedGeometry(for: commandSurface) != nil
     else {
-        return refuse("no terminal kept and drew the command's line: \(terminalViews(in: hosting).map(screenText))")
+        let states = terminalViews(in: hosting).map { view -> String in
+            guard let surface = view.surface else { return "surface=nil" }
+            return "text=\(screenText(view).prefix(32)), bounds=\(surface.bounds), hidden=\(surface.isHiddenOrHasHiddenAncestor), renderer=\(surface.renderer != nil), geometry=\(surface.renderer?.presentedGeometry(for: surface) != nil)"
+        }
+        return refuse("no terminal kept and drew the command's line: " + states.joined(separator: "; "))
     }
     guard spin(seconds: 2, until: { heard.launchFailures == 2 }) else {
         return refuse("a command line holding a NUL and a missing program reached onTerminalLaunchFailure \(heard.launchFailures) times, not twice")
