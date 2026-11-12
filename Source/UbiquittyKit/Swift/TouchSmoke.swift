@@ -98,9 +98,6 @@ enum TouchSmoke {
             aPointerHoldIsTheTrackingProgramsDrag(surface),
         ]
         guard !trackingLegs.contains(false) else { return false }
-        // Last: run ahead of the settings leg, these left the simulator
-        // reporting a hardware keyboard, which turns that leg's control tap
-        // into a click.
         guard handlesFollowTheSelectionAndMoveIt(surface) else { return false }
         guard theScrollbackPositionIsReported() else { return false }
 
@@ -689,10 +686,23 @@ enum TouchSmoke {
     private static func tapRoutesByKeyboard(_ surface: TerminalSurface) -> Bool {
         let observer = KeyboardAskRecorder()
         surface.observer = observer
+        defer {
+            surface.observer = nil
+            surface.clearSelection()
+        }
         surface.isKeyboardPresented = false
+        let hasHardwareKeyboard = surface.hasHardwareKeyboard
+        let expectedKeyboardAsks = hasHardwareKeyboard ? 0 : 1
+        if hasHardwareKeyboard {
+            surface.selectAll(nil)
+            guard surface.hasSelection else { return failed("tap: the control has no selection to clear") }
+        }
         surface.tap(atViewPoint: CGPoint(x: 40, y: 40))
-        guard observer.asks == 1 else {
-            return failed("tap with no keyboard: asked \(observer.asks) times, wanted 1")
+        guard observer.asks == expectedKeyboardAsks else {
+            return failed("tap with no software keyboard: asked \(observer.asks) times, wanted \(expectedKeyboardAsks)")
+        }
+        if hasHardwareKeyboard, surface.hasSelection {
+            return failed("tap with a hardware keyboard did not clear the selection")
         }
 
         surface.isKeyboardPresented = true
@@ -701,11 +711,13 @@ enum TouchSmoke {
         guard surface.reportCell(atViewPoint: CGPoint(x: 40, y: 40)) != nil else {
             return failed("tap with the keyboard up resolved no cell, so it pressed nothing")
         }
+        surface.selectAll(nil)
+        guard surface.hasSelection else { return failed("tap: the control has no selection to clear") }
         surface.tap(atViewPoint: CGPoint(x: 40, y: 40))
-        guard observer.asks == 1 else {
+        guard observer.asks == expectedKeyboardAsks else {
             return failed("tap with the keyboard up asked for it again — a reader who can type cannot press a button")
         }
-        surface.observer = nil
+        guard !surface.hasSelection else { return failed("tap with the keyboard up did not clear the selection") }
         return true
     }
 
@@ -749,14 +761,18 @@ enum TouchSmoke {
             surface.clearSelection()
             surface.feed(Data("\u{1b}[?1049l".utf8))
         }
+        guard settle(surface) else { return false }
         guard let renderer = surface.renderer, let handles = surface.selectionHandles else {
             return failed("handles: no renderer, or no handles installed")
         }
         let cell = renderer.drawnCellSize(for: surface)
-        let insets = renderer.gridInsets(for: surface)
-        let rowMiddle = insets.top + cell.height / 2
+        guard let centre = surface.viewPoint(forRow: 0, column: 0) else {
+            return failed("handles: the frame has no first cell")
+        }
+        let rowMiddle = centre.y
+        let left = centre.x - cell.width / 2
         // A press and release with a click count of two: the word "beta".
-        let word = CGPoint(x: insets.left + cell.width * 7.5, y: rowMiddle)
+        let word = CGPoint(x: left + cell.width * 7.5, y: rowMiddle)
         surface.selectionDrag(.began, atViewPoint: word)
         surface.selectionDrag(.ended, atViewPoint: word)
         // The clear above arms the erase hold, which withholds frames until
@@ -766,14 +782,14 @@ enum TouchSmoke {
             return failed("handles: a double-tap on beta selected \(surface.selectedText ?? "nothing")")
         }
         guard !handles.start.isHidden, !handles.end.isHidden,
-            abs(handles.start.frame.midX - (insets.left + cell.width * 6)) < 1,
-            abs(handles.end.frame.midX - (insets.left + cell.width * 10)) < 1
+            abs(handles.start.frame.midX - (left + cell.width * 6)) < 1,
+            abs(handles.end.frame.midX - (left + cell.width * 10)) < 1
         else {
             return failed(
                 "handles: not on the word's edges (start \(handles.start.frame.midX), end \(handles.end.frame.midX), cell \(cell.width))"
             )
         }
-        let gammaEnd = CGPoint(x: insets.left + cell.width * 16, y: rowMiddle)
+        let gammaEnd = CGPoint(x: left + cell.width * 16, y: rowMiddle)
         surface.moveSelectionHandle(isStart: false, phase: .began, to: gammaEnd, offersMenu: false)
         guard surface.selectionLoupe != nil else {
             return failed("handles: dragging the end handle showed no loupe")
@@ -853,11 +869,20 @@ enum TouchSmoke {
             surface.clearSelection()
             surface.feed(Data("\u{1b}[?1049l".utf8))
         }
+        drawUntil(surface) { surface.frameRenderers.values.contains { $0.richTextStore.rasterCount > 0 } }
+        guard surface.frameRenderers.values.contains(where: { $0.richTextStore.rasterCount > 0 }) else {
+            return failed("rich-text drag: no frame drew the block")
+        }
+        guard settle(surface) else { return false }
         guard let renderer = surface.renderer else {
             return failed("rich-text drag: no renderer")
         }
         let cell = renderer.drawnCellSize(for: surface)
-        let insets = renderer.gridInsets(for: surface)
+        guard let centre = surface.viewPoint(forRow: 0, column: 0) else {
+            return failed("rich-text drag: the frame has no first cell")
+        }
+        // The frame's inverse mapping includes elastic scrolling.
+        let origin = CGPoint(x: centre.x - cell.width / 2, y: centre.y - cell.height / 2)
         // The layout owns character positions; finding the middle of each
         // word through its carets keeps this gesture independent of the font.
         let points =
@@ -867,7 +892,7 @@ enum TouchSmoke {
                 for step in 0..<600 {
                     let x = (Double(step) + 0.5) / 20
                     let caret = Ubiquitty.Selection.resolveSelectionCaret(terminal, 0, 0, Int32(x), x, 0.3)
-                    let point = CGPoint(x: insets.left + x * cell.width, y: insets.top + 0.3 * cell.height)
+                    let point = CGPoint(x: origin.x + x * cell.width, y: origin.y + 0.3 * cell.height)
                     if caret.subCaret == 7 { beta = point }
                     if caret.subCaret == 13 { gamma = point }
                     if let beta, let gamma { return [beta, gamma] }
@@ -1170,19 +1195,39 @@ enum TouchSmoke {
     private static func aTwoFingerTapAsksForSettingsAndStealsNothing(_ surface: TerminalSurface) -> Bool {
         let recorder = SettingsAskRecorder()
         surface.observer = recorder
-        defer { surface.observer = nil }
+        defer {
+            surface.observer = nil
+            surface.clearSelection()
+        }
         surface.isKeyboardPresented = false
+        let hasHardwareKeyboard = surface.hasHardwareKeyboard
+        let expectedKeyboardAsks = hasHardwareKeyboard ? 0 : 1
 
-        // The control, in this leg rather than borrowed: one finger with no keyboard raises the
-        // ask. If this stopped holding, the assertion below would pass on a surface where no tap
-        // raises anything, which is silence rather than restraint.
+        // One finger asks for a keyboard, or clears a selection when a hardware
+        // keyboard already lets the reader click. Each is a control the settings
+        // gesture must leave alone, so an inert tap cannot pass this leg.
+        if hasHardwareKeyboard {
+            surface.selectAll(nil)
+            guard surface.hasSelection else {
+                return failed("settings: the hardware-keyboard control has no selection to clear")
+            }
+        }
         surface.tap(atViewPoint: CGPoint(x: 40, y: 40))
-        guard recorder.keyboardAsks == 1 else {
+        guard recorder.keyboardAsks == expectedKeyboardAsks else {
             return failed(
-                "settings: the control failed — a one-finger tap raised \(recorder.keyboardAsks) keyboard asks, wanted 1, so this leg cannot tell a theft from silence"
+                "settings: the control failed — a one-finger tap raised \(recorder.keyboardAsks) keyboard asks, wanted \(expectedKeyboardAsks), so this leg cannot tell a theft from silence"
                     + " (tracking \(surface.isMouseTrackingActive), link \(surface.link(atViewPoint: CGPoint(x: 40, y: 40), isCommandHeld: false) != nil),"
                     + " hardware keyboard \(surface.hasHardwareKeyboard), selection \(surface.hasSelection))"
             )
+        }
+        if hasHardwareKeyboard {
+            guard !surface.hasSelection else {
+                return failed("settings: the control failed — a one-finger tap did not clear the selection")
+            }
+            surface.selectAll(nil)
+            guard surface.hasSelection else {
+                return failed("settings: the hardware-keyboard control could not restore its selection")
+            }
         }
 
         // The gesture under test, driven through the recogniser's own callback rather than the
@@ -1196,10 +1241,13 @@ enum TouchSmoke {
                 "settings: a two-finger tap raised \(recorder.settingsAsks) settings asks, wanted 1 — the recogniser is attached and its handler reaches no host"
             )
         }
-        guard recorder.keyboardAsks == 1 else {
+        guard recorder.keyboardAsks == expectedKeyboardAsks else {
             return failed(
                 "settings: a two-finger tap also raised the keyboard ask — it routed into handleTap, so a mouse-reporting program would receive a click nobody made"
             )
+        }
+        if hasHardwareKeyboard, !surface.hasSelection {
+            return failed("settings: a two-finger tap cleared the selection, so it routed into handleTap")
         }
         return true
     }
@@ -1619,6 +1667,9 @@ enum TouchSmoke {
     @MainActor
     private static func settle(_ surface: TerminalSurface) -> Bool {
         surface.layoutIfNeeded()
+        // A completed capture from the preceding leg is still a valid frame,
+        // but this leg needs the picture of the bytes it just fed.
+        _ = surface.drive.takeSyncFrame()
         guard let renderer = surface.renderer as? SurfaceRenderer else {
             return failed("settle: the fixture has no surface renderer")
         }
