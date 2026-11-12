@@ -2520,10 +2520,11 @@ enum SurfaceSmoke {
     /// one taken.
     ///
     /// - A capture waiting in the slot is presented, with no selection over it.
-    /// - A tick inside an open synchronized update draws nothing and arms the
-    ///   recheck of the hold, whichever check, published or under the model
-    ///   lock, finds the update open.
-    /// - A resize step inside an open synchronized update draws nothing.
+    /// - With no completed capture waiting, a tick inside an open synchronized
+    ///   update draws nothing and arms the recheck of the hold, whichever check,
+    ///   published or under the model lock, finds the update open.
+    /// - With no completed capture waiting, a resize step inside an open
+    ///   synchronized update draws nothing.
     ///   Core holds it by the resize's own rule: the published hold, the
     ///   check under the read's lock, or the owner's turn, which captures
     ///   nothing while the update stays open.
@@ -2552,6 +2553,9 @@ enum SurfaceSmoke {
 
         waitForAdmittedFrame(surface)
         feed(surface.drive, "\u{1b}[?2026h")
+        // A completed frame queued before this block may still be presented.
+        // Drain it so this leg asks whether the open block holds a new frame.
+        _ = surface.drive.takeSyncFrame()
         let drewInsideUpdate = renderer.encodeFrame(for: surface, into: layer)
         let updateDecline = renderer.lastFrameDecline
         let isRecheckArmed = surface.isSyncOutputRecheckScheduledForTesting
@@ -2568,6 +2572,7 @@ enum SurfaceSmoke {
 
         waitForAdmittedFrame(surface)
         feed(surface.drive, "\u{1b}[?2026h")
+        _ = surface.drive.takeSyncFrame()
         surface.isDrawingResizeStep = true
         let drewResizeStep = renderer.encodeFrame(for: surface, into: layer)
         let resizeDecline = renderer.lastFrameDecline
