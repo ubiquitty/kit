@@ -3364,8 +3364,6 @@ enum SurfaceSmoke {
     }
 }
 
-#endif
-
 /// Holds a pane's model lock on a thread of its own until let go, for a leg
 /// that shows a frame-path step does not wait on the model.
 private final class ModelLockHolder: @unchecked Sendable {
@@ -3394,3 +3392,5 @@ private final class ModelLockHolder: @unchecked Sendable {
         released.signal()
     }
 }
+
+#endif
