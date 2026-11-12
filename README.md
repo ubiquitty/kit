@@ -237,7 +237,12 @@ The Swift API is documented on
 [renderer factory](Source/UbiquittyKit/Swift/TerminalSurface+Factory.swift).
 [The Swift renderer](Docs/swift-renderer.md) describes the rendering backend;
 [the C++ session guide](Docs/ubiquittykit-api.md) covers the separate session
-facade supplied by Core. An application
+facade supplied by Core. Its factories require an explicit
+`Session::EffectPolicy`: supply a policy and capability origin with
+`EffectPolicy::withPolicy(policy, origin)`, or explicitly select standalone
+Local defaults with `EffectPolicy::localDefaults()`. The guide covers the
+restrictive policy for grid-only embedding and the required policy lifetime.
+An application
 that compiles the kit into its own build includes
 `Scripts/cmake/UbiquittyKit.cmake` at its top directory after the Core modules,
 in the order [Core's build module](https://github.com/ubiquitty/core/blob/main/Scripts/cmake/UbiquittyCoreRoot.cmake)

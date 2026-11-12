@@ -180,7 +180,8 @@ is set, and for no process facts.
 
 `UbiquittyKit::Session` drives a terminal through a local PTY, a direct byte
 carrier, or a synchronized host connection. The embedder supplies the terminal,
-a dispatcher, and an observer. The session owns its transport-driving state.
+an explicit effect-policy choice, a dispatcher, and an observer. The session
+owns its transport-driving state.
 
 Include `UbiquittyKit/UbiquittyKit.h` and link the `ubiquitty-kit` CMake target.
 An installed-package consumer uses `Ubiquitty::ubiquitty-kit` from
@@ -195,8 +196,39 @@ surface and configuration API.
 | `Session::createDirect` | An owned `Transport::Channel` and resize callback | Feeds terminal bytes without Sync framing, such as an ordinary SSH shell |
 | `Session::createRemote` | A borrowed `Ubiquitty::Session::ChannelFactory` and session ID | Drives the host protocol and reconnects through the factory |
 
-All factories also take a borrowed `Ubiquitty::Terminal&`,
-`Ubiquitty::Session::Dispatcher&`, and `UbiquittyKit::Session::Observer&`.
+All factories take a borrowed `Ubiquitty::Terminal&`, then a required
+`Session::EffectPolicy`, and borrowed `Ubiquitty::Session::Dispatcher&` and
+`UbiquittyKit::Session::Observer&` arguments.
+`Session::EffectPolicy::withPolicy(policy, origin)` installs the supplied
+`Ubiquitty::CapabilityPolicy` and `Ubiquitty::CapabilityOrigin` before output is
+processed. Create the session on the terminal's owner thread while it is idle,
+with no other session driving it. The selected policy and origin remain
+installed after session teardown; the policy is borrowed and must outlive the
+terminal. For example, with the dispatcher, observer and PTY supplied by the
+embedder:
+
+```cpp
+Ubiquitty::RestrictiveCapabilityPolicy policy;
+Ubiquitty::Terminal terminal;
+auto session = UbiquittyKit::Session::createLocal(terminal,
+    UbiquittyKit::Session::EffectPolicy::withPolicy(policy, Ubiquitty::CapabilityOrigin::Local),
+    dispatcher, observer, std::move(pty));
+```
+
+`RestrictiveCapabilityPolicy` permits grid metadata, rendering and benign
+protocol replies, and refuses host-escaping and exfiltrating effects for every
+origin. A custom policy can instead route those decisions through the
+embedder's permission and consent interface.
+
+`Session::EffectPolicy::localDefaults()` explicitly selects a null policy and
+Local principal. It preserves standalone Local defaults, including their
+allowed effects; operations requiring an installed policy, including gated
+file reads, remain refused. It is not a sandbox. Transport `origin()` is
+presentation metadata, not this permission principal. A raw
+`Ubiquitty::Terminal` still has its default constructor. The factory requirement
+does not cover direct model ingestion; install a policy and origin before
+feeding it untrusted output.
+
 The dispatcher is the session thread. Its `post` and `postDelayed` hand it a
 `Ubiquitty::Session::PostedWork`, a move-only unit held without a heap
 allocation; the dispatcher owns each unit from then on, and either runs it once
@@ -224,6 +256,8 @@ the bytes after the first NUL.
 
 A session is not copyable. Destroy it before destroying the terminal,
 dispatcher, observer, or remote channel factory it borrows.
+Keep a supplied effect policy alive until the terminal no longer references it,
+including after the session is destroyed.
 
 After a remote session reconnects, some typed input may be in doubt: a
 connection carried it, and the host could not say whether it was written.
