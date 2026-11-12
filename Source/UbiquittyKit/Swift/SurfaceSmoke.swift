@@ -2895,11 +2895,17 @@ enum SurfaceSmoke {
         defer { surface.drive.applyTriggerConfiguration(Ubiquitty.Preferences.Values()) }
         feed(surface.drive, "captured-trigger-frame\r\n")
         waitForAdmittedFrame(surface)
-        guard presentsBoundaryFrame(surface, renderer: renderer, layer: layer) else {
-            return "no captured frame was presented over the trigger highlight (decline=\(renderer.lastFrameDecline.rawValue))"
-        }
-        guard renderer.lastCapturedFrameTiers.triggers > 0 else {
-            return "a captured frame drew no trigger highlight over its rows"
+        guard
+            presentsBoundaryFrame(
+                surface,
+                renderer: renderer,
+                layer: layer,
+                matching: {
+                    renderer.lastCapturedFrameTiers.triggers > 0
+                }
+            )
+        else {
+            return "no captured frame drew the trigger highlight (decline=\(renderer.lastFrameDecline.rawValue))"
         }
         // A highlight stays on its row once its rule is gone, and a frame that
         // bakes a tier rebuilds every row: scrolled off the screen, it leaves
@@ -2910,11 +2916,17 @@ enum SurfaceSmoke {
         feed(surface.drive, "\u{1b}[?1001h\u{1b}[1;3;2;2;4T")
         defer { feed(surface.drive, "\u{1b}[?1001l") }
         waitForAdmittedFrame(surface)
-        guard presentsBoundaryFrame(surface, renderer: renderer, layer: layer) else {
-            return "no captured frame was presented over the hilite band (decline=\(renderer.lastFrameDecline.rawValue))"
-        }
-        guard renderer.lastCapturedFrameTiers.hilite > 0 else {
-            return "a captured frame drew no hilite band over its rows"
+        guard
+            presentsBoundaryFrame(
+                surface,
+                renderer: renderer,
+                layer: layer,
+                matching: {
+                    renderer.lastCapturedFrameTiers.hilite > 0
+                }
+            )
+        else {
+            return "no captured frame drew the hilite band (decline=\(renderer.lastFrameDecline.rawValue))"
         }
         return nil
     }
@@ -3132,25 +3144,28 @@ enum SurfaceSmoke {
         return surface.drive.syncFramePublicationCount != publishedBefore
     }
 
-    /// Drives synchronized updates through the shell until a boundary frame
-    /// is presented, for up to ten seconds.
+    /// Drives synchronized updates through the shell until a matching boundary
+    /// frame is presented, for up to ten seconds. A waiting capture can precede
+    /// the model edits whose overlays the caller is measuring.
     ///
     /// - Parameters:
     ///   - surface: The surface, its shell awake.
     ///   - renderer: The surface renderer.
     ///   - layer: The layer to present into.
-    /// - Returns: Whether a boundary frame was presented.
+    ///   - matching: Whether the newly presented capture carries the expected state.
+    /// - Returns: Whether a matching boundary frame was presented.
     private static func presentsBoundaryFrame(
         _ surface: TerminalSurface,
         renderer: SurfaceRenderer,
-        layer: CAMetalLayer
+        layer: CAMetalLayer,
+        matching isExpectedFrame: () -> Bool = { true }
     ) -> Bool {
         let deadline = Date(timeIntervalSinceNow: 10)
         while Date() < deadline {
             _ = publishesBoundaryFrame(surface)
             let presentedBefore = renderer.presentedBoundaryFrameCount
             _ = renderer.encodeFrame(for: surface, into: layer)
-            if renderer.presentedBoundaryFrameCount > presentedBefore {
+            if renderer.presentedBoundaryFrameCount > presentedBefore, isExpectedFrame() {
                 return true
             }
         }
