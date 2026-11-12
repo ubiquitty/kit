@@ -41,7 +41,7 @@ instruments, sequencers and game audio; the Mac app supplies playback.
 | A terminal view to drop into a macOS or iOS app | UbiquittyKit's `TerminalView`, or `Terminal` in SwiftUI | [ubiquitty-kit](https://github.com/ubiquitty/kit) |
 | Linux rendering, font rasterization or GTK integration | the Vulkan, FreeType and software renderers and the GTK platform libraries | [ubiquitty-kit](https://github.com/ubiquitty/kit) |
 | A renderer for a texture or layer your UI presents | UbiquittyRenderKit (Metal) or the Vulkan renderer's exportable frames | [ubiquitty-kit](https://github.com/ubiquitty/kit) |
-| Your own UI, drawing from the portable terminal model | Core's C++23 API, session facade and render plan | [ubiquitty-core](https://github.com/ubiquitty/core) |
+| Your own UI, drawing from the portable terminal model | Core's embedding API, session facade and render plan | [ubiquitty-core](https://github.com/ubiquitty/core) |
 | Persistent sessions, a session daemon, attach and reattach across machines | `ubiquitty-host`, Sync, `ubq` and the agent | [ubiquitty-core](https://github.com/ubiquitty/core) |
 | The Ubiquitty apps themselves | the macOS, iOS, Linux and web frontends | [ubiquitty](https://github.com/ubiquitty/ubiquitty) |
 
@@ -80,7 +80,7 @@ stays in `ubiquitty-core`, which this repository carries as the submodule
 
 Apple hosts use the Swift view API. Linux hosts link the C++ rendering and
 platform libraries above and supply their own application shell. Portable
-hosts use [Core's C++23 embedding API](https://github.com/ubiquitty/core/blob/main/Docs/libubiquittycore.md).
+hosts use [Core's embedding API](https://github.com/ubiquitty/core/blob/main/Docs/libubiquittycore.md).
 
 ## Embed `TerminalView`
 
