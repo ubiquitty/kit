@@ -8,6 +8,7 @@ import argparse
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 import sys
+import subprocess
 
 
 FLOORS = {
@@ -54,6 +55,10 @@ def check(root, summary):
 
 
 def main():
+    if sys.argv[1:] == ["--self-test"]:
+        root = Path(__file__).resolve().parents[1]
+        return subprocess.run([sys.executable, str(root / "Tests/Tools/test_coverage_floor.py")],
+                              check=False).returncode
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", required=True, type=Path)
     parser.add_argument("--summary", required=True, type=Path)

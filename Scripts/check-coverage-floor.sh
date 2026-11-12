@@ -4,6 +4,9 @@
 
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+if [ "${1:-}" = --self-test ]; then
+    exec python3 "$ROOT/Scripts/check-coverage-floor.py" --self-test
+fi
 BUILD="$(python3 "$ROOT/Libraries/ubiquitty-core/Scripts/build_root.py" "$ROOT")"
 exec python3 "$ROOT/Scripts/check-coverage-floor.py" --root "$ROOT" \
     --summary "$BUILD/BuildHostTests/coverage/summary.txt"

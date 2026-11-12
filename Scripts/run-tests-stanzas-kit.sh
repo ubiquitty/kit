@@ -163,7 +163,7 @@ fi
 if wanted test_coverage_floor; then
     echo "=== test_coverage_floor ==="
     RAN=$((RAN + 1))
-    python3 "$ROOT/Tests/Tools/test_coverage_floor.py" || exit 1
+    "$ROOT/Scripts/check-coverage-floor.sh" --self-test || exit 1
 fi
 
 if wanted test_resource_producers; then
