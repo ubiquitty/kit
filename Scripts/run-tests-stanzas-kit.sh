@@ -9,6 +9,21 @@
 # (`wanted`, `build_and_run`, `ubq_build_test`, `OUT`, `ROOT`, `RAN`), and its
 # name is literal so Scripts/stanza-declarations.awk can list it.
 
+# File-link filesystem checks stay off the main actor, coalesce pointer motion,
+# and discard stale interest without adding a worker for each path.
+if [ "$(uname -s)" = "Darwin" ] && wanted file_link_lookup; then
+    NAME=test_file_link_lookup
+    OUT_BIN="$OUT/$NAME"
+    mkdir -p "$OUT"
+    echo "=== $NAME ==="
+    xcrun swiftc -swift-version 6 -parse-as-library -warnings-as-errors \
+        "$ROOT/Tests/Platform/test_file_link_lookup.swift" \
+        "$ROOT/Source/UbiquittyKit/Swift/FileLinkLookup.swift" \
+        -o "$OUT_BIN" || exit 1
+    "$OUT_BIN" || exit 1
+    RAN=$((RAN + 1))
+fi
+
 # Whether a drawable comes back holding what was last drawn into it — the one
 # fact a partial composite would rest on, asked of the pool on this machine
 # rather than assumed. Metal documents drawable contents as undefined at

@@ -3434,6 +3434,9 @@ public final class RuntimeDrive {
         session.isRemoteAttached()
     }
 
+    /// Whether the backend's file paths belong to this machine's filesystem.
+    public var isFilesystemLocal: Bool { session.isFilesystemLocal() }
+
     /// Whether the authenticated host assigns the pane's geometry to another
     /// attachment. Unknown, disconnected and local sessions return false.
     public var isRemoteGeometryOwnedElsewhere: Bool { session.isRemoteGeometryOwnedElsewhere() }

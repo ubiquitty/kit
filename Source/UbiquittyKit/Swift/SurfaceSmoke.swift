@@ -698,6 +698,7 @@ enum SurfaceSmoke {
         guard renderer.encodeFrame(for: adopting, into: adoptedLayer) else {
             return failed("the adopted surface's frame declined")
         }
+        guard nativeFileDragUsesBackendFilesystem(localPane: adopting) else { return false }
         // Unbound as a window unbinds a pane: the view lets go of the pane's
         // model before its source frees it.
         adopting.drive.endAdoption()
@@ -3417,6 +3418,57 @@ enum SurfaceSmoke {
             }
         }
         return false
+    }
+
+    /// Inspects actual native drag writers without starting a drag or reading a file.
+    private static func nativeFileDragUsesBackendFilesystem(localPane: TerminalSurface) -> Bool {
+        let uri = "file:///tmp/ubiquitty-drag-route-fixture.txt\r\n"
+        let localItems = localPane.dragDrop.nativeFileItemsForTesting(uri)
+        guard localItems.count == 1, localItems[0].item is NSURL else {
+            return failed("a local tmux pane did not offer a native local-file URL")
+        }
+        guard let unknown = TerminalSurface(rows: 24, columns: 80) else {
+            return failed("the unplaced drag surface declined to build")
+        }
+        let unknownItems = unknown.dragDrop.nativeFileItemsForTesting(uri)
+        guard unknownItems.count == 1, unknownItems[0].item is NSFilePromiseProvider else {
+            return failed("an unplaced backend offered a native local-file URL")
+        }
+        guard let session = Ubiquitty.Runtime.TerminalSession.make() else {
+            return failed("the remote tmux drag session declined to build")
+        }
+        session.start(24, 80, .SizedAndProportional)
+        var draft = Ubiquitty.Runtime.LaunchCommandDraft()
+        for argument in ["/bin/sh", "-c", controlModeProgram] { draft.addArgument(std.string(argument)) }
+        // The local fixture speaks tmux's protocol; its launcher supplies the
+        // remote provenance without opening a network connection.
+        draft.setTmuxControlHost(std.string("remote.example"))
+        guard session.launch(draft.build()), session.startIngest() else {
+            return failed("the remote tmux drag fixture did not launch")
+        }
+        let host = TerminalSurface(drive: RuntimeDrive(over: session), rows: 24, columns: 80)
+        defer { host.drive.close() }
+        let deadline = Date(timeIntervalSinceNow: 10)
+        var hostedPane: TerminalSurface?
+        while hostedPane == nil, Date() < deadline {
+            RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.05))
+            if host.drive.hostedPaneFacts(1) != nil {
+                hostedPane = TerminalSurface.makeHostingPane(1, ofSource: host.drive.hostedWindowSourceAddress, rows: 24, columns: 80)
+            }
+        }
+        guard let remotePane = hostedPane else {
+            return failed("the remote tmux drag fixture hosted no pane")
+        }
+        defer {
+            remotePane.drive.endAdoption()
+            host.drive.releaseHostedPane(1)
+            host.drive.endHostedWindows()
+        }
+        let remoteItems = remotePane.dragDrop.nativeFileItemsForTesting(uri)
+        guard remoteItems.count == 1, remoteItems[0].item is NSFilePromiseProvider else {
+            return failed("a remote tmux pane offered a native local-file URL with an empty machine id")
+        }
+        return true
     }
 
     /// The visible grid as one line, for a refusal that has to say what the

@@ -702,6 +702,16 @@ internal final class TerminalDragDrop: NSObject {
         finishedOperation = nil
     }
 
+    /// Builds the native items from a URI offer without starting a drag.
+    /// Used by the surface smoke to inspect routing without reading files.
+    internal func nativeFileItemsForTesting(_ uriList: String) -> [NSDraggingItem] {
+        clearOffer()
+        offerTypes = ["text/uri-list"]
+        prepared[0] = Data(uriList.utf8)
+        offerMachine = ""
+        return nativeFileItems()
+    }
+
     private func nativeFileItems() -> [NSDraggingItem] {
         guard let index = offerTypes.firstIndex(of: "text/uri-list") else { return [] }
         guard let data = prepared[Int64(index)], data.count <= 1024 * 1024, let text = String(data: data, encoding: .utf8) else {
@@ -722,12 +732,10 @@ internal final class TerminalDragDrop: NSObject {
             }
             lines = end == lines.endIndex ? ""[...] : lines[lines.index(after: end)...]
         }
-        // A program on a hosted pane names files on the host, not on this Mac,
-        // so its URLs are fetched over the carrier and never placed on the
-        // drag pasteboard as this Mac's own files — whatever machine id it
-        // sent, an empty one included. Only a local pane's offer is this
-        // Mac's; a surface that has gone is treated as remote, not trusted.
-        let isLocalPane = surface.map { !$0.isRemoteAttached } ?? false
+        // Only a backend whose owner established this Mac's filesystem can
+        // offer native local files. Remote and unplaced backends use file
+        // promises regardless of the machine id supplied by their program.
+        let isLocalPane = surface.map { $0.drive.isFilesystemLocal } ?? false
         let isRemote = !isLocalPane || (!offerMachine.isEmpty && offerMachine != machineID)
         if !isRemote { return urls.map { NSDraggingItem(pasteboardWriter: $0 as NSURL) } }
         let fileURLs = urls.enumerated().filter { $0.element.isFileURL }

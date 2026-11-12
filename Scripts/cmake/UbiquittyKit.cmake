@@ -527,6 +527,14 @@ function(ubiquitty_kit_add_layout_probe)
     if(_ubq_probe_PLATFORM STREQUAL "iOS")
         target_compile_options(${target} PRIVATE "$<$<COMPILE_LANGUAGE:Swift>:SHELL:${UBIQUITTY_IOS_SWIFT_FLAGS}>")
         set(quicPrefix "${UBIQUITTY_QUIC_PLATFORM_PREFIX}")
+        if(CMAKE_GENERATOR MATCHES "Ninja|Makefiles")
+            execute_process(COMMAND xcrun --sdk "${CMAKE_OSX_SYSROOT}" --show-sdk-path
+                OUTPUT_VARIABLE sdk OUTPUT_STRIP_TRAILING_WHITESPACE
+                COMMAND_ERROR_IS_FATAL ANY)
+            # Swift's linker subprocess must inherit the importer's SDK.
+            set_target_properties(${target} PROPERTIES RULE_LAUNCH_LINK
+                "\"${CMAKE_COMMAND}\" -E env \"SDKROOT=${sdk}\"")
+        endif()
     else()
         target_compile_options(${target} PRIVATE "$<$<COMPILE_LANGUAGE:Swift>:SHELL:${UBIQUITTY_SWIFT_FLAGS_GROUPED}>")
         set(quicPrefix "${UBIQUITTY_QUIC_PREFIX}")
@@ -544,6 +552,11 @@ function(ubiquitty_kit_add_layout_probe)
     endforeach()
     ubiquitty_kit_forward_definitions(${target} CXX_TARGETS ${_ubq_probe_CXX_TARGETS})
     target_link_options(${target} PRIVATE -cxx-interoperability-mode=default)
+    # Debug maps must name LTO objects that survive the linker's temporary files.
+    set(ltoObjects "${CMAKE_CURRENT_BINARY_DIR}/lto-objects/${target}")
+    file(MAKE_DIRECTORY "${ltoObjects}")
+    target_link_options(${target} PRIVATE
+        "$<$<CONFIG:RelWithDebInfo>:SHELL:-Xlinker -object_path_lto -Xlinker ${ltoObjects}>")
     ubiquitty_kit_swift_language_mode(${target})
     ubiquitty_kit_swift_whole_module(${target})
 endfunction()

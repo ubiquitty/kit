@@ -187,8 +187,8 @@ extension TerminalSurface {
     /// - Parameters:
     ///   - point: Where the click landed, in view coordinates.
     ///   - isCommandHeld: Whether Command is down.
-    /// - Returns: Whether a link was opened, so the caller can swallow the
-    ///   click rather than also selecting with it.
+    /// - Returns: Whether the interaction was handled or its file check was
+    ///   admitted, so the caller can swallow it instead of selecting with it.
     @discardableResult
     package func openLink(atViewPoint point: CGPoint, isCommandHeld: Bool) -> Bool {
         guard let found = link(atViewPoint: point, isCommandHeld: isCommandHeld),
@@ -204,8 +204,8 @@ extension TerminalSurface {
             return true
         }
         guard let opener = linkOpener else { return false }
-        // A path candidate is not a URL: it becomes one only once a file is
-        // found where it points, and until then there is nothing to open.
+        // A client hook receives a guessed path only after it exists. The
+        // check is independent of hover, which may move while the click waits.
         let target = found.isFilePath ? fileURLString(forCandidate: found.uri) : found.uri
         guard let target else { return false }
         // The last gate, and the one that matters most: a scheme the build has
@@ -219,23 +219,48 @@ extension TerminalSurface {
         guard isOpenable else {
             return false
         }
+        if found.isFilePath {
+            return openLocalFileLink(target)
+        }
         opener(target)
         openedLinksForTesting.append(target)
         return true
     }
 
-    /// The `file://` URL a bare path candidate names, or nil when no file is
-    /// there.
+    /// Checks a guessed local path before delivering it to the client's opener.
+    /// Repeated clicks are consumed while the first check remains outstanding.
+    private func openLocalFileLink(_ target: String) -> Bool {
+        guard fileLinkClickLookup == nil else { return true }
+        guard let url = URL(string: target) else { return false }
+        let lookup = FileLinkLookup()
+        fileLinkClickLookup = lookup
+        let needsWindow = window != nil
+        _ = lookup.value(for: url.path) { [weak self, weak lookup, weak sourceWindow = window] in
+            guard let self, let lookup, self.fileLinkClickLookup === lookup else { return }
+            self.fileLinkClickLookup = nil
+            if needsWindow {
+                guard let sourceWindow, self.window === sourceWindow, sourceWindow.isVisible else { return }
+            }
+            guard self.drive.isFilesystemLocal,
+                lookup.value(for: url.path, completion: {}) == true,
+                let opener = self.linkOpener
+            else { return }
+            opener(target)
+            self.openedLinksForTesting.append(target)
+        }
+        return true
+    }
+
+    /// The `file://` URL a bare path candidate names, without filesystem I/O.
     ///
     /// Which path the candidate names is Core's
     /// (`LinkRun::resolveFilePathCandidate`), over the pane's own directory —
     /// which is already the reported-over-sampled answer Core arbitrates — and
-    /// the host's home. What is left here is the filesystem, and it is touched
-    /// on this path alone: a hover or a click that named the candidate, never
-    /// the drain every printed line takes.
+    /// the host's home. Existence is checked separately on a worker for hover,
+    /// or before delivering a bare-path click to the client's opener.
     ///
     /// - Parameter candidate: The text the link run matched.
-    /// - Returns: The URL, or nil when the candidate names no existing file.
+    /// - Returns: The URL, or nil when no path can be derived.
     private func fileURLString(forCandidate candidate: String) -> String? {
         let base = drive.currentDirectory() ?? ""
         let home = NSHomeDirectory()
@@ -252,10 +277,10 @@ extension TerminalSurface {
                 }
             }
         }
-        guard !resolved.isEmpty, FileManager.default.fileExists(atPath: resolved) else {
+        guard !resolved.isEmpty else {
             return nil
         }
-        return URL(fileURLWithPath: resolved).absoluteString
+        return URL(filePath: resolved, directoryHint: .notDirectory).absoluteString
     }
 
     /// Whether the pointer at this point should show the link affordance.
@@ -274,8 +299,8 @@ extension TerminalSurface {
         // A path candidate offers the hand only where a file actually is: the
         // affordance promises what the click would do, and a click on a path
         // that resolves to nothing does nothing.
-        if found.isFilePath, drive.isRemoteAttached { return true }
-        return found.isFilePath ? fileURLString(forCandidate: found.uri) != nil : true
+        if !found.isFilePath || !drive.isFilesystemLocal { return true }
+        return localFileHoverTarget(found.uri) != nil
     }
 
     /// Applies the affordance for a pointer at this point.
@@ -324,7 +349,24 @@ extension TerminalSurface {
         // it resolves to none. The filesystem is only reached for a candidate a
         // click would act on, which for a bare path means Command is held.
         let openable = found.flatMap { clickOpens($0, isCommandHeld: isCommandHeld) ? $0 : nil }
-        let target = openable.flatMap { $0.isFilePath ? fileURLString(forCandidate: $0.uri) : $0.uri }
+        let target = openable.flatMap { link -> String? in
+            guard link.isFilePath else {
+                fileLinkLookup?.cancel()
+                return link.uri
+            }
+            guard drive.isFilesystemLocal else {
+                fileLinkLookup?.cancel()
+                let directory = drive.currentDirectory() ?? ""
+                let path = link.uri.withCString { candidate in
+                    directory.withCString {
+                        String(Ubiquitty.Session.hostAbsolutePath(std.string_view(candidate), std.string_view($0)))
+                    }
+                }
+                return path.isEmpty ? nil : path
+            }
+            return localFileHoverTarget(link.uri)
+        }
+        if openable == nil { fileLinkLookup?.cancel() }
         let hovered = target == nil ? nil : openable
         // The run is compared by where it sits rather than by identity: the
         // pointer moving one cell along the same link resolves a fresh value
@@ -385,6 +427,7 @@ extension TerminalSurface {
     /// focus leaves, the view goes away. A hover that survives any of those is
     /// an underline the user cannot explain.
     package func clearLinkAffordance() {
+        fileLinkLookup?.cancel()
         if hoveredLinkRun != nil {
             hoveredLinkRun = nil
             publishHoverRunToBoundaryCapture()
@@ -395,6 +438,20 @@ extension TerminalSurface {
         guard isShowingLinkAffordance else { return }
         isShowingLinkAffordance = false
         applyPointerCursor()
+    }
+
+    /// Resolves a local hover only after a worker has checked its path.
+    ///
+    /// - Parameter candidate: The bare path resolved under the pointer.
+    /// - Returns: Its URL when the last check found it, or nil while unknown or absent.
+    private func localFileHoverTarget(_ candidate: String) -> String? {
+        guard let target = fileURLString(forCandidate: candidate), let url = URL(string: target) else { return nil }
+        if fileLinkLookup == nil { fileLinkLookup = FileLinkLookup() }
+        let found = fileLinkLookup?
+            .value(for: url.path) { [weak self] in
+                self?.updateLinkAffordanceAtLivePointer()
+            }
+        return found == true ? target : nil
     }
 
     /// Hands the resolved run to the session's boundary capture.
@@ -451,7 +508,7 @@ extension TerminalSurface {
     package func handleFileLink(_ target: String, isPath: Bool) -> Bool {
         let isURI = target.withCString { Ubiquitty.Session.isFileLinkURI(std.string_view($0)) }
         guard isPath || isURI else { return false }
-        guard drive.isRemoteAttached else {
+        guard !drive.isFilesystemLocal else {
             guard isURI else { return false }
             // Preserve the platform's local file URL spellings. A hostname
             // on an unconnected URI cannot authorize a remote connection.

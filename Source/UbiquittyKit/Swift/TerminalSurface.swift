@@ -1906,6 +1906,16 @@ public final class TerminalSurface: PlatformView {
     /// reader shown the raw text would be told less than the click will do.
     package internal(set) var hoveredLinkTarget: String?
 
+    #if canImport(AppKit)
+    /// Coalesces filesystem checks away from pointer dispatch; absent until needed.
+    internal var fileLinkLookup: FileLinkLookup?
+    /// Holds one explicit click independently of changing hover interest.
+    internal var fileLinkClickLookup: FileLinkLookup?
+
+    /// Whether a bare-path click is waiting for its filesystem check.
+    package var isFileLinkClickPendingForTesting: Bool { fileLinkClickLookup != nil }
+    #endif
+
     /// How many frames this surface has encoded.
     ///
     /// An encode is a frame built, not one seen: a scenario about what reached

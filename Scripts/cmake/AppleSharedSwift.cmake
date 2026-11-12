@@ -119,6 +119,7 @@ set(UBIQUITTY_APPLE_SHARED_KIT_SOURCES
     Source/UbiquittyKit/Swift/SnapshotRunner.swift
     Source/UbiquittyKit/Swift/SurfaceRenderProfile.swift
     Source/UbiquittyKit/Swift/LinkAccentColor.swift
+    Source/UbiquittyKit/Swift/FileLinkLookup.swift
     Source/UbiquittyKit/Swift/NetworkPathWatch.swift
     Source/UbiquittyKit/Swift/SystemMetalDevice.swift
     Source/UbiquittyKit/Swift/TerminalSurface.swift
