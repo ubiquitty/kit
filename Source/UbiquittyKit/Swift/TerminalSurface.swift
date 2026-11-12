@@ -2691,6 +2691,14 @@ public final class TerminalSurface: PlatformView {
 
     private func chromeColor(alpha: Double, _ resolve: (Ubiquitty.Terminal?) -> Ubiquitty.ColorRGBA) -> PlatformColor {
         let color = drive.withTerminal { resolve($0) } ?? resolve(nil)
+        if (renderer as? SurfaceRenderer)?.style.usesDisplayP3 == true {
+            return PlatformColor(
+                displayP3Red: CGFloat(color.red) / 255,
+                green: CGFloat(color.green) / 255,
+                blue: CGFloat(color.blue) / 255,
+                alpha: alpha
+            )
+        }
         return PlatformColor(
             srgbRed: CGFloat(color.red) / 255,
             green: CGFloat(color.green) / 255,
