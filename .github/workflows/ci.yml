@@ -97,7 +97,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
         with:
           path: ${{ runner.temp }}/ubq-ci-linux-image.tar
-          key: ci-linux-image-${{ steps.image.outputs.digest }}
+          key: ci-linux-image-${{ runner.arch }}-${{ steps.image.outputs.digest }}
       - name: Run the fail-fast preflight
         if: steps.reach.outputs.preflight != 'false'
         env:
@@ -122,7 +122,7 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
         with:
           path: ${{ runner.temp }}/ubq-ci-linux-image.tar
-          key: ci-linux-image-${{ steps.image.outputs.digest }}
+          key: ci-linux-image-${{ runner.arch }}-${{ steps.image.outputs.digest }}
       - name: Report completed, failed, and unexecuted preflight stages
         if: always() && steps.reach.outputs.preflight != 'false'
         run: python3 Libraries/ubiquitty-core/Scripts/ci_batteries.py report preflight --source-root "$GITHUB_WORKSPACE"
@@ -153,6 +153,14 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+      - name: Compiler cache statistics
+        run: echo "CCACHE_STATSLOG=$RUNNER_TEMP/ccache-stats.log" >> "$GITHUB_ENV"
+      - name: Restore the compiler cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
+        with:
+          path: ${{ runner.workspace }}/ccache
+          key: ccache-v2-${{ runner.os }}-${{ runner.arch }}-linux-kit-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: ccache-v2-${{ runner.os }}-${{ runner.arch }}-linux-kit-
       - name: Name the CI image
         id: image
         run: echo "digest=$(./Libraries/ubiquitty-core/Scripts/ci-linux-image.sh --source-root "$GITHUB_WORKSPACE" --recipe-digest)" >> "$GITHUB_OUTPUT"
@@ -161,7 +169,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
         with:
           path: ${{ runner.temp }}/ubq-ci-linux-image.tar
-          key: ci-linux-image-${{ steps.image.outputs.digest }}
+          key: ci-linux-image-${{ runner.arch }}-${{ steps.image.outputs.digest }}
       - name: Run the fail-fast Linux battery
         id: battery
         env:
@@ -175,7 +183,7 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
         with:
           path: ${{ runner.temp }}/ubq-ci-linux-image.tar
-          key: ci-linux-image-${{ steps.image.outputs.digest }}
+          key: ci-linux-image-${{ runner.arch }}-${{ steps.image.outputs.digest }}
 
       - name: Full Linux battery completed
         if: steps.battery.outputs.full_code == 'true'
@@ -192,6 +200,19 @@ jobs:
             cat "$log"
             echo "::endgroup::"
           done
+
+      - name: Compiler cache hit rate
+        if: always()
+        env:
+          UBQ_CI_LINUX_IMAGE: "true"
+        run: ./Libraries/ubiquitty-core/Scripts/ci-linux-image.sh --source-root "$GITHUB_WORKSPACE" bash -c 'if [ -s "$CCACHE_STATSLOG" ]; then ccache --show-log-stats; else echo "No compiler invocations recorded in this job"; fi'
+      - name: Save the compiler cache
+        if: always()
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
+        with:
+          path: ${{ runner.workspace }}/ccache
+          key: ccache-v2-${{ runner.os }}-${{ runner.arch }}-linux-kit-${{ github.run_id }}-${{ github.run_attempt }}
 
   apple:
     name: Apple battery
@@ -226,6 +247,7 @@ jobs:
           command -v ccache >/dev/null 2>&1 || brew install ccache
           {
             echo "CCACHE_DIR=$RUNNER_WORKSPACE/ccache"
+            echo "CCACHE_STATSLOG=$RUNNER_TEMP/ccache-stats.log"
             echo "CCACHE_MAXSIZE=2G"
           } >> "$GITHUB_ENV"
           echo "build=$(python3 Libraries/ubiquitty-core/Scripts/build_root.py .)" >> "$GITHUB_OUTPUT"
@@ -233,8 +255,10 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
         with:
           path: ${{ runner.workspace }}/ccache
-          key: ccache-apple-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: ccache-apple-
+          key: ccache-v2-${{ runner.os }}-${{ runner.arch }}-apple-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            ccache-v2-${{ runner.os }}-${{ runner.arch }}-apple-
+            ccache-apple-
       - name: Cache QUIC dependencies
         if: needs.preflight.outputs.code == 'true'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
@@ -242,7 +266,7 @@ jobs:
           path: |
             ${{ steps.roots.outputs.build }}/quic-deps/lib
             ${{ steps.roots.outputs.build }}/quic-deps/include
-          key: quic-deps-${{ runner.os }}-${{ hashFiles('Libraries/ubiquitty-core/Scripts/fetch-quic-deps.sh') }}
+          key: quic-deps-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Libraries/ubiquitty-core/Scripts/fetch-quic-deps.sh') }}
       # The Swift renderer's drivers and the iOS simulator arm are stages of
       # this battery, beside the whole suite.
       - name: Run the fail-fast Apple battery
@@ -276,18 +300,164 @@ jobs:
             cat "$log"
             echo "::endgroup::"
           done
+      - name: Compiler cache hit rate
+        if: always()
+        run: |
+          if [ -s "$CCACHE_STATSLOG" ]; then ccache --show-log-stats; else echo "No compiler invocations recorded in this job"; fi
       - name: Save the compiler cache
         if: always()
         continue-on-error: true
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
         with:
           path: ${{ runner.workspace }}/ccache
-          key: ccache-apple-${{ github.run_id }}-${{ github.run_attempt }}
+          key: ccache-v2-${{ runner.os }}-${{ runner.arch }}-apple-${{ github.run_id }}-${{ github.run_attempt }}
+
+  host-linux-arm64:
+    name: Linux Kit build (arm64)
+    needs: preflight
+    if: needs.preflight.outputs.linux == 'true'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          submodules: recursive
+          fetch-depth: 0
+      - name: Build and compiler cache roots
+        run: |
+          echo "UBQ_BUILD_ROOT=$RUNNER_WORKSPACE/build-arm64" >> "$GITHUB_ENV"
+          echo "CCACHE_STATSLOG=$RUNNER_TEMP/ccache-arm64.log" >> "$GITHUB_ENV"
+      - name: Free unused hosted SDK space
+        if: runner.environment == 'github-hosted' && runner.os == 'Linux'
+        run: |
+          df -h /
+          sudo rm -rf -- /usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup
+          df -h /
+      - name: Restore the compiler cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
+        with:
+          path: ${{ runner.workspace }}/ccache
+          key: ccache-v2-${{ runner.os }}-${{ runner.arch }}-gcc-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: ccache-v2-${{ runner.os }}-${{ runner.arch }}-gcc-
+      - name: Name the CI image
+        id: image
+        run: echo "digest=$(./Libraries/ubiquitty-core/Scripts/ci-linux-image.sh --source-root "$GITHUB_WORKSPACE" --recipe-digest)" >> "$GITHUB_OUTPUT"
+      - name: Restore the CI image
+        id: restore-image
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
+        with:
+          path: ${{ runner.temp }}/ubq-ci-linux-image.tar
+          key: ci-linux-image-${{ runner.arch }}-${{ steps.image.outputs.digest }}
+      - name: Build and test native ARM64
+        env:
+          UBQ_CI_LINUX_IMAGE: "true"
+          UBQ_CI_IMAGE_ARCHIVE: ${{ runner.temp }}/ubq-ci-linux-image.tar
+          CC: gcc
+          CXX: g++
+        run: |
+          ./Libraries/ubiquitty-core/Scripts/ci-linux-image.sh --source-root "$GITHUB_WORKSPACE" bash -euc '
+              test "$(uname -m)" = aarch64
+              ./Scripts/build-linux.sh --test'
+      - name: Compiler cache hit rate
+        if: always()
+        env:
+          UBQ_CI_LINUX_IMAGE: "true"
+        run: ./Libraries/ubiquitty-core/Scripts/ci-linux-image.sh --source-root "$GITHUB_WORKSPACE" bash -c 'if [ -s "$CCACHE_STATSLOG" ]; then ccache --show-log-stats; else echo "No compiler invocations recorded in this job"; fi'
+      - name: Print failed build diagnostics
+        if: failure()
+        run: |
+          find "$UBQ_BUILD_ROOT" -name build.log -type f -exec tail -n 100 {} ";"
+      - name: Save the CI image
+        if: always() && steps.restore-image.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
+        with:
+          path: ${{ runner.temp }}/ubq-ci-linux-image.tar
+          key: ci-linux-image-${{ runner.arch }}-${{ steps.image.outputs.digest }}
+      - name: Save the compiler cache
+        if: always()
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
+        with:
+          path: ${{ runner.workspace }}/ccache
+          key: ccache-v2-${{ runner.os }}-${{ runner.arch }}-gcc-${{ github.run_id }}-${{ github.run_attempt }}
+
+  coverage:
+    name: Coverage floor
+    needs: preflight
+    if: needs.preflight.outputs.linux == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          submodules: recursive
+          fetch-depth: 0
+      - name: Build and compiler cache roots
+        run: |
+          echo "UBQ_BUILD_ROOT=$RUNNER_WORKSPACE/build-coverage" >> "$GITHUB_ENV"
+          echo "CCACHE_STATSLOG=$RUNNER_TEMP/ccache-coverage.log" >> "$GITHUB_ENV"
+      - name: Free unused hosted SDK space
+        if: runner.environment == 'github-hosted' && runner.os == 'Linux'
+        run: |
+          df -h /
+          sudo rm -rf -- /usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup
+          df -h /
+      - name: Restore the compiler cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
+        with:
+          path: ${{ runner.workspace }}/ccache
+          key: ccache-v2-${{ runner.os }}-${{ runner.arch }}-coverage-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: ccache-v2-${{ runner.os }}-${{ runner.arch }}-coverage-
+      - name: Name the CI image
+        id: image
+        run: echo "digest=$(./Libraries/ubiquitty-core/Scripts/ci-linux-image.sh --source-root "$GITHUB_WORKSPACE" --recipe-digest)" >> "$GITHUB_OUTPUT"
+      - name: Restore the CI image
+        id: restore-image
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
+        with:
+          path: ${{ runner.temp }}/ubq-ci-linux-image.tar
+          key: ci-linux-image-${{ runner.arch }}-${{ steps.image.outputs.digest }}
+      - name: Instrumented suite and owned coverage floors
+        env:
+          UBQ_CI_LINUX_IMAGE: "true"
+          UBQ_CI_IMAGE_ARCHIVE: ${{ runner.temp }}/ubq-ci-linux-image.tar
+          CC: clang
+          CXX: clang++
+        run: |
+          ./Libraries/ubiquitty-core/Scripts/ci-linux-image.sh --source-root "$GITHUB_WORKSPACE" bash -euc '
+              export PATH="$UBQ_PGO_LLVM:$PATH"
+              ./Libraries/ubiquitty-core/Scripts/run-coverage.sh --source-root "$GITHUB_WORKSPACE" --native-only --check-file-floors'
+      - name: Compiler cache hit rate
+        if: always()
+        env:
+          UBQ_CI_LINUX_IMAGE: "true"
+        run: ./Libraries/ubiquitty-core/Scripts/ci-linux-image.sh --source-root "$GITHUB_WORKSPACE" bash -c 'if [ -s "$CCACHE_STATSLOG" ]; then ccache --show-log-stats; else echo "No compiler invocations recorded in this job"; fi'
+      - name: Print failed build diagnostics
+        if: failure()
+        run: |
+          find "$UBQ_BUILD_ROOT" -name build.log -type f -exec tail -n 100 {} ";"
+      - name: Save the CI image
+        if: always() && steps.restore-image.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
+        with:
+          path: ${{ runner.temp }}/ubq-ci-linux-image.tar
+          key: ci-linux-image-${{ runner.arch }}-${{ steps.image.outputs.digest }}
+      - name: Save the compiler cache
+        if: always()
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
+        with:
+          path: ${{ runner.workspace }}/ccache
+          key: ccache-v2-${{ runner.os }}-${{ runner.arch }}-coverage-${{ github.run_id }}-${{ github.run_attempt }}
 
   ci:
     name: CI
     if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
-    needs: [preflight, linux, apple]
+    needs: [preflight, linux, apple, host-linux-arm64, coverage]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:

@@ -160,6 +160,12 @@ if wanted test_snapshot_gate_scope; then
     python3 "$ROOT/Tests/Tools/test_snapshot_gate_scope.py" || exit 1
 fi
 
+if wanted test_coverage_floor; then
+    echo "=== test_coverage_floor ==="
+    RAN=$((RAN + 1))
+    python3 "$ROOT/Tests/Tools/test_coverage_floor.py" || exit 1
+fi
+
 if wanted test_resource_producers; then
     echo "=== test_resource_producers ==="
     RAN=$((RAN + 1))
