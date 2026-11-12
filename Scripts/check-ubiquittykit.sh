@@ -1625,7 +1625,7 @@ let passed = MainActor.assumeIsolated { () -> Bool in
     guard spinRevealing(surface, seconds: 10, until: { screenLines(surface).contains("terminal-view") }) else {
         return refuse("the shell's line never reached the screen: \(screenLines(surface).prefix(4))")
     }
-    guard spin(seconds: 5, until: { renderer.presentedGeometry(for: surface) != nil }),
+    guard spinRevealing(surface, seconds: 5, until: { renderer.presentedGeometry(for: surface) != nil }),
         let geometry = renderer.presentedGeometry(for: surface)
     else {
         return refuse("the view presented no frame of its own in 5 s")
