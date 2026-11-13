@@ -79,11 +79,24 @@ enum GridCacheSmoke {
         guard let pinnedRun = compare(pinned, steps: scrollSteps(pinned), scenario: "translucent \(pinnedTheme)") else {
             return false
         }
-        let mismatches = configuredRun.mismatches + pinnedRun.mismatches
+        var fractionalConfiguration = Ubiquitty.Preferences.Values()
+        fractionalConfiguration.lineSpacingPoints = .init(0.25)
+        guard
+            let fractional = SurfaceSnapshot(
+                rows: rows,
+                columns: columns,
+                contentScale: 2,
+                configuration: fractionalConfiguration,
+                paddingY: 0.25
+            ), let fractionalRun = compare(fractional, steps: viewportScrollSteps(fractional), scenario: "fractional scroll")
+        else {
+            return failed("could not compare the fractional scroll surface")
+        }
+        let mismatches = configuredRun.mismatches + pinnedRun.mismatches + fractionalRun.mismatches
         guard mismatches.isEmpty else {
             return failed("retained frames differ from their full rebuild: " + mismatches.joined(separator: ", "))
         }
-        let stepCount = configuredRun.stepCount + pinnedRun.stepCount
+        let stepCount = configuredRun.stepCount + pinnedRun.stepCount + fractionalRun.stepCount
         print("grid-cache-smoke: PASS (\(stepCount) steps, each retained frame equal to its full rebuild)")
         return true
     }
@@ -122,6 +135,12 @@ enum GridCacheSmoke {
                 _ = failed("the retained frame for \(reported) was not drawn")
                 return nil
             }
+            let geometry = capture.surface.presentedFrameGeometry
+            let retainedFacts = capture.surface.frameRenderers.values
+                .map { renderer in
+                    "cellHeight=\((geometry?.cellSize.height ?? 0) * capture.contentScale) originY=\((geometry?.insets.top ?? 0) * capture.contentScale) boundaryReuse=\(renderer.didBoundaryFrameReuseGrid) dirtyRows=\(renderer.boundaryFrameDirtyRows) partialFrames=\(renderer.partialFrameCount)"
+                }
+                .joined(separator: "; ")
             for renderer in capture.surface.frameRenderers.values {
                 renderer.releaseRetainedGrid()
             }
@@ -132,9 +151,11 @@ enum GridCacheSmoke {
             }
             if retained != full {
                 let firstRow = firstDifferingRow(retained, full, width: capture.texture.width)
-                mismatches.append("\(reported) (\(firstRow))")
+                mismatches.append("\(reported) (\(firstRow); \(retainedFacts))")
             }
         }
+        let partialFrames = capture.surface.frameRenderers.values.reduce(0) { $0 + $1.partialFrameCount }
+        print("grid-cache-smoke: \(scenario ?? "configured") partialFrames=\(partialFrames)")
         return (mismatches, steps.count)
     }
 
@@ -211,6 +232,20 @@ enum GridCacheSmoke {
             ("another edit over the backdrop", { feed("\u{1b}[8;6Hand again") }),
             ("the backdrop removed", { capture.renderer.setBackdrop(texture: nil, opacity: 0, mode: 0, pixelWidth: 0, pixelHeight: 0) }),
             ("an edit after it", { feed("\u{1b}[2;2Hafter") }),
+        ]
+    }
+
+    /// Scrolls a fractional-pixel grid through history and back to the tail.
+    ///
+    /// - Parameter capture: The surface whose rows are compared.
+    /// - Returns: The viewport steps, each followed by the same pixel comparison.
+    private static func viewportScrollSteps(_ capture: SurfaceSnapshot) -> [(String, () -> Void)] {
+        let surface = capture.surface
+        return [
+            ("first frame", { capture.feed(std.string("\u{1b}[?25l" + screen("row"))) }),
+            ("history written", { capture.feed(std.string("\u{1b}[\(rows);1H\r\nmore\r\nlines\r\nfor\r\nhistory")) }),
+            ("the view scrolled back", { surface.setViewOffset(absolute: 2) }),
+            ("the view back at the tail", { surface.setViewOffset(absolute: 0) }),
         ]
     }
 

@@ -155,8 +155,8 @@ package final class TerminalRenderer {
 
     /// What kept a boundary build from reusing the retained grid.
     package struct BoundaryReuseRefusals: OptionSet, Sendable {
-        package let rawValue: UInt8
-        package init(rawValue: UInt8) { self.rawValue = rawValue }
+        package let rawValue: UInt16
+        package init(rawValue: UInt16) { self.rawValue = rawValue }
         /// The capture planned every row.
         package static let fullCapture = BoundaryReuseRefusals(rawValue: 1 << 0)
         /// A view tier is baked into this frame's grid.
@@ -173,6 +173,8 @@ package final class TerminalRenderer {
         package static let inkEscapesRow = BoundaryReuseRefusals(rawValue: 1 << 6)
         /// The retained target may not hold the frame last built.
         package static let wholeFrameOwed = BoundaryReuseRefusals(rawValue: 1 << 7)
+        /// The scroll cannot copy whole pixel rows from the retained target.
+        package static let fractionalScroll = BoundaryReuseRefusals(rawValue: 1 << 8)
     }
 
     /// Why the last boundary build did not reuse the retained grid; empty
@@ -1227,6 +1229,10 @@ package final class TerminalRenderer {
         if imagesMayChange { refusals.insert(.images) }
         if backdrop != nil { refusals.insert(.backdrop) }
         if owesWholeFrame { refusals.insert(.wholeFrameOwed) }
+        // A blit copies integer pixels. Rounding a fractional row height or
+        // origin moves the surviving ink onto different samples than a full
+        // rebuild, so the complete capture must be built before encoding.
+        if capture.scrollDelta() != 0, !canShiftGridByWholeRows { refusals.insert(.fractionalScroll) }
         boundaryReuseRefusals = refusals
         var reusesGrid = refusals.isEmpty
         if hasBakedViewTiers || hadBakedViewTiers {
