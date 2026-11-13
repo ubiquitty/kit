@@ -136,6 +136,8 @@ enum GridCacheSmoke {
                 return nil
             }
             let geometry = capture.surface.presentedFrameGeometry
+            let retainedFirstRow = capture.renderer.lastFrameFirstAbsoluteRow
+            let retainedStillCount = capture.renderer.framesFromStillCaptureCount
             let retainedFacts = capture.surface.frameRenderers.values
                 .map { renderer in
                     "cellHeight=\((geometry?.cellSize.height ?? 0) * capture.contentScale) originY=\((geometry?.insets.top ?? 0) * capture.contentScale) boundaryReuse=\(renderer.didBoundaryFrameReuseGrid) dirtyRows=\(renderer.boundaryFrameDirtyRows) partialFrames=\(renderer.partialFrameCount)"
@@ -149,9 +151,14 @@ enum GridCacheSmoke {
                 _ = failed("the full frame for \(reported) was not drawn")
                 return nil
             }
+            let positions =
+                "viewOffset=\(capture.surface.viewOffset) firstRow=\(retainedFirstRow)/\(capture.renderer.lastFrameFirstAbsoluteRow) stills=\(retainedStillCount)/\(capture.renderer.framesFromStillCaptureCount)"
+            if ProcessInfo.processInfo.environment["UBQ_GRID_CACHE_TRACE"] == "1" {
+                print("grid-cache-smoke: \(reported) \(positions); \(retainedFacts)")
+            }
             if retained != full {
                 let firstRow = firstDifferingRow(retained, full, width: capture.texture.width)
-                mismatches.append("\(reported) (\(firstRow); \(retainedFacts))")
+                mismatches.append("\(reported) (\(firstRow); \(positions); \(retainedFacts))")
             }
         }
         let partialFrames = capture.surface.frameRenderers.values.reduce(0) { $0 + $1.partialFrameCount }
