@@ -181,8 +181,20 @@ enum GridCacheSmoke {
             ("stacked marks above a row", { feed("\u{1b}[6;1H\u{1b}[2Ke\u{301}\u{302}\u{303}\u{304} a\u{30a}\u{30b}") }),
             ("the marks erased", { feed("\u{1b}[6;1H\u{1b}[2K") }),
             ("history written", { feed("\u{1b}[\(rows);1H\r\nmore\r\nlines\r\nfor\r\nhistory") }),
-            ("the view scrolled back", { surface.viewOffset = 2 }),
-            ("the view back at the tail", { surface.viewOffset = 0 }),
+            (
+                "the view scrolled back",
+                {
+                    surface.setViewOffset(absolute: 2)
+                    precondition(surface.viewOffset == 2, "the history step must make two rows reachable")
+                }
+            ),
+            (
+                "the view back at the tail",
+                {
+                    surface.setViewOffset(absolute: 0)
+                    precondition(surface.viewOffset == 0, "the view must return to the tail")
+                }
+            ),
             ("a shorter grid", { surface.drive.resize(rows: rows - 2, columns: columns - 4) }),
             ("the grid restored", { surface.drive.resize(rows: rows, columns: columns) }),
             ("a refill", { feed(screen("refill")) }),
