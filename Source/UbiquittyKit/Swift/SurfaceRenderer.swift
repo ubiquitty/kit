@@ -2323,7 +2323,11 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
                                 view.hiliteRegionSpans = hilite.baseAddress
                                 view.hiliteRegionSpanCount = counts.hilite
                             }
-                            return renderer.buildFrame(captured: capture, view: view)
+                            return renderer.buildFrame(
+                                captured: capture,
+                                view: view,
+                                selectionSpans: Ubiquitty.Rendering.DrawnSelectionSpans(spans)
+                            )
                         }
                     }
                 }

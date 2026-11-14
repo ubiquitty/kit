@@ -159,9 +159,9 @@ package final class TerminalRenderer {
         package init(rawValue: UInt16) { self.rawValue = rawValue }
         /// The capture planned every row.
         package static let fullCapture = BoundaryReuseRefusals(rawValue: 1 << 0)
-        /// A view tier is baked into this frame's grid.
+        /// A view tier without tracked row damage is baked into this frame's grid.
         package static let viewTiers = BoundaryReuseRefusals(rawValue: 1 << 1)
-        /// A view tier was baked into the last frame's grid.
+        /// A view tier without tracked row damage was baked into the last frame's grid.
         package static let lastFrameViewTiers = BoundaryReuseRefusals(rawValue: 1 << 2)
         /// A full rebuild was pending.
         package static let fullRebuild = BoundaryReuseRefusals(rawValue: 1 << 3)
@@ -175,6 +175,8 @@ package final class TerminalRenderer {
         package static let wholeFrameOwed = BoundaryReuseRefusals(rawValue: 1 << 7)
         /// The scroll cannot copy whole pixel rows from the retained target.
         package static let fractionalScroll = BoundaryReuseRefusals(rawValue: 1 << 8)
+        /// The selected cells changed their fill or foreground rules.
+        package static let selectionStyle = BoundaryReuseRefusals(rawValue: 1 << 9)
     }
 
     /// Why the last boundary build did not reuse the retained grid; empty
@@ -360,9 +362,34 @@ package final class TerminalRenderer {
     /// shadow baseline — net change, not bytes or writes. The surface stamps
     /// the presentation driver's screen-change rate from it.
     package private(set) var lastFrameHadNetChange = false
-    /// Whether the last boundary frame built with a baked view tier, so the
-    /// next Delta cannot trust the retained rows that tier touched.
+    /// Whether the last build baked a view tier, including a selection whose
+    /// retained rows the boundary route tracks separately.
     private var hadBakedViewTiers = false
+
+    /// Selection is the boundary tier whose retained rows are tracked. Other
+    /// tiers, and a transition from a live build, still require a whole frame.
+    private struct BoundarySelectionStyle: Equatable {
+        let fill: SIMD4<Float>
+        let foreground: SIMD4<Float>
+        let isBehindText: Bool
+        let hasForegroundOverride: Bool
+
+        init(_ view: Ubiquitty.Rendering.FrameCapture.ViewTierOverrides) {
+            fill = SIMD4(view.selectionColor.x, view.selectionColor.y, view.selectionColor.z, view.selectionColor.w)
+            foreground = SIMD4(
+                view.selectionForeground.x,
+                view.selectionForeground.y,
+                view.selectionForeground.z,
+                view.selectionForeground.w
+            )
+            isBehindText = view.isSelectionBehindText
+            hasForegroundOverride = view.hasSelectionForegroundOverride
+        }
+    }
+
+    private var boundarySelectionStyle: BoundarySelectionStyle?
+    private var boundarySelectionSpans: [Ubiquitty.Rendering.SelectionRowSpan] = []
+    private var boundaryDirtyRows: [UInt8] = []
 
     /// What the capture phase leaves for the build phase, which runs once the
     /// caller has released the model lock. Held here rather than handed across
@@ -1008,6 +1035,8 @@ package final class TerminalRenderer {
         // A tier baked by this live frame sits in the retained pixels; the
         // next boundary Delta must not Load them.
         capturedHadTiersLastFrame = hadBakedViewTiers
+        boundarySelectionStyle = nil
+        boundarySelectionSpans.removeAll(keepingCapacity: true)
         hadBakedViewTiers =
             options.selectionSpanCount > 0 || options.searchMatchSpanCount > 0
             || options.otherSearchMatchSpanCount > 0 || options.triggerHighlightSpanCount > 0
@@ -1150,6 +1179,7 @@ package final class TerminalRenderer {
         _ capture: Ubiquitty.Rendering.FrameCapture,
         backend: Ubiquitty.Rendering.GlyphBackend,
         view: Ubiquitty.Rendering.FrameCapture.ViewTierOverrides? = nil,
+        dirtyRows: Ubiquitty.Rendering.RowBytes? = nil,
         isLoading: Bool
     ) -> Bool {
         var reusesGrid = isLoading
@@ -1157,7 +1187,17 @@ package final class TerminalRenderer {
             let isContainedNow = {
                 self.instances.rowInkCrossings.withUnsafeBufferPointer { built in
                     self.targetRowInkCrossings.withUnsafeMutableBufferPointer { target in
-                        capture.settleRowInkCrossings(
+                        if let dirtyRows {
+                            return Ubiquitty.Rendering.settleRowInkCrossings(
+                                dirtyRows,
+                                Ubiquitty.Rendering.RowBytesToWrite(target),
+                                Ubiquitty.Rendering.RowBytes(built),
+                                capture.scrollTop(),
+                                capture.scrollBottom(),
+                                capture.scrollDelta()
+                            )
+                        }
+                        return capture.settleRowInkCrossings(
                             Ubiquitty.Rendering.RowBytesToWrite(target),
                             Ubiquitty.Rendering.RowBytes(built)
                         )
@@ -1192,6 +1232,7 @@ package final class TerminalRenderer {
     /// - Parameters:
     ///   - capture: The boundary capture to present.
     ///   - view: The tiers composited over the captured grid.
+    ///   - selectionSpans: The same selection, borrowed in Core's span type.
     /// - Returns: The frame to encode once a target is had, or nil when
     ///   nothing is to be presented.
     // The header printer cannot represent a default argument or an optional Swift
@@ -1199,22 +1240,49 @@ package final class TerminalRenderer {
     // swift-only: in-package Swift, absent from the generated header by design.
     package func buildFrame(
         captured capture: Ubiquitty.Rendering.FrameCapture,
-        view: Ubiquitty.Rendering.FrameCapture.ViewTierOverrides
+        view: Ubiquitty.Rendering.FrameCapture.ViewTierOverrides,
+        selectionSpans: Ubiquitty.Rendering.DrawnSelectionSpans
     ) -> PendingFrame? {
         guard prepareVisibleFonts(capture) else { return nil }
         didLastFramePresentNothing = false
         prepareCursor(capture)
         lastFrameHadNetChange = capture.hasCapturedDirtyRows()
-        // A Delta reuses the retained grid only while nothing baked outside
-        // its mask can have moved: selection and search tiers are baked into
-        // the grid pixels at build time, so a tier active now or last frame,
-        // or a pending full rebuild, builds the whole capture. A cursor is
+        // Selection contributes its own row damage, merged with the capture's
+        // mask. Other baked tiers have no row baseline here and still rebuild
+        // whole while active now or last frame. A cursor is
         // never the grid's — the settled block is the tier and a sliding one
         // the overlay's — so a slide refuses nothing.
-        let hasBakedViewTiers =
-            view.selectionSpanCount > 0 || view.searchMatchSpanCount > 0
+        let hasUntrackedViewTiers =
+            view.searchMatchSpanCount > 0
             || view.otherSearchMatchSpanCount > 0 || view.triggerHighlightSpanCount > 0
             || view.hiliteRegionSpanCount > 0
+        let hasBakedViewTiers = view.selectionSpanCount > 0 || hasUntrackedViewTiers
+        let selectionStyle = BoundarySelectionStyle(view)
+        let rowCount = Int(capture.rows())
+        boundaryDirtyRows.removeAll(keepingCapacity: true)
+        for row in 0..<rowCount {
+            boundaryDirtyRows.append(capture.isRowDirty(Int32(row)) ? 1 : 0)
+        }
+        boundarySelectionSpans.withUnsafeBufferPointer { held in
+            boundaryDirtyRows.withUnsafeMutableBufferPointer { dirty in
+                var damage = Ubiquitty.Rendering.FrameDamage()
+                damage.scrollTop = capture.scrollTop()
+                damage.scrollBottom = capture.scrollBottom()
+                damage.scrollDelta = capture.scrollDelta()
+                let heldColor =
+                    boundarySelectionStyle.map {
+                        Ubiquitty.Rendering.Vec4(x: $0.fill.x, y: $0.fill.y, z: $0.fill.z, w: $0.fill.w)
+                    } ?? view.selectionColor
+                Ubiquitty.Rendering.markSelectionRepaintRows(
+                    Ubiquitty.Rendering.DrawnSelectionSpans(held),
+                    heldColor,
+                    selectionSpans,
+                    view.selectionColor,
+                    damage,
+                    Ubiquitty.Rendering.RowBytesToWrite(dirty)
+                )
+            }
+        }
         let hasImages = !capture.imageQuads().isEmpty
         let imagesMayChange = hasImages || imageStore.hasResolvedImages
         // The window backdrop is composited under every frame, this route's
@@ -1223,8 +1291,13 @@ package final class TerminalRenderer {
         // route's plan does.
         var refusals: BoundaryReuseRefusals = []
         if capture.isFullFrame() { refusals.insert(.fullCapture) }
-        if hasBakedViewTiers { refusals.insert(.viewTiers) }
-        if hadBakedViewTiers { refusals.insert(.lastFrameViewTiers) }
+        if hasUntrackedViewTiers { refusals.insert(.viewTiers) }
+        if hadBakedViewTiers, boundarySelectionStyle == nil { refusals.insert(.lastFrameViewTiers) }
+        if let heldStyle = boundarySelectionStyle, !boundarySelectionSpans.isEmpty, !selectionSpans.isEmpty,
+            heldStyle != selectionStyle
+        {
+            refusals.insert(.selectionStyle)
+        }
         if wantsFullRebuild { refusals.insert(.fullRebuild) }
         if imagesMayChange { refusals.insert(.images) }
         if backdrop != nil { refusals.insert(.backdrop) }
@@ -1240,13 +1313,13 @@ package final class TerminalRenderer {
         }
         hadBakedViewTiers = hasBakedViewTiers
         didBoundaryFrameReuseGrid = reusesGrid
-        boundaryFrameDirtyRows = reusesGrid ? Int(capture.capturedDirtyRowCount()) : Int(capture.rows())
+        boundaryFrameDirtyRows = reusesGrid ? boundaryDirtyRows.reduce(0) { $0 + ($1 != 0 ? 1 : 0) } : rowCount
         // A Delta that reproduces the glass is consumed and not encoded: it
-        // owes no row, no tier is baked either frame, and the overlay's facts
+        // owes no grid or selection row, and the overlay's facts
         // are the presented ones. The bell, a bouncing match and an animating
         // image render on the live route, which the next tick reaches once the
         // slot is empty. The drawable goes back unpresented.
-        if reusesGrid, !isCursorSliding, reproducesGlass(capture) {
+        if reusesGrid, boundaryFrameDirtyRows == 0, !isCursorSliding, reproducesGlass(capture) {
             didLastFramePresentNothing = true
             return nil
         }
@@ -1258,13 +1331,30 @@ package final class TerminalRenderer {
         }
         var backend = Ubiquitty.Rendering.GlyphBackend()
         backendBox.fillBackend(into: &backend)
-        buildWithMeasuredInk { instances.build(capture, backend: backend, view: view, scope: reusesGrid ? .Damaged : .Whole) }
-        if !keepsRowInkContained(capture, backend: backend, view: view, isLoading: reusesGrid) {
+        let keepsRows = boundaryDirtyRows.withUnsafeBufferPointer { dirty in
+            var damagedView = view
+            damagedView.overlayDirtyRows = dirty.baseAddress
+            damagedView.overlayDirtyRowCount = Int32(dirty.count)
+            buildWithMeasuredInk { instances.build(capture, backend: backend, view: damagedView, scope: reusesGrid ? .Damaged : .Whole) }
+            return keepsRowInkContained(
+                capture,
+                backend: backend,
+                view: damagedView,
+                dirtyRows: Ubiquitty.Rendering.RowBytes(dirty),
+                isLoading: reusesGrid
+            )
+        }
+        if !keepsRows {
             reusesGrid = false
             boundaryReuseRefusals.insert(.inkEscapesRow)
             didBoundaryFrameReuseGrid = false
             boundaryFrameDirtyRows = Int(capture.rows())
         }
+        boundarySelectionSpans.removeAll(keepingCapacity: true)
+        for index in 0..<Int(selectionSpans.size()) {
+            boundarySelectionSpans.append(selectionSpans[index])
+        }
+        boundarySelectionStyle = hasUntrackedViewTiers ? nil : selectionStyle
         atlas.retainFrame(viewRetainLease)
         noteSheetPressure()
         var scroll = GridScroll()

@@ -126,9 +126,21 @@ enum GridCacheSmoke {
             // that frame on; the compared pair is drawn once it has come to
             // rest, so it differs only by what the target kept: the frame
             // below Loads the target the step's frame left.
-            guard capture.pixels() != nil else {
+            guard let changed = capture.pixels() else {
                 _ = failed("the frame for \(reported) was not drawn")
                 return nil
+            }
+            let checksSelectionDamage = ["a selection drawn", "the selection grown", "the selection shrunk", "the selection cleared"]
+                .contains(name)
+            if checksSelectionDamage {
+                guard
+                    capture.surface.frameRenderers.values.contains(where: {
+                        $0.didBoundaryFrameReuseGrid && $0.boundaryFrameDirtyRows > 0 && $0.boundaryFrameDirtyRows < rows
+                    })
+                else {
+                    _ = failed("\(reported) rebuilt the whole grid instead of the selection's rows")
+                    return nil
+                }
             }
             RunLoop.main.run(until: Date(timeIntervalSinceNow: 1))
             guard let retained = capture.pixels() else {
@@ -159,6 +171,9 @@ enum GridCacheSmoke {
             if retained != full {
                 let firstRow = firstDifferingRow(retained, full, width: capture.texture.width)
                 mismatches.append("\(reported) (\(firstRow); \(positions); \(retainedFacts))")
+            }
+            if checksSelectionDamage, changed != full {
+                mismatches.append("\(reported) changed frame (\(firstDifferingRow(changed, full, width: capture.texture.width)))")
             }
         }
         let partialFrames = capture.surface.frameRenderers.values.reduce(0) { $0 + $1.partialFrameCount }
@@ -202,12 +217,16 @@ enum GridCacheSmoke {
             ("a selection colour named", { feed("\u{1b}]17;rgb:00/80/ff\u{07}") }),
             ("a selection drawn", { select(2, 3, 4, 12) }),
             ("the selection grown", { select(2, 3, 6, 20) }),
+            ("the selected fill recoloured", { feed("\u{1b}]17;rgb:ff/80/00\u{07}") }),
             ("the selection shrunk", { select(3, 1, 3, 9) }),
             ("the selection cleared", { surface.clearSelection() }),
             ("focus lost", { surface.setSurfaceFocused(false) }),
             ("focus regained", { surface.setSurfaceFocused(true) }),
             ("stacked marks above a row", { feed("\u{1b}[6;1H\u{1b}[2Ke\u{301}\u{302}\u{303}\u{304} a\u{30a}\u{30b}") }),
             ("the marks erased", { feed("\u{1b}[6;1H\u{1b}[2K") }),
+            ("selected rows before a scroll", { select(2, 3, 4, 12) }),
+            ("selected rows scrolled", { feed("\u{1b}[1S") }),
+            ("the scrolled selection cleared", { surface.clearSelection() }),
             ("history written", { feed("\u{1b}[\(rows);1H\r\nmore\r\nlines\r\nfor\r\nhistory") }),
             (
                 "the view scrolled back",
