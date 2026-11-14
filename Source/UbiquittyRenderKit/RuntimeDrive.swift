@@ -1848,12 +1848,30 @@ public final class RuntimeDrive {
     ///
     /// - Parameter capture: The frame just built.
     /// - Returns: Whether a following draw is owed, without a model read.
+    // swift-only: a borrowed capture is consumed only by the Swift frame builder
     package func hasFrameChanges(after capture: Ubiquitty.Rendering.FrameCapture) -> Bool {
         session.hasFrameChangesAfter(capture)
     }
 
     /// Boundary frames retired before the display promoted them.
     public var syncFrameOverwriteCount: UInt64 { session.syncFrameOverwriteCount() }
+
+    /// Lifetime counters belong to this drive's session, across renderer changes.
+    private var perfPromotedSeen: UInt64 = 0
+    private var perfOverwrittenSeen: UInt64 = 0
+
+    /// Takes this session's pacing growth for the shared performance log.
+    ///
+    /// - Returns: Growth since this drive's previous sample, counted once even
+    ///   when its surface changes renderer or shares one with another pane.
+    package func takeFramePacingGrowth() -> (promoted: UInt64, overwritten: UInt64) {
+        let promoted = syncFramePromoteCount
+        let overwritten = syncFrameOverwriteCount
+        let growth = (promoted: promoted - perfPromotedSeen, overwritten: overwritten - perfOverwrittenSeen)
+        perfPromotedSeen = promoted
+        perfOverwrittenSeen = overwritten
+        return growth
+    }
 
     /// Boundary frames promoted toward the display.
     public var syncFramePromoteCount: UInt64 { session.syncFramePromoteCount() }

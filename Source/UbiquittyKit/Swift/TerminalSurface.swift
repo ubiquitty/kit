@@ -2320,6 +2320,41 @@ public final class TerminalSurface: PlatformView {
     internal var windowObservers: [NSObjectProtocol] = []
     private var registeredFontsObserver: NSObjectProtocol?
     private var richTextCatalogObserver: NSObjectProtocol?
+    #if canImport(AppKit)
+    private var systemColorsObserver: NSObjectProtocol?
+    private var linkAccentAccessibilityObserver: NSObjectProtocol?
+    private var cachedLinkAccentAppearance: NSAppearance?
+    private var cachedLinkAccent: (red: Double, green: Double, blue: Double)?
+    /// Actual AppKit resolutions, rather than reads of the cached components.
+    package private(set) var linkAccentResolutionCountForTesting = 0
+
+    /// The system link emphasis under this surface's own appearance.
+    ///
+    /// - Returns: Straight sRGB components, reused until the appearance or
+    ///   system colours change, including while no link is hovered.
+    internal func systemLinkAccentComponents() -> (red: Double, green: Double, blue: Double) {
+        let appearance = effectiveAppearance
+        if cachedLinkAccentAppearance === appearance, let cachedLinkAccent {
+            return cachedLinkAccent
+        }
+        let resolved = LinkAccentColor.components(under: appearance)
+        cachedLinkAccentAppearance = appearance
+        cachedLinkAccent = resolved
+        linkAccentResolutionCountForTesting += 1
+        return resolved
+    }
+
+    /// Retires resolved system colours and the captures and pixels that carry them.
+    internal func invalidateSystemLinkAccent() {
+        let hadResolvedAccent = cachedLinkAccent != nil
+        cachedLinkAccent = nil
+        cachedLinkAccentAppearance = nil
+        guard hadResolvedAccent else { return }
+        registeredSyncStyle = nil
+        invalidateRetainedBaseline()
+        needsDisplay = true
+    }
+    #endif
 
     /// The same, for the edges NSWorkspace posts on its own notification
     /// centre. Held apart because an observer is removed from the centre it
@@ -2952,6 +2987,25 @@ public final class TerminalSurface: PlatformView {
                 self.needsDisplay = true
             }
         }
+        #if canImport(AppKit)
+        let onLinkColorChange: @Sendable (Notification) -> Void = { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.invalidateSystemLinkAccent()
+            }
+        }
+        systemColorsObserver = NotificationCenter.default.addObserver(
+            forName: NSColor.systemColorsDidChangeNotification,
+            object: nil,
+            queue: .main,
+            using: onLinkColorChange
+        )
+        linkAccentAccessibilityObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+            object: nil,
+            queue: .main,
+            using: onLinkColorChange
+        )
+        #endif
         // The configured caret, before anything can present. A terminal built
         // without this carries the construction defaults — a blinking block —
         // whatever `[cursor]` asks for, and the blink alone repaints eight
@@ -3117,6 +3171,12 @@ public final class TerminalSurface: PlatformView {
                 NotificationCenter.default.removeObserver(richTextCatalogObserver)
             }
             #if canImport(AppKit)
+            if let systemColorsObserver {
+                NotificationCenter.default.removeObserver(systemColorsObserver)
+            }
+            if let linkAccentAccessibilityObserver {
+                NSWorkspace.shared.notificationCenter.removeObserver(linkAccentAccessibilityObserver)
+            }
             // Off the centre they were added to; see `workspaceObservers`.
             for observer in workspaceObservers {
                 NSWorkspace.shared.notificationCenter.removeObserver(observer)

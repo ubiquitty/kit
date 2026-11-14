@@ -24,6 +24,11 @@ extension TerminalSurface {
     // Each of these is AppKit's name for an edge the surface already knows
     // how to answer; the body lives once, in the surface.
 
+    override public func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        invalidateSystemLinkAccent()
+    }
+
     override public func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         surfaceDidMoveToWindow()

@@ -84,6 +84,12 @@ enum SurfaceSmoke {
         guard let library = MetalPipelines.moduleShaderLibrary(for: device) else {
             return failed("no module shader library")
         }
+        if ProcessInfo.processInfo.environment["UBIQUITTY_SURFACE_SMOKE_ONLY"] == "frame-work" {
+            if let failure = frameWorkFailure(device: device, library: library) {
+                return failed(failure)
+            }
+            return passed("frame work keeps colour and pacing ownership")
+        }
         if ProcessInfo.processInfo.environment["UBIQUITTY_SURFACE_SMOKE_ONLY"] == "link-hover" {
             if let failure = linkHoverClearFailure(device: device, library: library) {
                 return failed(failure)
@@ -103,6 +109,9 @@ enum SurfaceSmoke {
             return failed("pipelines this device could not build: \(names)")
         }
         if let failure = linkHoverClearFailure(device: device, library: library) {
+            return failed(failure)
+        }
+        if let failure = frameWorkFailure(device: device, library: library) {
             return failed(failure)
         }
         guard let surface = TerminalSurface(rows: 24, columns: 80) else {
@@ -2435,6 +2444,146 @@ enum SurfaceSmoke {
         let facts = drive.borrowTerminal().map { Ubiquitty.Screen.historyFacts($0) } ?? Ubiquitty.Screen.HistoryFacts()
         drive.unlockForRead()
         return facts
+    }
+
+    /// Checks cached native colours and independent pacing-counter owners.
+    ///
+    /// - Parameters:
+    ///   - device: The smoke's Metal device.
+    ///   - library: The production shader library.
+    /// - Returns: The failed invariant, or nil.
+    private static func frameWorkFailure(device: MTLDevice, library: MTLLibrary) -> String? {
+        let wasPerfActive = SurfaceRenderer.framePerfLog.isActive()
+        SurfaceRenderer.framePerfLog.deactivate()
+        defer {
+            if wasPerfActive { SurfaceRenderer.framePerfLog.activate() }
+        }
+        guard let surface = TerminalSurface(rows: 8, columns: 64),
+            let sibling = TerminalSurface(rows: 8, columns: 64),
+            let renderer = SurfaceRenderer(device: device, library: library, familyName: "Menlo", pointSize: 12)
+        else { return "frame work: no surfaces or renderer" }
+        renderer.style = SurfaceStyle(linkHoverColorRed: 1, linkHoverColorGreen: 0.25, linkHoverColorBlue: 0.125)
+        for pane in [surface, sibling] {
+            pane.renderer = renderer
+            pane.isFrameLinkHeldOffForTesting = true
+            pane.frame = CGRect(x: 0, y: 0, width: 640, height: 192)
+            feed(pane.drive, "\u{1b}[?25l\u{1b}[2J\u{1b}[H\u{1b}]8;;https://example.com/cache\u{1b}\\CACHE\u{1b}]8;;\u{1b}\\")
+            waitForAdmittedFrame(pane)
+        }
+        let layer = CAMetalLayer()
+        renderer.prepare(layer)
+        layer.frame = surface.bounds
+        layer.contentsScale = 2
+        layer.drawableSize = CGSize(width: 1280, height: 384)
+        func draw(_ pane: TerminalSurface) -> Bool {
+            encodeAfterFontPreparation(renderer, for: pane, into: layer)
+        }
+        guard renderer.typographyTableBuildsForTesting == 0 else {
+            return "frame work: an unused renderer measured a typography table"
+        }
+        guard draw(surface) else { return "frame work: initial frame declined" }
+        let initialTables = renderer.typographyTableBuildsForTesting
+        guard initialTables > 0, draw(sibling) else { return "frame work: sibling frame declined" }
+        guard renderer.typographyTableBuildsForTesting == initialTables else {
+            return "frame work: panes sharing a measured build repeated its typography measurement"
+        }
+        guard surface.linkAccentResolutionCountForTesting == 0, sibling.linkAccentResolutionCountForTesting == 0 else {
+            return "frame work: explicit hover colours resolved an unused system colour"
+        }
+        renderer.style.linkHoverColorRed = 0
+        renderer.style.linkHoverColorGreen = 0
+        renderer.style.linkHoverColorBlue = 0
+        surface.appearance = NSAppearance(named: .aqua)
+        guard draw(surface) else { return "frame work: initial system-colour frame declined" }
+        let warmed = surface.linkAccentResolutionCountForTesting
+        guard warmed == 1 else { return "frame work: initial system colour resolved \(warmed) times" }
+        for _ in 0..<32 {
+            guard draw(surface) else { return "frame work: a cached frame declined" }
+        }
+        guard surface.linkAccentResolutionCountForTesting == warmed else {
+            return "frame work: unchanged frames repeated AppKit colour resolution"
+        }
+        guard let link = surface.viewPoint(forRow: 0, column: 2) else { return "frame work: no link cell" }
+        surface.updateLinkAffordance(atViewPoint: link, isCommandHeld: true)
+        guard draw(surface), surface.lastFrameHoverRowLast >= 0,
+            surface.linkAccentResolutionCountForTesting == warmed
+        else { return "frame work: the first hover missed its cached durable colour" }
+        for name in [
+            NSAppearance.Name.darkAqua, .vibrantLight, .vibrantDark, .accessibilityHighContrastAqua, .accessibilityHighContrastDarkAqua,
+        ] {
+            surface.appearance = NSAppearance(named: name)
+            guard draw(surface) else { return "frame work: appearance \(name.rawValue) declined" }
+            let expected = LinkAccentColor.components(under: surface.effectiveAppearance)
+            let actual = surface.lastFrameHoverColor
+            guard abs(Double(actual.red) - expected.red) < 0.001,
+                abs(Double(actual.green) - expected.green) < 0.001,
+                abs(Double(actual.blue) - expected.blue) < 0.001
+            else { return "frame work: appearance \(name.rawValue) retained the wrong accent" }
+        }
+        let notifications = [
+            (NotificationCenter.default, NSColor.systemColorsDidChangeNotification),
+            (NSWorkspace.shared.notificationCenter, NSWorkspace.accessibilityDisplayOptionsDidChangeNotification),
+        ]
+        for (center, name) in notifications {
+            let before = surface.linkAccentResolutionCountForTesting
+            center.post(name: name, object: nil)
+            guard surface.registeredSyncStyle == nil else { return "frame work: changed colours retained the capture style" }
+            guard draw(surface), surface.linkAccentResolutionCountForTesting == before + 1 else {
+                return "frame work: changed system colours were not resolved once"
+            }
+        }
+        sibling.appearance = NSAppearance(named: .aqua)
+        guard draw(sibling) else { return "frame work: sibling colour frame declined" }
+        let siblingResolutions = sibling.linkAccentResolutionCountForTesting
+        let surfaceResolutions = surface.linkAccentResolutionCountForTesting
+        guard draw(surface), draw(sibling),
+            surface.linkAccentResolutionCountForTesting == surfaceResolutions,
+            sibling.linkAccentResolutionCountForTesting == siblingResolutions
+        else { return "frame work: sharing a renderer mixed appearance caches" }
+        let tablesBefore = renderer.typographyTableBuildsForTesting
+        surface.frameRenderers.removeAll()
+        renderer.prepareFrameRenderer(for: surface)
+        guard renderer.typographyTableBuildsForTesting == tablesBefore else {
+            return "frame work: recreating a pane's renderer repeated its typography measurement"
+        }
+        NotificationCenter.default.post(
+            name: Notification.Name(kCTFontManagerRegisteredFontsChangedNotification as String),
+            object: nil
+        )
+        guard draw(surface), renderer.typographyTableBuildsForTesting == tablesBefore + 1 else {
+            return "frame work: a changed font set kept its old typography table"
+        }
+        guard draw(sibling), renderer.typographyTableBuildsForTesting == tablesBefore + 1 else {
+            return "frame work: the sibling repeated the changed font set's measurement"
+        }
+        for pane in [surface, sibling] {
+            let totals = (pane.drive.syncFramePromoteCount, pane.drive.syncFrameOverwriteCount)
+            let growth = pane.drive.takeFramePacingGrowth()
+            guard growth.promoted == totals.0, growth.overwritten == totals.1 else {
+                return "frame work: a session's initial pacing growth came from another source"
+            }
+            let repeated = pane.drive.takeFramePacingGrowth()
+            guard repeated.promoted == 0, repeated.overwritten == 0 else {
+                return "frame work: unchanged session counters were counted twice"
+            }
+        }
+        let before = surface.drive.syncFramePromoteCount
+        guard draw(surface) else { return "frame work: the next pacing sample declined" }
+        let firstGrowth = surface.drive.takeFramePacingGrowth()
+        let siblingGrowth = sibling.drive.takeFramePacingGrowth()
+        guard firstGrowth.promoted == surface.drive.syncFramePromoteCount - before,
+            siblingGrowth.promoted == 0, siblingGrowth.overwritten == 0
+        else { return "frame work: a pane's pacing growth moved its sibling's checkpoint" }
+        renderer.presentSlip.noteRefreshSeconds(1.0 / 60.0)
+        renderer.presentSlip.notePresented(atSeconds: 100)
+        renderer.presentSlip.notePresented(atSeconds: 100 + 2.0 / 60.0)
+        guard renderer.takePresentSlipGrowth() == 1, renderer.takePresentSlipGrowth() == 0 else {
+            return "frame work: the shared present meter counted one slip more than once"
+        }
+        print(
+            "[frame-work] explicit-resolutions=0 cached-frames=32 extra-resolutions=0; typography shared per build/font set; appearances, notifications and independent pacing owners passed"
+        )
+        return nil
     }
 
     /// Checks hover-only changes against the retained target, without a new

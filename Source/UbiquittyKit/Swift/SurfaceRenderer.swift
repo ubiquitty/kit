@@ -874,6 +874,8 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
     /// component. Fed by the presented handler this renderer arms under
     /// the perflog, and by the clock's refresh period.
     package let presentSlip = PresentSlipAccounting()
+    /// The shared renderer's present meter is sampled once across all its panes.
+    private var perfSlippedVsyncsSeen: UInt64 = 0
 
     /// The slip field of the UBIQUITTY_PHASE_LOG line: the refreshes presents
     /// have latched late by, or `unmeasured` while no handler counts them.
@@ -910,6 +912,13 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
 
     /// The build the next frame draws from.
     private var current: ScaledBuild
+
+    /// One exact table per measured build and registered-font generation.
+    /// Pane-local renderers share the immutable measurements, while each pane
+    /// supplies its own renderer revision when publishing the copied table.
+    private var typographyTables:
+        [Int: (generation: UInt64, languages: [String], faces: RichTextFaces, facts: Ubiquitty.RichText.TypographyFactsBuilder)] = [:]
+    package private(set) var typographyTableBuildsForTesting = 0
 
     /// Whether the frames this renderer draws are the bitmap tier.
     ///
@@ -1365,6 +1374,7 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
         builds.removeAll()
         builds[Self.scaleKey(scale)] = measured
         current = measured
+        typographyTables.removeAll()
         // Every retained target was painted under the old sheets, so none of
         // them may be kept: a stamp left standing certifies a texture drawn
         // with glyphs this configuration no longer contains. The surfaces'
@@ -1631,7 +1641,27 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
         // fallback and shaping can change while those advances stay equal.
         let richTextFaces = renderer.richTextFaces
         let rendererRevision = surface.proportionalMeasure.adoptRichText(RichTextShaper(faces: richTextFaces))
-        var facts = richTextFaces.typographyFacts(
+        var facts = typographyTable(for: richTextFaces)
+        facts.setRendererRevision(rendererRevision)
+        surface.drive.publishTypography(facts)
+        return renderer
+    }
+
+    /// Copies a build's exact metrics, retiring them when font fallback can change.
+    ///
+    /// - Parameter faces: The class faces the frame renderer draws.
+    /// - Returns: A copy ready for the pane's renderer revision.
+    private func typographyTable(for faces: RichTextFaces) -> Ubiquitty.RichText.TypographyFactsBuilder {
+        let key = Self.scaleKey(current.font.atlasScale)
+        let generation = RichTextFontCatalogCache.shared.registrationGeneration
+        let languages = Locale.preferredLanguages
+        if let cached = typographyTables[key], cached.generation == generation, cached.languages == languages,
+            faces.hasSameClassFaces(as: cached.faces)
+        {
+            return cached.facts
+        }
+        let font = current.font
+        let facts = faces.typographyFacts(
             cellWidthInPoints: font.cellWidthInPoints,
             cellHeightInPoints: font.cellHeightInPoints,
             baselineInPoints: font.cellHeightInPoints - (font.baselinePenInPixels - Double(font.geometry.glyphMarginInPixels.height))
@@ -1643,9 +1673,9 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
             ),
             monospaceSizeInPoints: pointSize
         )
-        facts.setRendererRevision(rendererRevision)
-        surface.drive.publishTypography(facts)
-        return renderer
+        typographyTables[key] = (generation, languages, faces, facts)
+        typographyTableBuildsForTesting += 1
+        return facts
     }
 
     /// The key a scale selects a build with.
@@ -2670,17 +2700,23 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
         let interval = surface.drive.presentationFrameIntervalSeconds
         sample.refreshSeconds = interval > 0 ? interval : 1.0 / 60.0
         presentSlip.noteRefreshSeconds(sample.refreshSeconds)
-        Self.framePerfLog.notePacing(
-            surface.drive.syncFramePromoteCount,
-            surface.drive.syncFrameOverwriteCount,
-            0,
-            presentSlip.slippedVsyncs
-        )
+        let growth = surface.drive.takeFramePacingGrowth()
+        Self.framePerfLog.notePacing(growth.promoted, growth.overwritten, 0, takePresentSlipGrowth())
         Self.framePerfLog.noteFrame(sample, CACurrentMediaTime())
         let report = presentLeg.drainFrame()
         if report.count > 0 {
             Ubiquitty.Runtime.PresentLegMeter.printReport(report)
         }
+    }
+
+    /// Takes growth from this renderer's shared present meter once.
+    ///
+    /// - Returns: Slipped refreshes since the previous sample from any pane.
+    func takePresentSlipGrowth() -> UInt64 {
+        let slippedVsyncs = presentSlip.slippedVsyncs
+        let growth = slippedVsyncs - perfSlippedVsyncsSeen
+        perfSlippedVsyncsSeen = slippedVsyncs
+        return growth
     }
 
     /// Encodes one frame into a pass, presenting only when a caller has a
@@ -3114,14 +3150,20 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
         let hasHostHoverColor =
             style.linkHoverColorRed > 0 || style.linkHoverColorGreen > 0
             || style.linkHoverColorBlue > 0
-        #if canImport(AppKit)
-        let accent = LinkAccentColor.components(under: surface.effectiveAppearance)
-        #else
-        let accent = LinkAccentColor.components
-        #endif
-        linkHoverColor.x = Float(hasHostHoverColor ? style.linkHoverColorRed : accent.red)
-        linkHoverColor.y = Float(hasHostHoverColor ? style.linkHoverColorGreen : accent.green)
-        linkHoverColor.z = Float(hasHostHoverColor ? style.linkHoverColorBlue : accent.blue)
+        if hasHostHoverColor {
+            linkHoverColor.x = Float(style.linkHoverColorRed)
+            linkHoverColor.y = Float(style.linkHoverColorGreen)
+            linkHoverColor.z = Float(style.linkHoverColorBlue)
+        } else {
+            #if canImport(AppKit)
+            let accent = surface.systemLinkAccentComponents()
+            #else
+            let accent = LinkAccentColor.components
+            #endif
+            linkHoverColor.x = Float(accent.red)
+            linkHoverColor.y = Float(accent.green)
+            linkHoverColor.z = Float(accent.blue)
+        }
         linkHoverColor.w = Float(style.linkHoverColorAlpha)
         let frameLinks = FrameLinkInputs(
             shouldUnderlineLinks: style.shouldUnderlineLinks,

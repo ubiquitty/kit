@@ -106,6 +106,13 @@ package final class RichTextFontCatalogCache: @unchecked Sendable {
         defer { lock.unlock() }
         return publishedGeneration
     }
+
+    /// The registered-font set the cached class-face measurements were made under.
+    package var registrationGeneration: UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return revision
+    }
 }
 
 /// The faces a rich text block is set in.
@@ -153,6 +160,18 @@ package struct RichTextFaces {
 
     /// Begins the shared inventory when the first block reaches a frame.
     package func prepareCatalog() { _ = catalogCache.catalog() }
+
+    /// Whether two tables measure the same immutable native class faces.
+    ///
+    /// - Parameter other: The faces behind a cached table.
+    /// - Returns: Whether all twelve class faces are CoreText-equivalent.
+    // swift-only: native CTFont identity stays within the Swift rendering modules
+    package func hasSameClassFaces(as other: RichTextFaces) -> Bool {
+        func matches(_ first: [CTFont], _ second: [CTFont]) -> Bool {
+            first.count == second.count && zip(first, second).allSatisfy { CFEqual($0, $1) }
+        }
+        return matches(gridStyles, other.gridStyles) && matches(sansStyles, other.sansStyles) && matches(serifStyles, other.serifStyles)
+    }
 
     /// The process inventory plus the exact class faces this renderer publishes.
     package func familyNames(in catalog: RichTextFontCatalog) -> [String] {

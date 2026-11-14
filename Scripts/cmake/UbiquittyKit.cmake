@@ -518,6 +518,8 @@ function(ubiquitty_kit_add_layout_probe)
     set(target ubiquitty-kit-layout-probe)
     add_library(${target} SHARED "${probe}/LayoutProbe.swift" "${probe}/ArchiveLayout.cpp")
     target_sources(${target} PRIVATE "${UBIQUITTY_SWIFT_INTEROP_STAMP}")
+    # Xcode requires one ordered owner of a generated source shared by targets.
+    add_dependencies(${target} UbiquittyRenderKit)
     target_include_directories(${target} PRIVATE ${UBIQUITTY_SOURCE_INCLUDE_DIRECTORIES} "${probe}")
     set_target_properties(${target} PROPERTIES
         CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF
