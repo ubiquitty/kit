@@ -113,17 +113,23 @@ for runtime, rows in json.load(sys.stdin)["devices"].items():
     done
 }
 
-# The newest iOS runtime that can make the checkout's device type. A runtime
-# carries its own list of the models it supports — a Duo-only preview image
+# The newest iOS runtime within the selected SDK that can make the device type.
+# A runtime carries its own supported models — a Duo-only preview image
 # supports one — and the newest runtime outright would refuse every other
 # model while an older runtime, still within the product's floor, makes it.
 ubq_ios_newest_runtime() {
-    xcrun simctl list runtimes -j 2>/dev/null | UBQ_DEVICE_TYPE="$(ubq_ios_device_type)" /usr/bin/python3 -c '
+    local sdk
+    sdk="$(xcrun --sdk iphonesimulator --show-sdk-version 2>/dev/null)" || return 2
+    xcrun simctl list runtimes -j 2>/dev/null | UBQ_DEVICE_TYPE="$(ubq_ios_device_type)" UBQ_SIMULATOR_SDK="$sdk" /usr/bin/python3 -c '
 import json, os, sys
 wanted = os.environ["UBQ_DEVICE_TYPE"]
-runtimes = [r for r in json.load(sys.stdin)["runtimes"] if r.get("isAvailable") and "iOS" in r.get("name", "")]
+def version(text):
+    parts = tuple(int(part) for part in text.split("."))
+    return parts + (0,) * max(0, 3 - len(parts))
+sdk = version(os.environ["UBQ_SIMULATOR_SDK"])
+runtimes = [r for r in json.load(sys.stdin)["runtimes"] if r.get("isAvailable") and "iOS" in r.get("name", "") and version(r["version"]) <= sdk]
 able = [r for r in runtimes if any(t.get("name") == wanted or t.get("identifier") == wanted for t in r.get("supportedDeviceTypes", []))]
-print((able or runtimes)[-1]["identifier"] if runtimes else "")'
+print(max(able, key=lambda r: version(r["version"]))["identifier"] if able else "")'
 }
 
 # Finds or creates the checkout's device and boots it. UBQ_IOS_DEVICE holds the
@@ -134,7 +140,8 @@ ubq_ios_device_acquire() { # <caller, for messages>
     name="$(ubq_ios_device_name)"
     ubq_ios_prune_simulators
     runtime="$(ubq_ios_newest_runtime)"
-    [ -n "$runtime" ] || { echo "$caller: no available iOS simulator runtime" >&2; return 2; }
+    [ -n "$runtime" ] || { echo "$caller: no available iOS simulator runtime within the selected SDK supports $(ubq_ios_device_type)" >&2; return 2; }
+    echo "$caller: $(ubq_ios_device_type) on $runtime" >&2
     ubq_ios_retire_stale_devices "$name" "$runtime"
     found="$(ubq_ios_device_lookup "$name" "$runtime")"
     if [ -z "$found" ]; then
