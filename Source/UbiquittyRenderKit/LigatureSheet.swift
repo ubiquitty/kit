@@ -102,26 +102,18 @@ package final class LigatureSheet {
         let glyphs: [GroupGlyph]
         let rasterKey: [UInt32]
     }
-    /// Jobs are immutable; results cross to the caller only after all workers finish.
-    private final class ShapeBatch: @unchecked Sendable {
+    /// Runs stay on the caller so shaping one face cannot contend with itself.
+    private final class ShapeBatch {
         let jobs: [(Int, NSAttributedString)]
-        private let lock = NSLock()
-        private var lines: [Int: CTLine] = [:]
 
         init(jobs: [(Int, NSAttributedString)]) { self.jobs = jobs }
 
         func perform() -> [Int: CTLine] {
-            let workerCount = min(4, jobs.count)
-            DispatchQueue.concurrentPerform(iterations: workerCount) { worker in
-                autoreleasepool {
-                    var completed: [(Int, CTLine)] = []
-                    for index in stride(from: worker, to: self.jobs.count, by: workerCount) {
-                        let job = self.jobs[index]
-                        completed.append((job.0, CTLineCreateWithAttributedString(job.1)))
-                    }
-                    self.lock.lock()
-                    for (index, line) in completed { self.lines[index] = line }
-                    self.lock.unlock()
+            var lines: [Int: CTLine] = [:]
+            lines.reserveCapacity(jobs.count)
+            autoreleasepool {
+                for (index, text) in jobs {
+                    lines[index] = CTLineCreateWithAttributedString(text)
                 }
             }
             return lines
