@@ -3146,6 +3146,14 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
             hoverTextDigest: hovered?.textDigest ?? 0
         )
         applyFrameLinks(to: &options, frameLinks)
+        surface.noteFrameHoverRun(
+            isActive: options.isHoverLinkActive,
+            rowFirst: options.hoverLinkRowFirst,
+            rowLast: options.hoverLinkRowLast,
+            columnFirst: options.hoverLinkColumnFirst,
+            columnLast: options.hoverLinkColumnLast,
+            color: (options.linkHoverColor.x, options.linkHoverColor.y, options.linkHoverColor.z)
+        )
 
         // Register the boundary-capture geometry whenever the drawable's
         // placement changed: the session captures each completed DECSET-2026
@@ -3349,10 +3357,14 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
         if let syncFrame = taken {
             let selection = surface.selectionModel
             let spanCount = Int(supply.selection.count)
-            // Live changes can follow the captured boundary before this display
-            // request is consumed. On-demand presentation needs another pass
-            // to observe them even when no further output arrives.
-            defer { surface.askForAnotherFrame() }
+            // A capture can lag published output or a view registration, but
+            // a current one owes no second draw. Check after the build so
+            // changes that arrived during it still get their following pass.
+            defer {
+                if surface.drive.hasFrameChanges(after: syncFrame) {
+                    surface.askForAnotherFrame()
+                }
+            }
             let modelTakenAt = isPerfLogged ? CACurrentMediaTime() : 0
             renderer.notePaintHeat(of: syncFrame)
             // Content captures freeze the grid, while the cursor overlay follows

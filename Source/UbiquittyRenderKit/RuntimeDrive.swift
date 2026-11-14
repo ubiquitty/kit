@@ -1844,6 +1844,14 @@ public final class RuntimeDrive {
         session.takeFrame(demand, &supply)
     }
 
+    /// Whether published model or view state has moved past a captured frame.
+    ///
+    /// - Parameter capture: The frame just built.
+    /// - Returns: Whether a following draw is owed, without a model read.
+    package func hasFrameChanges(after capture: Ubiquitty.Rendering.FrameCapture) -> Bool {
+        session.hasFrameChangesAfter(capture)
+    }
+
     /// Boundary frames retired before the display promoted them.
     public var syncFrameOverwriteCount: UInt64 { session.syncFrameOverwriteCount() }
 

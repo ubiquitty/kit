@@ -1923,6 +1923,12 @@ public final class TerminalSurface: PlatformView {
     /// instead.
     package internal(set) var framesEncodedForTesting = 0
 
+    /// Completed frame decisions, including captures that already match the glass.
+    /// Unlike an attempt, one has consumed its capture rather than awaiting it.
+    package var framesResolvedForTesting: Int {
+        framesEncodedForTesting + ((renderer as? SurfaceRenderer)?.skippedAsReproducingGlassCount ?? 0)
+    }
+
     /// Called on the main thread after each frame this surface encodes into
     /// its layer, with the retained grid already holding that frame: the one
     /// seam a scenario reads every presented frame through, rather than

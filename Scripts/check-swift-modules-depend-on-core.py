@@ -83,11 +83,11 @@ STAMP = "UBIQUITTY_SWIFT_INTEROP_STAMP"
 INTEROP_FLAG = "-cxx-interoperability-mode"
 FLAGS_VARIABLE = re.compile(r'set\((\w*SWIFT_FLAGS)\b((?:(?!\)).)*)\)', re.S)
 
-# A Swift module is a target carrying Swift_MODULE_NAME. Finding them this way
-# rather than from a list here is the point: a new Swift module is covered on
-# the day it is written, not on the day someone remembers this file.
-MODULE_NAME = re.compile(r'set_target_properties\((\w+)\s+PROPERTIES(?:(?!\)).)*?Swift_MODULE_NAME', re.S)
-DECLARES = re.compile(r'add_(?:library|executable)\((\w+)\b((?:(?!\)).)*)\)', re.S)
+# Mixed-language targets can carry a literal Swift source without setting a
+# module name. Function-local target variables are targets too.
+TARGET = r'(?:[A-Za-z_][A-Za-z0-9_-]*|\$\{[A-Za-z_][A-Za-z0-9_]*\})'
+MODULE_NAME = re.compile(rf'set_target_properties\(({TARGET})\s+PROPERTIES(?:(?!\)).)*?Swift_MODULE_NAME', re.S)
+DECLARES = re.compile(rf'add_(?:library|executable)\(({TARGET})(?=\s|\))((?:(?!\)).)*)\)', re.S)
 VARIABLE = re.compile(r'\$\{(\w+)\}')
 
 
@@ -158,7 +158,7 @@ def inlinesCore(text, target, interopVariables):
                     break
             index += 1
         block = text[at:index]
-        if any(variable in block for variable in interopVariables):
+        if INTEROP_FLAG in block or any(variable in block for variable in interopVariables):
             return True
         at = text.find(opening, index)
     return False
@@ -187,6 +187,8 @@ def checkOneList(root, listing, interopVariables, findings, covered, exempt):
         return None
 
     swiftTargets = {match.group(1) for match in MODULE_NAME.finditer(text)}
+    swiftTargets.update(match.group(1) for match in DECLARES.finditer(text)
+                        if re.search(r'\.swift(?=["\s]|$)', match.group(2)))
     if not swiftTargets:
         return None
 
@@ -210,7 +212,7 @@ def checkTargets(text, listing, needing, findings, covered):
 
     # target_sources takes a target by name, so it needs no ordering argument.
     givenDirectly = set(re.findall(
-        rf'target_sources\((\w+)\s+PRIVATE\s+"\$\{{{STAMP}\}}"\)', text))
+        rf'target_sources\(({TARGET})\s+PRIVATE\s+"\$\{{{STAMP}\}}"\)', text))
 
     for declaration in DECLARES.finditer(text):
         target, sources = declaration.group(1), declaration.group(2)

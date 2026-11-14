@@ -158,6 +158,7 @@ fi
 if wanted swift_modules_depend_on_core; then
     echo "=== swift_modules_depend_on_core ==="
     RAN=$((RAN + 1))
+    python3 "$ROOT/Tests/Tools/test_swift_core_dependencies.py" || exit 1
     python3 "$ROOT/Scripts/check-swift-modules-depend-on-core.py" || exit 1
 fi
 
