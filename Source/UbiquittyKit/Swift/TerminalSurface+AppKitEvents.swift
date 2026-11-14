@@ -83,9 +83,9 @@ extension TerminalSurface {
         }
     }
 
-    /// Ends the live resize ``beginLiveResize()`` opened: the grid is fitted
-    /// to the final bounds, the scrollback is rewrapped once at the final
-    /// width, and a frame of the settled grid is drawn.
+    /// Ends the live resize ``beginLiveResize()`` opened: the scrollback is
+    /// rewrapped once at the current width, and a frame of the settled grid
+    /// is drawn.
     ///
     /// A host that opened the resize calls this when the pointer is released.
     public func endLiveResize() {
@@ -121,16 +121,14 @@ extension TerminalSurface {
         resizeRunSettle = nil
         // A delete after the drag is a delete again.
         isHoldingImageGapsForResize = false
-        // The drag's anchoring ends with the drag: the settled grid is fitted
-        // top-anchored to the bounds the reader stopped at.
+        // The drag's anchoring ends with the drag. Its last bounds change
+        // already published the viewport; settling moves no bounds and must
+        // not overwrite a newer program-requested grid with the old width.
         liveResizeStartWindowFrame = .zero
         drive.setLiveResize(.Idle)
         isLiveResizeBottomFixed = false
-        refitGridToBounds()
         // The one full-history rewrap the drag's steps deferred. After the
-        // last step, so it rewraps to the width the reader stopped at. The
-        // refit carried the view across its own resize, so the settle's carry
-        // starts from the history the refit left.
+        // last step, at Core's current dimensions and recorded anchor.
         noteViewportBeforeResize()
         drive.settleResize()
         carryViewOffsetAcrossResize()

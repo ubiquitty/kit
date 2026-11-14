@@ -2455,10 +2455,9 @@ public final class TerminalSurface: PlatformView {
 
     /// Fits the grid to the bounds afresh, whatever grid stands published.
     ///
-    /// For a caller whose grid may already hold the row count the bounds
-    /// give and still needs Core's fit run: a drag's settle, which lays out
-    /// top-anchored what its steps laid out bottom-anchored. The observer
-    /// hears only a grid that differs from the one standing.
+    /// A style change can need Core's fit even when the published grid has
+    /// the row count the new metrics give. The observer hears only a grid
+    /// that differs from the one standing.
     internal func refitGridToBounds() {
         let standingGrid = publishedGrid
         publishedGrid = (0, 0)
