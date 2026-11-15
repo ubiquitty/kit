@@ -97,6 +97,11 @@ void main()
             coverage = clamp((top * (64 - weight.y) + bottom * weight.y + 2048) >> 12, 0, 255);
         }
     }
+    // Palette opacity and SGR blink scale the coverage byte, as Core's
+    // withForegroundCoverage does for both opaque glyphs and ink over images.
+    int foregroundAlpha = clamp(int(abs(inForeground.a) * 255.0 + 0.5), 0, 255);
+    if (foregroundAlpha != 255)
+        coverage = (coverage * foregroundAlpha + 127) / 255;
     if (coverage == 0)
         discard;
     if (isOverTarget) {

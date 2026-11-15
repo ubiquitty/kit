@@ -133,8 +133,8 @@ public:
     ///   - rasterContext: This window's capture and style state, shared with its CPU path.
     ///   - term: The terminal to draw; null fails.
     ///   - outRGBA: Receives the pixels, widthOut × heightOut × 4 bytes.
-    ///   - widthOut: Set to columns × cellWidth.
-    ///   - heightOut: Set to rows × cellHeight.
+    ///   - widthOut: Set to the authored viewport width, or columns × cellWidth.
+    ///   - heightOut: Set to the authored viewport height, or rows × cellHeight.
     ///   - viewOffset: The scrollback window (0 = live tail), as the pane's view
     ///     holds it; resolved here (``Screen::resolvedViewOffset``), and a
     ///     window into history suppresses the cursor.
@@ -153,7 +153,12 @@ public:
     ///     an empty handoff is never called.
     ///   - capturedFrame: An admitted parser-boundary frame; when supplied,
     ///     its owned cells, palette, clusters and images replace the live read.
-    bool renderGrid(RasterContext& rasterContext, Ubiquitty::Terminal* term, std::vector<uint8_t>& outRGBA, int& widthOut, int& heightOut, int viewOffset = 0, Ubiquitty::Selection::Session* selection = nullptr, const CursorOverlay* cursor = nullptr, uint32_t blinkTicks = 0, ModelCaptureHandoff handoff = {}, const Rendering::FrameCapture* capturedFrame = nullptr, const Rendering::FrameCapture::ViewTierOverrides* capturedView = nullptr);
+    ///   - capturedView: Per-view tiers applied over the admitted capture.
+    ///   - frameGeometry: The live drawable and grid origin; null selects the
+    ///     grid alone. An admitted capture retains its own authored geometry.
+    ///     Integral device-pixel origins match the CPU path and allow retained
+    ///     scroll copies; fractional origins require a full GPU redraw.
+    bool renderGrid(RasterContext& rasterContext, Ubiquitty::Terminal* term, std::vector<uint8_t>& outRGBA, int& widthOut, int& heightOut, int viewOffset = 0, Ubiquitty::Selection::Session* selection = nullptr, const CursorOverlay* cursor = nullptr, uint32_t blinkTicks = 0, ModelCaptureHandoff handoff = {}, const Rendering::FrameCapture* capturedFrame = nullptr, const Rendering::FrameCapture::ViewTierOverrides* capturedView = nullptr, const Runtime::SyncFrameCaptureGeometry* frameGeometry = nullptr);
 
     // Drop the GPU glyph atlas so the next renderGrid rebuilds it from the
     // currently-injected rasterizer. Idles the device first; cell dims + target
@@ -484,9 +489,12 @@ private:
     VkDescriptorSet m_descriptorSet = VK_NULL_HANDLE;
     VkDescriptorSet m_proportionalDescriptorSet = VK_NULL_HANDLE;
     VkDescriptorSet m_proportionalStripDescriptorSet = VK_NULL_HANDLE;
+    VkDescriptorSet m_decorationDescriptorSet = VK_NULL_HANDLE;
+    VkSampler m_decorationSampler = VK_NULL_HANDLE;
     bool m_descriptorWritten = false;
     bool m_isProportionalDescriptorWritten = false;
     bool m_isProportionalStripDescriptorWritten = false;
+    bool m_isDecorationDescriptorWritten = false;
 
     VkImageView m_colorView = VK_NULL_HANDLE; // view of m_image as a color attachment
     VkFramebuffer m_framebuffer = VK_NULL_HANDLE;
@@ -706,13 +714,19 @@ private:
     int m_letterColumns = 0;
     // Read and advanced by Core's planRetainedFrame; this side only stores it.
     Ubiquitty::Rendering::RetainedFrameBaseline m_retainedBaseline;
+    // The settings baked into the pair after its latest successful submit,
+    // shared by live and boundary captures. Settings can change without any
+    // model cell changing, so both paths require a match before loading it.
+    std::optional<Rendering::RenderConfiguration> m_retainedTargetConfiguration;
+    FloatPoint m_retainedTargetOrigin {};
+    std::vector<Rendering::OverlayInstance> m_marginStrips;
+    std::vector<VkClearRect> m_marginClearRects;
     // The boundary-frame lineage whose pixels the retained pair holds. The
     // terminal identity separates independent panes whose record numbers match.
     const Ubiquitty::Terminal* m_capturedTargetOwner = nullptr;
     std::uint64_t m_capturedTargetSequence = 0;
     std::uint64_t m_capturedTargetViewGeneration = 0;
     std::uint64_t m_capturedTargetPaletteGeneration = 0;
-    std::optional<Rendering::RenderConfiguration> m_capturedTargetConfiguration;
     bool m_doesCapturedTargetHaveViewTiers = false;
     bool m_doesCapturedTargetHaveImages = false;
     // Core owns live link classification, including OSC 8, spans and digest

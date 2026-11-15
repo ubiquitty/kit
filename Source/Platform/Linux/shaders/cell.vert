@@ -18,6 +18,8 @@ layout(location = 6) in vec2 inAtlasMax; // glyph UV bottom-right          @56
 layout(push_constant) uniform Push {
     vec2 viewportSize; // pixels (cols*cellWidth, rows*cellHeight)
     vec2 cellSize; // pixels
+    vec2 samplingFlags;
+    vec2 gridOrigin; // shared frame origin inside the drawable
 }
 pc;
 
@@ -42,7 +44,7 @@ const vec2 kCorners[6] = vec2[](
 void main()
 {
     vec2 corner = kCorners[gl_VertexIndex];
-    vec2 originPx = inGridPosition * pc.cellSize;
+    vec2 originPx = pc.gridOrigin + inGridPosition * pc.cellSize;
     vec2 sizePx = vec2(inWidthCells * pc.cellSize.x, pc.cellSize.y);
     vec2 px = originPx + corner * sizePx;
     vec2 ndc = px / pc.viewportSize * 2.0 - 1.0; // Vulkan: (-1,-1) = top-left

@@ -6,6 +6,9 @@
 #include "Core/Rendering/BeamLayout.h"
 #include "Core/Rendering/GlyphRasterizer.h"
 #include "Core/Rendering/HintToastLayout.h"
+#include "Core/Rendering/TerminalFrameInputs.h"
+#include "Core/Rendering/UnifontRasterizer.h"
+#include "Core/Runtime/TerminalSession.h"
 #include "Core/Screen/Addressing.h"
 #include "Core/Terminal.h"
 #include "Core/TerminalOperations.h"
@@ -101,6 +104,81 @@ TEST(twoLinuxRasterContextsKeepTheirOwnMetricsScaleAndCursorStyle)
     firstStyle.backgroundOpacity = 0.5;
     first.setRenderConfiguration(firstStyle);
     CHECK(second.backgroundOpacity() == 0.75f);
+}
+
+TEST(linuxFrameGeometryKeepsProceduralPhasesSeparateFromBitmapMasks)
+{
+    using namespace Ubiquitty::Rendering;
+    struct NativeRasterizer final : GlyphRasterizer {
+        CellMetrics cellMetrics() const override { return { .cellWidth = 8, .cellHeight = 16 }; }
+        int glyphPhaseCount() const override { return 4; }
+        bool rasterizeGlyph(std::uint32_t, FontFace, std::uint32_t, int, int, std::uint8_t*) override { return false; }
+    } native;
+    UnifontRasterizer bitmap;
+    Ubiquitty::Linux::RasterContext context;
+    context.setGlyphRasterizer(bitmap);
+    for (int bitmapScale : { 1, 2 }) {
+        context.setEmbeddedBitmapScale(bitmapScale);
+        CHECK_EQ(context.glyphPhaseCount(), 1);
+        CHECK_EQ(context.frameGeometryPhaseCount(), 8);
+        CHECK_EQ(context.frameCaptureGeometry().subpixelPhaseCount, 8);
+    }
+    // Switching the same context back to a native face must publish its own
+    // grid in captures as well as in the live Vulkan frame's query.
+    context.setGlyphRasterizer(native);
+    context.setEmbeddedBitmapScale(0);
+    CHECK_EQ(context.glyphPhaseCount(), 4);
+    CHECK_EQ(context.frameGeometryPhaseCount(), 4);
+    CHECK_EQ(context.frameCaptureGeometry().subpixelPhaseCount, 4);
+}
+
+TEST(linuxCapturesPublishHealingParticipationBeforeEitherAtlasExists)
+{
+    using namespace Ubiquitty::Rendering;
+    struct ContextualRasterizer final : GlyphRasterizer {
+        CellMetrics cellMetrics() const override { return { .cellWidth = 8, .cellHeight = 16 }; }
+        bool hasLigatureShaping() const override { return true; }
+        bool rasterizeGlyph(std::uint32_t, FontFace, std::uint32_t, int, int, std::uint8_t*) override { return false; }
+        int shapeTextRun(std::span<const std::uint32_t> codePoints, std::uint32_t, std::span<ShapedGlyph> glyphs) override
+        {
+            ++shapeCalls;
+            if (glyphs.size() < codePoints.size())
+                return 0;
+            for (std::size_t index = 0; index < codePoints.size(); ++index)
+                glyphs[index] = { codePoints[index] + (shouldHeal && codePoints.size() > 1 ? 1000u : 0u), 8, 0, 0, static_cast<int>(index) };
+            return static_cast<int>(codePoints.size());
+        }
+        bool shouldHeal = false;
+        unsigned shapeCalls = 0;
+    } healing, operators;
+    healing.shouldHeal = true;
+
+    Ubiquitty::Linux::RasterContext context;
+    CHECK(context.frameCaptureGeometry().glyphSlot.ligatureParticipation == LigatureParticipation::OperatorRuns);
+    context.setGlyphRasterizer(healing);
+    const unsigned firstProbeCalls = healing.shapeCalls;
+    REQUIRE(firstProbeCalls > 1);
+    const auto firstGeometry = context.frameCaptureGeometry();
+    CHECK(firstGeometry.glyphSlot.ligatureParticipation == LigatureParticipation::AllEligibleRuns);
+    auto terminal = passiveTerminal();
+    TerminalFrameInputs capture;
+    TerminalSnapshotOptions options;
+    REQUIRE(capture.capture(*terminal, options, firstGeometry.metrics, firstGeometry.glyphSlot));
+    CHECK(capture.inputs().ligatureParticipation == LigatureParticipation::AllEligibleRuns);
+    CHECK(context.frameCaptureGeometry().glyphSlot.ligatureParticipation == LigatureParticipation::AllEligibleRuns);
+    CHECK_EQ(healing.shapeCalls, firstProbeCalls);
+
+    context.setGlyphRasterizer(operators);
+    const unsigned secondProbeCalls = operators.shapeCalls;
+    REQUIRE(secondProbeCalls > 1);
+    CHECK(context.frameCaptureGeometry().glyphSlot.ligatureParticipation == LigatureParticipation::OperatorRuns);
+    CHECK_EQ(operators.shapeCalls, secondProbeCalls);
+    CHECK_EQ(healing.shapeCalls, firstProbeCalls);
+    // A queued immutable capture retains the old face's decision after a swap.
+    CHECK(capture.inputs().ligatureParticipation == LigatureParticipation::AllEligibleRuns);
+    context.setGlyphRasterizer(healing);
+    CHECK(context.frameCaptureGeometry().glyphSlot.ligatureParticipation == LigatureParticipation::AllEligibleRuns);
+    CHECK(healing.shapeCalls > firstProbeCalls);
 }
 
 // kitty's cursor_text reaches the cursor both Linux renderers draw: the GTK
@@ -246,3 +324,65 @@ TEST(aTektronixFrameIsTheTubeOnTheLinuxCPURaster)
 }
 
 UBIQUITTY_TEST_MAIN()
+
+TEST(linuxFrameViewportPreservesInternalPaddingAndItsBackground)
+{
+    MetricsRasterizer face(7, 13);
+    Ubiquitty::Linux::RasterContext context;
+    context.setGlyphRasterizer(face);
+    auto configuration = context.renderConfiguration();
+    configuration.backgroundOpacity = 128.0 / 255.0;
+    context.setRenderConfiguration(configuration);
+    auto terminal = passiveTerminal();
+    terminal->palette.defaultBackground = { 0x1212, 0x2222, 0x3333 };
+    Ubiquitty::Linux::CursorOverlay cursor;
+    for (const auto origin : { Ubiquitty::FloatPoint { 4, 6 }, Ubiquitty::FloatPoint { 9, 3 } }) {
+        const auto geometry = context.frameCaptureGeometry(origin, { 68, 58 });
+        CHECK(geometry.originInPixels.x == origin.x && geometry.originInPixels.y == origin.y);
+        std::vector<std::uint8_t> pixels;
+        int width = 0;
+        int height = 0;
+        CHECK(context.rasterizeTerm(terminal.get(), pixels, width, height, 0, nullptr, &cursor, 0, nullptr, &geometry));
+        CHECK(width == 68 && height == 58);
+        for (const auto corner : { Ubiquitty::IntPoint { 0, 0 }, Ubiquitty::IntPoint { 67, 0 }, Ubiquitty::IntPoint { 0, 57 }, Ubiquitty::IntPoint { 67, 57 } }) {
+            const auto offset = (static_cast<std::size_t>(corner.y) * width + corner.x) * 4;
+            CHECK(pixels[offset] == 0x12 && pixels[offset + 1] == 0x22 && pixels[offset + 2] == 0x33 && pixels[offset + 3] == 128);
+        }
+        const auto firstInk = (static_cast<std::size_t>(origin.y) * width + static_cast<std::size_t>(origin.x)) * 4;
+        CHECK(pixels[firstInk] != 0x12 || pixels[firstInk + 1] != 0x22 || pixels[firstInk + 2] != 0x33);
+    }
+}
+
+TEST(richLayerOcclusionUsesTheAuthoredPaddedGridOrigin)
+{
+    MetricsRasterizer face(7, 13);
+    Ubiquitty::Linux::RasterContext context;
+    context.setGlyphRasterizer(face);
+    auto terminal = passiveTerminal();
+    Ubiquitty::Rendering::BeamGeometry beam;
+    beam.canvas.resizeAndBlank(1, 1);
+    beam.originColumn = 1;
+    beam.originRow = 2;
+    context.setBeamChrome(&beam);
+    Ubiquitty::Rendering::HintToastGeometry hint;
+    hint.canvas.resizeAndBlank(1, 1);
+    hint.originColumn = 3;
+    hint.originRow = 1;
+    context.setHintChrome(&hint);
+    const std::uint32_t preedit[] = { 0x732b };
+    context.setPreedit(preedit, 1);
+    const auto regions = context.snapshotOverlayRegions(*terminal, 0, { 11, 17 });
+    REQUIRE(regions.size() == 3);
+    CHECK(regions[0].origin.x == 18 && regions[0].origin.y == 43);
+    CHECK(regions[1].origin.x == 32 && regions[1].origin.y == 30);
+    CHECK(regions[2].origin.x == 32 && regions[2].origin.y == 17);
+    CHECK(regions[0].size.width == 7 && regions[0].size.height == 13);
+    CHECK(regions[2].size.width == 14 && regions[2].size.height == 13);
+    const auto otherPane = context.snapshotOverlayRegions(*terminal, 0, { 5, 3 });
+    REQUIRE(otherPane.size() == 3);
+    CHECK(otherPane[0].origin.x == 12 && otherPane[0].origin.y == 29);
+    CHECK(otherPane[2].origin.x == 26 && otherPane[2].origin.y == 3);
+    const auto legacy = context.snapshotOverlayRegions(*terminal, 0);
+    REQUIRE(legacy.size() == 3);
+    CHECK(legacy[2].origin.x == 21 && legacy[2].origin.y == 0);
+}

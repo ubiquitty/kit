@@ -1852,10 +1852,15 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
         let isTekMode = snapshot.isTekModeActive
         let isFullscreenContent = snapshot.modes.isFullscreenContentActive
         let isCursorVisible = snapshot.isCursorVisible
-        let shouldPresentNonOwner =
-            style.nonOwnerPresentation != .letterbox
-            && surface.drive.isRemoteGeometryOwnedElsewhere
-            && !isTekMode && !isFullscreenContent
+        var clipRequest = Ubiquitty.Rendering.RemoteViewportRequest()
+        switch style.nonOwnerPresentation {
+        case .fit: clipRequest.policy = .Fit
+        case .pan: clipRequest.policy = .Pan
+        case .letterbox: clipRequest.policy = .Letterbox
+        }
+        clipRequest.isGeometryOwnedElsewhere = surface.drive.isRemoteGeometryOwnedElsewhere
+        clipRequest.isProgramViewport = isTekMode || isFullscreenContent
+        let shouldPresentNonOwner = Ubiquitty.Rendering.shouldClipRemoteViewport(clipRequest)
         var geometry = resolvedGeometry(
             drawableSize: drawableSize,
             columns: snapshot.columns,

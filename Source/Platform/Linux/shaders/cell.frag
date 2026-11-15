@@ -53,6 +53,11 @@ void main()
         ivec2 texel = clamp(ivec2(source), ivec2(0), texSize - ivec2(1));
         coverage = int(round(texelFetch(uAtlas, texel, 0).r * 255.0));
     }
+    // Palette opacity and SGR blink scale the coverage byte, as Core's
+    // withForegroundCoverage does for both opaque cells and ink over images.
+    int foregroundAlpha = clamp(int(abs(inForeground.a) * 255.0 + 0.5), 0, 255);
+    if (foregroundAlpha != 255)
+        coverage = (coverage * foregroundAlpha + 127) / 255;
     if (cellPaint == 2) {
         if (coverage == 0)
             discard;

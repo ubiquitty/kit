@@ -706,24 +706,20 @@ package final class LigatureSheet {
         _ candidate: Ubiquitty.Rendering.LigatureRunCandidate,
         row: Span<Ubiquitty.Rendering.LigatureCell>
     ) -> [UInt32] {
-        let leftSpace = Ubiquitty.Rendering.ligatureRunFlanksRowStart(candidate)
-        let rightSpace = Ubiquitty.Rendering.ligatureRunFlanksRowEnd(candidate, Int32(row.count))
-        var key: [UInt32] = []
-        key.reserveCapacity(Int(candidate.leftContext + candidate.length + candidate.rightContext) + 5)
-        if leftSpace { key.append(0x20) }
-        var faceMask: UInt32 = 0
-        for offset in 0..<Int(candidate.leftContext + candidate.length + candidate.rightContext) {
-            let cell = row[Int(candidate.startColumn - candidate.leftContext) + offset]
-            if key.count < 32, (cell.shape & Ubiquitty.Rendering.ligatureShapeBold) != 0 {
-                faceMask |= 1 << UInt32(key.count)
+        let capacity = Int(candidate.leftContext + candidate.length + candidate.rightContext) + 5
+        return row.withUnsafeBufferPointer { source in
+            [UInt32](unsafeUninitializedCapacity: capacity) { output, initializedCount in
+                let written = Ubiquitty.Rendering.writeLigatureRunKey(
+                    source.baseAddress,
+                    Int32(source.count),
+                    candidate,
+                    output.baseAddress,
+                    Int32(output.count)
+                )
+                precondition(written > 0, "A discovered ligature candidate must have a valid shaping key")
+                initializedCount = Int(written)
             }
-            key.append(cell.codePoint)
         }
-        if rightSpace { key.append(0x20) }
-        key.append(UInt32(candidate.leftContext) + (leftSpace ? 1 : 0))
-        key.append(UInt32(candidate.length))
-        key.append(faceMask)
-        return key
     }
 
     func prepareRow(_ row: Span<Ubiquitty.Rendering.LigatureCell>, pitch: Float) {

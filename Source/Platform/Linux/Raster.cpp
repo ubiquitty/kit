@@ -20,8 +20,10 @@
 #include "Core/Rendering/BeamLayout.h"
 #include "Core/Rendering/BoxStrokeProfile.h"
 #include "Core/Rendering/CellCanvas.h"
+#include "Core/Rendering/ColorResolve.h"
 #include "Core/Rendering/GlyphRasterizer.h"
 #include "Core/Rendering/HintToastLayout.h"
+#include "Core/Rendering/LigatureSheet.h"
 #include "Core/Rendering/OverlayAssembly.h"
 #include "Core/Rendering/OverlayGeometry.h"
 #include "Core/Rendering/SoftwareRenderer.h"
@@ -45,6 +47,10 @@ struct RasterContext::State {
     // Set before the first rasterizeTerm; selects the SoftwareRenderer's glyph
     // raster (FreeType when injected, else its own Unifont).
     Rendering::GlyphRasterizer* injectedRasterizer = nullptr;
+    // Captures precede either renderer's lazy atlas construction. Cache the
+    // same Core verdict the actual sheet uses without allocating a CPU atlas
+    // for a GPU-only window.
+    Rendering::LigatureParticipation ligatureParticipation = Rendering::LigatureParticipation::OperatorRuns;
 
     // The CPU renderer, built lazily on the first rasterizeTerm against the
     // injected rasterizer (it owns the cross-frame glyph LRU, so it persists).
@@ -103,12 +109,15 @@ RasterContext::RasterContext()
 
 RasterContext::~RasterContext() = default;
 
-std::vector<IntRect> RasterContext::snapshotOverlayRegions(const Terminal& terminal, int viewOffset) const
+std::vector<IntRect> RasterContext::snapshotOverlayRegions(const Terminal& terminal, int viewOffset, FloatPoint origin) const
 {
     std::vector<IntRect> regions;
+    // The software cell pass resolves its authored origin to these same
+    // integral pixels. Rich-layer occlusion must name the pixels it painted.
+    const IntPoint gridOrigin { static_cast<int>(std::lround(origin.x)), static_cast<int>(std::lround(origin.y)) };
     const auto append = [&](int column, int row, int columns, int rows) {
         if (columns > 0 && rows > 0)
-            regions.push_back({ { column * cellWidth(), row * cellHeight() }, { columns * cellWidth(), rows * cellHeight() } });
+            regions.push_back({ { gridOrigin.x + column * cellWidth(), gridOrigin.y + row * cellHeight() }, { columns * cellWidth(), rows * cellHeight() } });
     };
     append(m_state->beamChrome.originColumn, m_state->beamChrome.originRow, m_state->beamChrome.canvas.columns, m_state->beamChrome.canvas.rows);
     append(m_state->hintChrome.originColumn, m_state->hintChrome.originRow, m_state->hintChrome.canvas.columns, m_state->hintChrome.canvas.rows);
@@ -121,7 +130,8 @@ std::vector<IntRect> RasterContext::snapshotOverlayRegions(const Terminal& termi
     return regions;
 }
 
-Rendering::GlyphSlotGeometry glyphSlotGeometryForRasterizer(const Rendering::GlyphRasterizer& rasterizer)
+Rendering::GlyphSlotGeometry glyphSlotGeometryForRasterizer(const Rendering::GlyphRasterizer& rasterizer,
+    Rendering::LigatureParticipation participation)
 {
     const auto metrics = rasterizer.cellMetrics();
     const auto overhang = rasterizer.glyphOverhang();
@@ -136,6 +146,7 @@ Rendering::GlyphSlotGeometry glyphSlotGeometryForRasterizer(const Rendering::Gly
     geometry.slotHeightInPixels = Rendering::cellDimension(metrics.cellHeight) + 2 * slot.marginInPixels.height;
     geometry.referenceAdvanceInPixels = overhang.advanceWidth > 0.0 ? static_cast<float>(overhang.advanceWidth) : metrics.cellWidth;
     geometry.referenceLineHeightInPixels = metrics.cellHeight;
+    geometry.ligatureParticipation = participation;
     return geometry;
 }
 
@@ -202,7 +213,12 @@ int RasterContext::glyphPhaseCount() const
     return m_state->injectedRasterizer ? m_state->injectedRasterizer->glyphPhaseCount() : 1;
 }
 
-Runtime::SyncFrameCaptureGeometry RasterContext::frameCaptureGeometry() const
+int RasterContext::frameGeometryPhaseCount() const
+{
+    return embeddedBitmapScale() > 0 ? Rendering::subpixelPhaseCount : glyphPhaseCount();
+}
+
+Runtime::SyncFrameCaptureGeometry RasterContext::frameCaptureGeometry(FloatPoint origin, FloatSize viewport) const
 {
     auto* injectedRasterizer = m_state->injectedRasterizer;
     // The same rasterizer the atlas below is built from, so the capture's metrics
@@ -219,7 +235,7 @@ Runtime::SyncFrameCaptureGeometry RasterContext::frameCaptureGeometry() const
     // cell-baked path, which is what the injected-rasterizer test relies on.
     Rendering::GlyphSlotGeometry slot {};
     if (injectedRasterizer) {
-        slot = glyphSlotGeometryForRasterizer(*injectedRasterizer);
+        slot = glyphSlotGeometryForRasterizer(*injectedRasterizer, m_state->ligatureParticipation);
         // The face's own box strokes, so procedural geometry — diagonals,
         // arcs, the thin separators — carries the weight the face draws its
         // rules at. Left unmeasured, every one of them falls back to the
@@ -229,9 +245,11 @@ Runtime::SyncFrameCaptureGeometry RasterContext::frameCaptureGeometry() const
             Rendering::cellDimension(injectedRasterizer->cellMetrics().cellHeight));
     }
     Runtime::SyncFrameCaptureGeometry geometry;
+    geometry.originInPixels = origin;
+    geometry.viewportSizeInPixels = viewport;
     geometry.metrics = metrics;
     geometry.glyphSlot = slot;
-    geometry.subpixelPhaseCount = glyphPhaseCount();
+    geometry.subpixelPhaseCount = frameGeometryPhaseCount();
     const auto& configuration = renderConfiguration();
     geometry.style.backgroundOpacity = backgroundOpacity();
     geometry.style.shouldEnhanceTextContrast = configuration.shouldEnhanceTextContrast;
@@ -280,7 +298,7 @@ void RasterContext::setBackgroundImage(Rendering::BackgroundImagePixels pixels)
 Rendering::BackgroundImageLayer RasterContext::backgroundImageLayer() const
 {
     Rendering::TerminalSnapshotOptions options;
-    options.subpixelPhaseCount = glyphPhaseCount();
+    options.subpixelPhaseCount = frameGeometryPhaseCount();
     Preferences::Effective::applyBackgroundImageSettings(options, m_state->windowRenderSettings.configuration,
         &m_state->windowRenderSettings.backgroundImage);
     return options.backgroundImage;
@@ -303,7 +321,11 @@ float RasterContext::backgroundOpacity() const { return std::clamp(static_cast<f
 
 int RasterContext::deviceScale() const { return m_state->windowRenderSettings.deviceScale; }
 
-void RasterContext::setGlyphRasterizer(Rendering::GlyphRasterizer& rasterizer) { m_state->injectedRasterizer = &rasterizer; }
+void RasterContext::setGlyphRasterizer(Rendering::GlyphRasterizer& rasterizer)
+{
+    m_state->injectedRasterizer = &rasterizer;
+    m_state->ligatureParticipation = Rendering::probeLigatureParticipation(rasterizer);
+}
 
 void RasterContext::resetSoftwareRenderer() { m_state->softwareRenderer.reset(); }
 
@@ -535,7 +557,7 @@ void RasterContext::fillCursorState(const Ubiquitty::Terminal* term, int viewOff
     }
 }
 
-bool RasterContext::rasterizeTerm(Ubiquitty::Terminal* term, std::vector<uint8_t>& out, int& widthOut, int& heightOut, int viewOffset, Ubiquitty::Selection::Session* selection, const CursorOverlay* cursor, uint32_t blinkTicks, const PagePadding* page)
+bool RasterContext::rasterizeTerm(Ubiquitty::Terminal* term, std::vector<uint8_t>& out, int& widthOut, int& heightOut, int viewOffset, Ubiquitty::Selection::Session* selection, const CursorOverlay* cursor, uint32_t blinkTicks, const PagePadding* page, const Runtime::SyncFrameCaptureGeometry* frameGeometry)
 {
     auto& softwareRenderer = m_state->softwareRenderer;
     const auto& windowRenderSettings = m_state->windowRenderSettings;
@@ -633,7 +655,11 @@ bool RasterContext::rasterizeTerm(Ubiquitty::Terminal* term, std::vector<uint8_t
     source.softFont = Ubiquitty::softFontOrNull(*term);
 
     Rendering::TerminalSnapshotOptions options;
-    options.subpixelPhaseCount = glyphPhaseCount();
+    if (frameGeometry) {
+        options.originInPixels = frameGeometry->originInPixels;
+        options.viewportSizeInPixels = frameGeometry->viewportSizeInPixels;
+    }
+    options.subpixelPhaseCount = frameGeometryPhaseCount();
     options.viewOffset = viewOffset;
     // No view layer here: the badge that says the terminal is taking a
     // password has to be part of the frame or it does not exist.
@@ -724,7 +750,10 @@ bool RasterContext::rasterizeTerm(Ubiquitty::Terminal* term, std::vector<uint8_t
     in.viewOffset = viewOffset;
     in.publishedCellPixels = { term->cellPixelWidth, term->cellPixelHeight };
 
-    if (!softwareRenderer->render(in, out, widthOut, heightOut, page ? page->color : std::array<uint8_t, 4> {}))
+    const auto background = Rendering::resolvePaletteColor(term->palette, colorDefault, in.screenReverse);
+    const std::array<std::uint8_t, 4> paddingColor { background.red, background.green, background.blue,
+        static_cast<std::uint8_t>(std::lround(std::clamp(in.backgroundOpacity, 0.0f, 1.0f) * 255.0f)) };
+    if (!softwareRenderer->render(in, out, widthOut, heightOut, page ? page->color : paddingColor))
         return false;
     // A Tektronix frame is the tube, drawn over the whole surface by Core's
     // own beam raster — the pass the portable reference runs — rather than the

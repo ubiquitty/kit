@@ -93,23 +93,12 @@ extension TerminalSurface {
         let insets = renderer.gridInsets(for: self)
         guard let picture = renderer.presentedGeometry(for: self) else { return nil }
         guard picture.columns > 0, picture.rows > 0 else { return nil }
-        // pointToCell's clamp policy applies only to rows; columns always
-        // clamp for reporting. Reject horizontal padding before that mapping.
-        guard point.x >= insets.left,
-            point.x < insets.left + CGFloat(picture.columns) * cell.width
-        else { return nil }
-        let position = Ubiquitty.Rendering.pointToCell(
-            Ubiquitty.FloatPoint(x: Float(point.x), y: Float(point.y)),
-            Ubiquitty.FloatPoint(x: Float(insets.left), y: Float(insets.top)),
-            Ubiquitty.FloatSize(width: Float(cell.width), height: Float(cell.height)),
-            Ubiquitty.GridSize(columns: picture.columns, rows: picture.rows),
-            .Unclamped
-        )
-        guard position.row >= 0, position.row < picture.rows,
-            position.column >= 0, position.column < picture.columns
-        else {
-            return nil
-        }
+        guard let position = Ubiquitty.Rendering.pointToCellIfInside(
+            Ubiquitty.DoublePoint(x: Double(point.x), y: Double(point.y)),
+            Ubiquitty.DoublePoint(x: Double(insets.left), y: Double(insets.top)),
+            Ubiquitty.DoubleSize(width: Double(cell.width), height: Double(cell.height)),
+            Ubiquitty.GridSize(columns: picture.columns, rows: picture.rows)
+        ).value else { return nil }
         let column = renderer.letterColumn(for: self, row: position.row, xInCells: Double((point.x - insets.left) / cell.width))
         return (Int(position.row), Int(column ?? position.column))
     }

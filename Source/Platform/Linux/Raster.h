@@ -72,7 +72,9 @@ struct PagePadding;
 
 /// Describes the atlas canvas separately from the face's natural pen advance.
 /// Tracking changes the canvas and the cell pitch, never the raster's scale.
-[[nodiscard]] Rendering::GlyphSlotGeometry glyphSlotGeometryForRasterizer(const Rendering::GlyphRasterizer& rasterizer);
+/// The participation verdict belongs to the sheet or its cached font probe.
+[[nodiscard]] Rendering::GlyphSlotGeometry glyphSlotGeometryForRasterizer(const Rendering::GlyphRasterizer& rasterizer,
+    Rendering::LigatureParticipation participation);
 
 /// Owns one window's CPU cache and the capture settings shared with its GPU.
 ///
@@ -118,10 +120,27 @@ public:
     int cellHeight() const;
 
     /// The geometry and style shared by live and parser-boundary captures.
-    [[nodiscard]] Runtime::SyncFrameCaptureGeometry frameCaptureGeometry() const;
+    ///
+    /// - Parameters:
+    ///   - origin: The integral grid origin inside the full drawable, in device
+    ///     pixels; matching CPU and GPU rasterization requires whole pixels.
+    ///   - viewport: The full drawable size; zero selects the grid alone.
+    /// - Returns: Immutable geometry for the selected face and authored drawable.
+    [[nodiscard]] Runtime::SyncFrameCaptureGeometry frameCaptureGeometry(FloatPoint origin = {}, FloatSize viewport = {}) const;
 
     /// The native raster grid used by glyph masks and their atlas keys.
+    ///
+    /// - Returns: The selected mask provider's phase count, or one without one.
     [[nodiscard]] int glyphPhaseCount() const;
+
+    /// The fractional grid used by captured and live frame geometry.
+    ///
+    /// Procedural dots retain the frame's fractional precision on a bitmap
+    /// face, whose text masks have only one phase. Native faces use their
+    /// mask provider's grid. Atlas bindings separately select text-mask phases.
+    /// - Returns: Eight for the embedded bitmap tier, otherwise the native
+    ///   mask provider's phase count.
+    [[nodiscard]] int frameGeometryPhaseCount() const;
 
     /// Publishes the hovered run for the pane this context is about to draw.
     ///
@@ -200,7 +219,12 @@ public:
     /// Returns native palette, hint, and IME rectangles in device pixels.
     ///
     /// A retained rich layer leaves these pixels to the grid's chrome.
-    [[nodiscard]] std::vector<IntRect> snapshotOverlayRegions(const Terminal&, int viewOffset) const;
+    /// - Parameters:
+    ///   - terminal: The model owning the grid's pre-edit position.
+    ///   - viewOffset: Rows above the live tail; nonzero hides the pre-edit.
+    ///   - origin: The authored grid origin inside the full drawable.
+    /// - Returns: Drawable-relative rectangles reserved for in-grid chrome.
+    [[nodiscard]] std::vector<IntRect> snapshotOverlayRegions(const Terminal& terminal, int viewOffset, FloatPoint origin = {}) const;
 
     /// Set the Beam palette's drawn picture for the frames that follow, or clear it
     /// with nullptr. Composited by snapshotVisibleGrid over everything else, so both
@@ -343,9 +367,11 @@ public:
     ///   - cursor: The resolved cursor look; null draws a static focused block.
     ///   - blinkTicks: The monotonic SGR 5/6 blink tick, resolved once per frame
     ///     and passed to both paths; 0 holds blink-attributed text fully opaque.
-    ///   - page: The margin to draw around the grid; null draws the grid alone.
+    ///   - page: Optional page margin, taking precedence over frame geometry.
+    ///   - frameGeometry: The authored drawable and grid origin; null draws
+    ///     the grid alone when no page margin is supplied.
     /// - Returns: Whether a frame was produced; false on a degenerate size.
-    bool rasterizeTerm(Ubiquitty::Terminal* term, std::vector<uint8_t>& out, int& widthOut, int& heightOut, int viewOffset = 0, Ubiquitty::Selection::Session* selection = nullptr, const CursorOverlay* cursor = nullptr, uint32_t blinkTicks = 0, const PagePadding* page = nullptr);
+    bool rasterizeTerm(Ubiquitty::Terminal* term, std::vector<uint8_t>& out, int& widthOut, int& heightOut, int viewOffset = 0, Ubiquitty::Selection::Session* selection = nullptr, const CursorOverlay* cursor = nullptr, uint32_t blinkTicks = 0, const PagePadding* page = nullptr, const Runtime::SyncFrameCaptureGeometry* frameGeometry = nullptr);
 
 private:
     /// Keeps the mutable resources behind the immovable owner.

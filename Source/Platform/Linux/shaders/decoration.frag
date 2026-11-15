@@ -44,12 +44,20 @@ float texelTap(sampler2D sheet, vec2 uv)
     return texelFetch(sheet, clamp(ivec2(floor(uv)), ivec2(0), size - 1), 0).r;
 }
 
+float coverageTap(sampler2D sheet, vec2 uv)
+{
+    if (inBitmapTier > 0.5)
+        return texelTap(sheet, uv);
+    return textureLod(sheet, uv / vec2(textureSize(sheet, 0)), 0.0).r;
+}
+
 float sheetTap(int sheetSelector, vec2 uv)
 {
-    return sheetSelector == 1 ? texelTap(uProportionalStripSheet, uv)
-        : sheetSelector == 2  ? texelTap(uLigatureStripSheet, uv)
-        : sheetSelector == 3  ? texelTap(uProportionalSheet, uv)
-                              : texelTap(uAtlas, uv);
+    // Selectors 0 and 4 share Linux's combined mono/wide coverage image.
+    return sheetSelector == 1 ? coverageTap(uProportionalStripSheet, uv)
+        : sheetSelector == 2  ? coverageTap(uLigatureStripSheet, uv)
+        : sheetSelector == 3  ? coverageTap(uProportionalSheet, uv)
+                              : coverageTap(uAtlas, uv);
 }
 
 // The tap's nudge off the texel grid, SoftwareRenderer's skipInkTapBias.
@@ -69,7 +77,9 @@ float discCoverage(int sheetSelector, vec2 centre, vec2 padUV, int steps, vec2 m
         for (int dx = -steps; dx <= steps; ++dx) {
             if (dx * dx + dy * dy > steps * steps)
                 continue;
-            precise vec2 uv = centre + vec2(float(dx), float(dy)) * stepUV + skipInkTapBias;
+            precise vec2 uv = centre + vec2(float(dx), float(dy)) * stepUV;
+            if (inBitmapTier > 0.5)
+                uv += skipInkTapBias;
             if (uv.x < minSlot.x || uv.x > maxSlot.x || uv.y < minSlot.y || uv.y > maxSlot.y)
                 continue;
             strongest = max(strongest, sheetTap(sheetSelector, uv));

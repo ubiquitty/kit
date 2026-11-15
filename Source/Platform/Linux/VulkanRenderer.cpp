@@ -13,9 +13,12 @@
 
 #include "Core/Preferences/RenderStyle.h"
 #include "Core/Rendering/CellInstanceBuilder.h"
+#include "Core/Rendering/ColorResolve.h"
 #include "Core/Rendering/FrameDamage.h"
 #include "Core/Rendering/ImageQuads.h"
 #include "Core/Rendering/OverlayBatching.h"
+#include "Core/Rendering/PaddingGeometry.h"
+#include "Core/Runtime/TerminalSession.h"
 #include "Core/Screen/Addressing.h"
 #include "Core/Screen/ScrollSearch.h"
 #include "Platform/Linux/FontRouting.h"
@@ -684,6 +687,7 @@ void VulkanRenderer::rebuildAtlas()
     m_isProportionalDescriptorWritten = false;
     m_isProportionalStripDescriptorWritten = false;
     m_isLigatureDescriptorWritten = false;
+    m_isDecorationDescriptorWritten = false;
     m_lastFrameGlyphInstances = 0;
     m_lastFrameProportionalInstances = 0;
     m_lastFrameProportionalStripInstances = 0;
@@ -866,33 +870,28 @@ bool VulkanRenderer::ensureGridPipelines()
         return false;
     }
 
-    // Four sets of five samplers, because proportional glyphs, proportional fallback
-    // strips, and ligature strips each draw through the mono pipeline over a
-    // sheet of their own. Vulkan spells
-    // "same pipeline, other texture" as another descriptor set. Three input
-    // sets separately name the composed target and both retained targets.
+    // Five sets of five samplers separate text sheets from filtered rule
+    // coverage. Three input sets name the composed and both retained targets.
     const VkDescriptorPoolSize poolSizes[] = {
-        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 20 },
+        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 25 },
         { VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 3 }
     };
     VkDescriptorPoolCreateInfo dpInfo {};
     dpInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    dpInfo.maxSets = 7;
+    dpInfo.maxSets = 8;
     dpInfo.poolSizeCount = 2;
     dpInfo.pPoolSizes = poolSizes;
     if (vkCreateDescriptorPool(m_device, &dpInfo, nullptr, &m_descriptorPool) != VK_SUCCESS) {
         Ubiquitty::PAL::logLine(stderr, "vulkan: vkCreateDescriptorPool failed building the grid pipelines");
         return false;
     }
-    // All sets come from one call over the same layout. They differ only in
-    // what binding 0 is written to point at, which is why the layout is shared
-    // and the pipeline never learns there are four.
-    const VkDescriptorSetLayout setLayouts[4] = { m_descriptorSetLayout, m_descriptorSetLayout, m_descriptorSetLayout, m_descriptorSetLayout };
-    VkDescriptorSet allocatedSets[4] {};
+    // The common layout keeps every coverage selector available to a rule.
+    const VkDescriptorSetLayout setLayouts[5] = { m_descriptorSetLayout, m_descriptorSetLayout, m_descriptorSetLayout, m_descriptorSetLayout, m_descriptorSetLayout };
+    VkDescriptorSet allocatedSets[5] {};
     VkDescriptorSetAllocateInfo dsAlloc {};
     dsAlloc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
     dsAlloc.descriptorPool = m_descriptorPool;
-    dsAlloc.descriptorSetCount = 4;
+    dsAlloc.descriptorSetCount = 5;
     dsAlloc.pSetLayouts = setLayouts;
     if (vkAllocateDescriptorSets(m_device, &dsAlloc, allocatedSets) != VK_SUCCESS) {
         Ubiquitty::PAL::logLine(stderr, "vulkan: vkAllocateDescriptorSets failed building the grid pipelines");
@@ -907,6 +906,24 @@ bool VulkanRenderer::ensureGridPipelines()
     dsAlloc.pSetLayouts = inputLayouts;
     if (vkAllocateDescriptorSets(m_device, &dsAlloc, m_gridInputSets) != VK_SUCCESS)
         return false;
+    m_decorationDescriptorSet = allocatedSets[4];
+
+    if (!m_decorationSampler) {
+        VkSamplerCreateInfo samplerInfo {};
+        samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+        samplerInfo.magFilter = VK_FILTER_LINEAR;
+        samplerInfo.minFilter = VK_FILTER_LINEAR;
+        samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+        samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+        samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+        samplerInfo.borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
+        if (vkCreateSampler(m_device, &samplerInfo, nullptr, &m_decorationSampler) != VK_SUCCESS) {
+            Ubiquitty::PAL::logLine(stderr, "vulkan: vkCreateSampler failed building native decoration coverage");
+            return false;
+        }
+    }
+    m_isDecorationDescriptorWritten = false;
 
     VkShaderModule cellVert = loadShader("cell.vert.spv");
     VkShaderModule cellFrag = loadShader("cell.frag.spv");
@@ -1179,10 +1196,16 @@ void VulkanRenderer::destroyGridPipelines()
         m_ligatureDescriptorSet = VK_NULL_HANDLE;
         for (auto& input : m_gridInputSets)
             input = VK_NULL_HANDLE;
+        m_decorationDescriptorSet = VK_NULL_HANDLE;
         m_isProportionalDescriptorWritten = false;
         m_isProportionalStripDescriptorWritten = false;
         m_isLigatureDescriptorWritten = false;
+        m_isDecorationDescriptorWritten = false;
         m_descriptorWritten = false;
+    }
+    if (m_decorationSampler) {
+        vkDestroySampler(m_device, m_decorationSampler, nullptr);
+        m_decorationSampler = VK_NULL_HANDLE;
     }
     if (m_pipelineLayout) {
         vkDestroyPipelineLayout(m_device, m_pipelineLayout, nullptr);
@@ -1311,7 +1334,7 @@ void VulkanRenderer::destroyRetainedGridImages()
     m_hasRetainedTarget = false;
     m_capturedTargetOwner = nullptr;
     m_capturedTargetSequence = 0;
-    m_capturedTargetConfiguration.reset();
+    m_retainedTargetConfiguration.reset();
 }
 
 bool VulkanRenderer::ensureGridTarget(uint32_t width, uint32_t height)
@@ -2306,7 +2329,7 @@ std::uint32_t VulkanRenderer::lastFrameScaledGlyphInstanceCount() const
     return scaled;
 }
 
-bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Terminal* term, std::vector<uint8_t>& out, int& widthOut, int& heightOut, int viewOffset, Ubiquitty::Selection::Session* selection, const CursorOverlay* cursor, uint32_t blinkTicks, ModelCaptureHandoff handoff, const Rendering::FrameCapture* capturedFrame, const Rendering::FrameCapture::ViewTierOverrides* capturedView)
+bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Terminal* term, std::vector<uint8_t>& out, int& widthOut, int& heightOut, int viewOffset, Ubiquitty::Selection::Session* selection, const CursorOverlay* cursor, uint32_t blinkTicks, ModelCaptureHandoff handoff, const Rendering::FrameCapture* capturedFrame, const Rendering::FrameCapture::ViewTierOverrides* capturedView, const Runtime::SyncFrameCaptureGeometry* frameGeometry)
 {
     if (!m_sharedDevice)
         return false;
@@ -2378,8 +2401,33 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
     if (!m_maxTargetExtent.containsGrid(columns, rows, m_cellWidth, m_cellHeight))
         return declineOversizedGrid();
 
-    const uint32_t width = static_cast<uint32_t>(columns) * m_cellWidth;
-    const uint32_t height = static_cast<uint32_t>(rows) * m_cellHeight;
+    const auto paddingColor = capturedFrame ? capturedFrame->paddingColor() : [&] {
+        const auto background = Rendering::resolvePaletteColor(term->palette, colorDefault, isReverseVideo(term));
+        return std::array<std::uint8_t, 4> { background.red, background.green, background.blue,
+            static_cast<std::uint8_t>(std::lround(std::clamp(rasterContext.backgroundOpacity(), 0.0f, 1.0f) * 255.0f)) };
+    }();
+    const auto capturedUniforms = capturedFrame ? capturedFrame->uniforms() : Rendering::FrameUniforms {};
+    const FloatPoint frameOrigin = capturedFrame
+        ? FloatPoint { capturedUniforms.originInPixels.x, capturedUniforms.originInPixels.y }
+        : frameGeometry ? frameGeometry->originInPixels
+                        : FloatPoint {};
+    const FloatSize requestedViewport = capturedFrame
+        ? FloatSize { capturedUniforms.viewportSizeInPixels.x, capturedUniforms.viewportSizeInPixels.y }
+        : frameGeometry ? frameGeometry->viewportSizeInPixels
+                        : FloatSize {};
+    const double requestedWidth = requestedViewport.width > 0 ? requestedViewport.width : static_cast<double>(columns) * m_cellWidth;
+    const double requestedHeight = requestedViewport.height > 0 ? requestedViewport.height : static_cast<double>(rows) * m_cellHeight;
+    if (!std::isfinite(requestedWidth) || !std::isfinite(requestedHeight)
+        || requestedWidth < 1 || requestedHeight < 1
+        || requestedWidth > m_maxTargetExtent.width || requestedHeight > m_maxTargetExtent.height)
+        return declineOversizedGrid();
+    const uint32_t width = static_cast<uint32_t>(requestedWidth);
+    const uint32_t height = static_cast<uint32_t>(requestedHeight);
+    const bool hasRetainableOrigin = frameOrigin.x >= 0 && frameOrigin.y >= 0
+        && frameOrigin.x <= width && frameOrigin.y <= height
+        && frameOrigin.x == std::trunc(frameOrigin.x) && frameOrigin.y == std::trunc(frameOrigin.y);
+    const int retainedOriginY = hasRetainableOrigin ? static_cast<int>(frameOrigin.y) : 0;
+    const bool isOriginMatching = frameOrigin.x == m_retainedTargetOrigin.x && frameOrigin.y == m_retainedTargetOrigin.y;
     // Each of these returns false with no reason of its own, and the caller
     // reports only that renderGrid failed — so a headless run says the GPU arm
     // was skipped and cannot say which resource it could not build. Named here
@@ -2463,7 +2511,9 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
     Rendering::RetainedFramePlan framePlan;
     Rendering::BuildInputs in;
     in.columns = columns;
-    in.subpixelPhaseCount = rasterContext.glyphPhaseCount();
+    in.originInPixels = { frameOrigin.x, frameOrigin.y };
+    in.viewportSizeInPixels = { static_cast<float>(width), static_cast<float>(height) };
+    in.subpixelPhaseCount = rasterContext.frameGeometryPhaseCount();
     std::vector<std::uint8_t> freshLineAttributes;
     std::vector<std::uint8_t> rowFlags;
     std::vector<Rendering::SelectionRowSpan> selectionSpans, searchMatchSpans, otherSearchMatchSpans, triggerHighlightSpans, hiliteSpans;
@@ -2511,13 +2561,13 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
         for (int row = 0; row < rows; ++row)
             m_rowDirty[static_cast<std::size_t>(row)] = capturedFrame->isRowDirty(row);
         framePlan.blitPlan = Rendering::scrollBlitPlan(framePlan.damage, rows,
-            static_cast<int>(m_cellHeight), 0, static_cast<int>(height));
+            static_cast<int>(m_cellHeight), retainedOriginY, static_cast<int>(height));
         const bool isExactSuccessor = !capturedFrame->isFullFrame()
             && term && m_capturedTargetOwner == term && m_capturedTargetSequence != 0
             && capturedFrame->baseSequence() == m_capturedTargetSequence
             && capturedFrame->viewGeneration() == m_capturedTargetViewGeneration
             && capturedFrame->paletteGeneration() == m_capturedTargetPaletteGeneration
-            && m_capturedTargetConfiguration && *m_capturedTargetConfiguration == rasterContext.renderConfiguration();
+            && hasRetainableOrigin && isOriginMatching && m_retainedTargetConfiguration && *m_retainedTargetConfiguration == rasterContext.renderConfiguration();
         Rendering::RetainedTargetEligibility eligibility;
         eligibility.isTargetMatching = drawsThroughRetainedTarget && m_hasRetainedTarget && isExactSuccessor
             && !hasCapturedViewTiers && !m_doesCapturedTargetHaveViewTiers && !hasCapturedImages && !m_doesCapturedTargetHaveImages;
@@ -2549,8 +2599,10 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
             request.rows = rows;
             request.columns = columns;
             request.viewOffset = viewOffset;
-            request.isTargetMatching = drawsThroughRetainedTarget && m_hasRetainedTarget;
+            request.isTargetMatching = drawsThroughRetainedTarget && m_hasRetainedTarget
+                && hasRetainableOrigin && isOriginMatching && m_retainedTargetConfiguration && *m_retainedTargetConfiguration == rasterContext.renderConfiguration();
             request.cellHeightInPixels = static_cast<int>(m_cellHeight);
+            request.originYInPixels = retainedOriginY;
             request.textureHeightInPixels = static_cast<int>(height);
             framePlan = Rendering::planRetainedFrame(*term->grid, *term, m_retainedBaseline, request, m_rowDirty);
             m_retainedCells.resize(static_cast<std::size_t>(rows) * columns);
@@ -2604,6 +2656,7 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
         in.rows = rows;
         in.columns = columns;
         in.palette = &term->palette;
+        in.paletteForegroundAlpha = term->palette.indexedAlpha.data();
         in.textSizeTable = &term->textSizeTable;
         in.ambiguousWidth = term->ambiguousWidth;
         in.screenReverse = Ubiquitty::isReverseVideo(term);
@@ -2654,7 +2707,9 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
         // CellMetrics from the atlas's rasterizer — exactly as SoftwareRenderer::render
         // does (the same instance), so the decoration + glyph geometry line up.
         in.metrics = m_fontAtlas->atlas->rasterizer().cellMetrics();
-        const auto glyphGeometry = glyphSlotGeometryForRasterizer(m_fontAtlas->atlas->rasterizer());
+        const auto glyphGeometry = glyphSlotGeometryForRasterizer(m_fontAtlas->atlas->rasterizer(),
+            m_fontAtlas->ligatureSheet ? m_fontAtlas->ligatureSheet->participation() : Rendering::LigatureParticipation::OperatorRuns);
+        in.ligatureParticipation = glyphGeometry.ligatureParticipation;
         in.glyphReferenceAdvanceInPixels = glyphGeometry.referenceAdvanceInPixels;
         in.glyphReferenceLineHeightInPixels = glyphGeometry.referenceLineHeightInPixels;
         in.glyphBoxWidthInPixels = static_cast<float>(glyphGeometry.glyphWidthInPixels);
@@ -2777,6 +2832,7 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
     m_fontAtlas->atlas->setLigatureSheet(canShapeLigatures ? &*m_fontAtlas->ligatureSheet : nullptr);
     const Rendering::GlyphBackend backend = m_fontAtlas->atlas->glyphBackend();
 
+    m_marginStrips.resize(static_cast<std::size_t>(rows) * 2 + 4);
     auto buildFrame = [&] {
         Rendering::InstanceBuffers buffers;
         buffers.cells = static_cast<Rendering::CellInstance*>(m_cellMapped);
@@ -2800,6 +2856,8 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
         buffers.decorationCapacity = m_decorationCapacity;
         buffers.overlays = static_cast<Rendering::OverlayInstance*>(m_overlayMapped);
         buffers.overlayCapacity = m_overlayCapacity;
+        buffers.marginStrips = m_marginStrips.data();
+        buffers.marginStripCapacity = m_marginStrips.size();
         buffers.colorGlyphs = m_colorCapacity > 0
             ? static_cast<Rendering::GlyphInstance*>(m_colorMapped)
             : nullptr;
@@ -2899,7 +2957,7 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
         quadCount = Ubiquitty::Image::resolveImagePlacements(storedImages,
             { term->images.placements.data(), Image::maxTerminalImagePlacementCount },
             { columns, rows }, imageCell,
-            /*origin=*/ {}, viewOffset, quads, /*fitOptions=*/ {},
+            /*origin=*/frameOrigin, viewOffset, quads, /*fitOptions=*/ {},
             term->screens.isUsingAlternateScreen);
         if (static_cast<std::size_t>(quadCount) < quads.size()) {
             const Kitty::PlaceholderGrid placeholderGrid {
@@ -2909,7 +2967,7 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
                 .readClusterContext = in.clusterResolverContext,
                 .publishedCellPixels = { term->cellPixelWidth, term->cellPixelHeight },
             };
-            quadCount += Kitty::resolvePlaceholders(placeholderGrid, storedImages, imageCell, /*origin=*/ {},
+            quadCount += Kitty::resolvePlaceholders(placeholderGrid, storedImages, imageCell, /*origin=*/frameOrigin,
                 quads.subspan(static_cast<std::size_t>(quadCount)));
         }
     }
@@ -3116,12 +3174,12 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
         // right up to the frame that reads it.
         vkUpdateDescriptorSets(m_device, 5, writes, 0, nullptr);
         m_descriptorWritten = true;
+        m_isDecorationDescriptorWritten = false;
     }
     // The proportional set differs from the main set only at binding 0. The
     // other declared bindings are still populated before the set is bound.
-    // The sixth write points the main set's binding 4 at the proportional
-    // sheet: the rule pass draws under the main set, and that is where it
-    // taps the glyphs of a run drawn glyph by glyph for skip-ink.
+    // The sixth write also keeps the main set's proportional-sheet alias
+    // valid. Decorations bind a separately filtered view of these sheets.
     if (canShapeProportional && !m_isProportionalDescriptorWritten) {
         VkDescriptorImageInfo proportionalInfo[5] {};
         proportionalInfo[0].sampler = m_fontAtlas->proportionalImage.sampler();
@@ -3144,6 +3202,7 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
         }
         vkUpdateDescriptorSets(m_device, 6, proportionalWrites, 0, nullptr);
         m_isProportionalDescriptorWritten = true;
+        m_isDecorationDescriptorWritten = false;
     }
     if (canShapeProportionalStrips && !m_isProportionalStripDescriptorWritten) {
         VkDescriptorImageInfo proportionalStripInfo[5] {};
@@ -3167,6 +3226,7 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
         }
         vkUpdateDescriptorSets(m_device, 6, proportionalStripWrites, 0, nullptr);
         m_isProportionalStripDescriptorWritten = true;
+        m_isDecorationDescriptorWritten = false;
     }
     // The ligature set: binding 0 is the strip sheet, binding 1 the same colour
     // image the first set names, and its remaining bindings are valid strip
@@ -3174,9 +3234,7 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
     // goes unread by the mono pipeline, and is written anyway — the layout
     // declares it, and a descriptor left unwritten in a set that is bound is
     // undefined behaviour whether or not this frame's shader happens to sample
-    // it. The fifth write points the main set's binding 3 at the strip sheet:
-    // the rule pass draws under the main set, and that is where it reads
-    // strips for skip-ink.
+    // it. The sixth write also keeps the main set's ligature-sheet alias valid.
     if (canShapeLigatures && !m_isLigatureDescriptorWritten) {
         VkDescriptorImageInfo ligatureInfo[5] {};
         ligatureInfo[0].sampler = m_fontAtlas->ligatureImage.sampler();
@@ -3199,6 +3257,30 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
         }
         vkUpdateDescriptorSets(m_device, 6, ligatureWrites, 0, nullptr);
         m_isLigatureDescriptorWritten = true;
+        m_isDecorationDescriptorWritten = false;
+    }
+
+    if (!m_isDecorationDescriptorWritten) {
+        const VkImageView monoView = m_fontAtlas->atlas->view();
+        const std::array<VkImageView, 5> views { monoView, m_fontAtlas->colorAtlas->view(),
+            canShapeProportionalStrips ? m_fontAtlas->proportionalStripImage.view() : monoView,
+            canShapeLigatures ? m_fontAtlas->ligatureImage.view() : monoView,
+            canShapeProportional ? m_fontAtlas->proportionalImage.view() : monoView };
+        std::array<VkDescriptorImageInfo, 5> imageInfo {};
+        std::array<VkWriteDescriptorSet, 5> writes {};
+        for (std::uint32_t index = 0; index < writes.size(); ++index) {
+            imageInfo[index].sampler = m_decorationSampler;
+            imageInfo[index].imageView = views[index];
+            imageInfo[index].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            writes[index].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[index].dstSet = m_decorationDescriptorSet;
+            writes[index].dstBinding = index;
+            writes[index].descriptorCount = 1;
+            writes[index].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            writes[index].pImageInfo = &imageInfo[index];
+        }
+        vkUpdateDescriptorSets(m_device, static_cast<std::uint32_t>(writes.size()), writes.data(), 0, nullptr);
+        m_isDecorationDescriptorWritten = true;
     }
 
     // The window's background image, placed by Core over the frame and
@@ -3299,6 +3381,23 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
         toDestination.srcAccessMask = 0;
         toDestination.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
         vkCmdPipelineBarrier(m_commandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &toDestination);
+        // Grid bands omit the exposed row. Preserve its complete border too;
+        // Core's later margin strips restore only the inner glyph-overhang area.
+        const auto borders = Rendering::imageBorderRects({ static_cast<int>(width), static_cast<int>(height) },
+            { static_cast<int>(frameOrigin.x), static_cast<int>(frameOrigin.y),
+                columns * static_cast<int>(m_cellWidth), rows * static_cast<int>(m_cellHeight) });
+        for (const auto& border : borders) {
+            if (border.size.width == 0 || border.size.height == 0)
+                continue;
+            VkImageCopy paddingCopy {};
+            paddingCopy.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+            paddingCopy.dstSubresource = paddingCopy.srcSubresource;
+            paddingCopy.srcOffset = { border.origin.x, border.origin.y, 0 };
+            paddingCopy.dstOffset = paddingCopy.srcOffset;
+            paddingCopy.extent = { static_cast<std::uint32_t>(border.size.width), static_cast<std::uint32_t>(border.size.height), 1 };
+            vkCmdCopyImage(m_commandBuffer, m_gridImages[m_gridFrontIndex], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                m_gridImages[backIndex], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &paddingCopy);
+        }
         for (const Rendering::ScrollBlitBand& blitBand : gridBlitPlan.activeBands()) {
             VkImageCopy copy {};
             copy.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
@@ -3338,7 +3437,8 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
     }
 
     VkClearValue clear {};
-    clear.color = { { 0.0f, 0.0f, 0.0f, 1.0f } }; // opaque black; the cell pass repaints every background
+    clear.color = { { paddingColor[0] / 255.0f, paddingColor[1] / 255.0f,
+        paddingColor[2] / 255.0f, paddingColor[3] / 255.0f } };
     VkRenderPassBeginInfo rpBegin {};
     rpBegin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
     rpBegin.renderPass = canReuseGridTarget ? m_gridLoadRenderPass : m_renderPass;
@@ -3356,11 +3456,31 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
     VkRect2D scissor {};
     scissor.extent = { width, height };
     vkCmdSetScissor(m_commandBuffer, 0, 1, &scissor);
+    // Core describes the old edge ink each rebuilt row must replace. Clearing
+    // these rectangles writes the background without alpha blending, before
+    // the new row's overhang is drawn, just as the native margin-restore pass.
+    if (canReuseGridTarget && counts.marginStrips > 0) {
+        auto& marginRects = m_marginClearRects;
+        marginRects.clear();
+        marginRects.reserve(std::min(counts.marginStrips, m_marginStrips.size()));
+        for (const auto& strip : std::span { m_marginStrips }.first(std::min(counts.marginStrips, m_marginStrips.size()))) {
+            const int left = std::clamp(static_cast<int>(std::ceil(strip.topLeftInPixels.x - 0.5f)), 0, static_cast<int>(width));
+            const int top = std::clamp(static_cast<int>(std::ceil(strip.topLeftInPixels.y - 0.5f)), 0, static_cast<int>(height));
+            const int right = std::clamp(static_cast<int>(std::ceil(strip.bottomRightInPixels.x - 0.5f)), left, static_cast<int>(width));
+            const int bottom = std::clamp(static_cast<int>(std::ceil(strip.bottomRightInPixels.y - 0.5f)), top, static_cast<int>(height));
+            if (left < right && top < bottom)
+                marginRects.push_back({ { { left, top }, { static_cast<std::uint32_t>(right - left), static_cast<std::uint32_t>(bottom - top) } }, 0, 1 });
+        }
+        if (!marginRects.empty()) {
+            const VkClearAttachment attachment { VK_IMAGE_ASPECT_COLOR_BIT, 0, clear };
+            vkCmdClearAttachments(m_commandBuffer, 1, &attachment, static_cast<std::uint32_t>(marginRects.size()), marginRects.data());
+        }
+    }
 
     // Viewport, cell, and the bitmap flag used for glyph filtering and the
     // overlay/decoration coverage quantisation; padded to four-float rows.
     const float push[8] = { static_cast<float>(width), static_cast<float>(height), static_cast<float>(m_cellWidth), static_cast<float>(m_cellHeight),
-        m_isBitmapTier ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f };
+        m_isBitmapTier ? 1.0f : 0.0f, 0.0f, frameOrigin.x, frameOrigin.y };
     vkCmdPushConstants(m_commandBuffer, m_pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(push), push);
     vkCmdBindDescriptorSets(m_commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelineLayout, 0, 1, &m_descriptorSet, 0, nullptr);
 
@@ -3483,6 +3603,7 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
         if (proportional.count > 0 || proportionalStrips.count > 0 || ligature.count > 0)
             pushAtlasSpread(0.0f);
         if (decorations.count > 0) {
+            vkCmdBindDescriptorSets(m_commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelineLayout, 0, 1, &m_decorationDescriptorSet, 0, nullptr);
             vkCmdBindPipeline(m_commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_decorationPipeline);
             vkCmdBindVertexBuffers(m_commandBuffer, 0, 1, &m_decorationBuffer, &offset);
             const auto synchronizeRules = [&] {
@@ -3520,6 +3641,7 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
                 }
             }
             vkCmdDraw(m_commandBuffer, 6, end - first, 0, first);
+            vkCmdBindDescriptorSets(m_commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelineLayout, 0, 1, &m_descriptorSet, 0, nullptr);
         }
     };
     const auto drawCursorTier = [&]() {
@@ -3685,6 +3807,13 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
     // z-sorted images blend in order.
     const auto drawImageBand = [&](std::size_t first, std::size_t end) {
         beginBlendLayer();
+        // Images belong to the grid viewport; text ink may enter padding.
+        const int imageLeft = std::clamp(static_cast<int>(std::ceil(frameOrigin.x - 0.5f)), 0, static_cast<int>(width));
+        const int imageTop = std::clamp(static_cast<int>(std::ceil(frameOrigin.y - 0.5f)), 0, static_cast<int>(height));
+        const int imageRight = std::clamp(static_cast<int>(std::ceil(frameOrigin.x + columns * m_cellWidth - 0.5f)), imageLeft, static_cast<int>(width));
+        const int imageBottom = std::clamp(static_cast<int>(std::ceil(frameOrigin.y + rows * m_cellHeight - 0.5f)), imageTop, static_cast<int>(height));
+        const VkRect2D imageScissor { { imageLeft, imageTop }, { static_cast<std::uint32_t>(imageRight - imageLeft), static_cast<std::uint32_t>(imageBottom - imageTop) } };
+        vkCmdSetScissor(m_commandBuffer, 0, 1, &imageScissor);
         vkCmdPushConstants(m_commandBuffer, m_imagePipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(push), push);
         vkCmdBindPipeline(m_commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_imagePipeline);
         vkCmdBindVertexBuffers(m_commandBuffer, 0, 1, &m_imageInstanceBuffer, &offset);
@@ -3872,14 +4001,16 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
     // that reached its submit may say so. A frame with a picture under its
     // text inked the target and left the pair its ground alone, so its pair
     // describes nothing a later frame may load.
-    if (drawsThroughRetainedTarget && !hasImagesUnderText)
+    if (drawsThroughRetainedTarget && !hasImagesUnderText) {
         m_hasRetainedTarget = true;
+        m_retainedTargetConfiguration = rasterContext.renderConfiguration();
+        m_retainedTargetOrigin = frameOrigin;
+    }
     if (capturedFrame && m_hasRetainedTarget) {
         m_capturedTargetOwner = term;
         m_capturedTargetSequence = capturedFrame->sequence();
         m_capturedTargetViewGeneration = capturedFrame->viewGeneration();
         m_capturedTargetPaletteGeneration = capturedFrame->paletteGeneration();
-        m_capturedTargetConfiguration = rasterContext.renderConfiguration();
         m_doesCapturedTargetHaveViewTiers = hasCapturedViewTiers;
         m_doesCapturedTargetHaveImages = hasCapturedImages;
     }
