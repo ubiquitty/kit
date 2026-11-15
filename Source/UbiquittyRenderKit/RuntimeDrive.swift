@@ -1944,6 +1944,11 @@ public final class RuntimeDrive {
         session.cursorAlphaUnit()
     }
 
+    /// The reader's unfocused cursor outline width, in logical points.
+    public func cursorOutlineThicknessPoints() -> Float {
+        session.cursorOutlineThicknessPoints()
+    }
+
     /// Reports a keypress as the Tektronix graphic-input trigger.
     ///
     /// - Parameters:

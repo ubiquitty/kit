@@ -8,12 +8,16 @@
 
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
 
 struct FT_FaceRec_;
 struct FT_LibraryRec_;
+
+struct hb_font_t;
+struct hb_buffer_t;
 
 namespace Ubiquitty::Linux {
 
@@ -27,7 +31,7 @@ public:
     /// - Parameter bundledFontDirectory: Where this binary's shipped faces
     ///   were staged; empty derives it from the executable's own path. Named so
     ///   a test can point it at the repository's fonts with no staged binary.
-    explicit LinuxFontInventory(int fontPixelSize, std::string primaryFamily = std::string(),
+    explicit LinuxFontInventory(double fontPixelSize, std::string primaryFamily = std::string(),
         std::string bundledFontDirectory = std::string(), Rendering::FontMetrics::FallbackSizing = Rendering::FontMetrics::FallbackSizing::MatchPrimary);
     ~LinuxFontInventory() override;
 
@@ -77,11 +81,35 @@ public:
     /// - Returns: The face, or null for an invalid handle.
     [[nodiscard]] FT_FaceRec_* faceFor(Rendering::Font::FontHandle handle) const;
 
+    /// The exact source of an owned routed face, including system fonts.
+    ///
+    /// - Parameter face: A face owned by this inventory.
+    /// - Returns: A path borrowed until the inventory changes, or an empty view.
+    [[nodiscard]] std::string_view sourceFileFor(FT_FaceRec_* face) const;
+    /// Reports the routed face's unrounded effective font size.
+    ///
+    /// - Parameter face: A face owned by this inventory.
+    /// - Returns: Its device-pixel em, or the primary em for an unknown face.
+    [[nodiscard]] double pixelSizeFor(FT_FaceRec_* face) const;
+
 private:
     /// Identifies whether a font file comes from the application bundle or system inventory.
     enum class FontFileSource : std::uint8_t {
         Bundled,
         System
+    };
+
+    /// Releases cached HarfBuzz font references before their FreeType faces.
+    struct ProbeFontDeleter {
+        /// Releases one retained HarfBuzz font.
+        /// - Parameter font: The owned font reference to release.
+        void operator()(hb_font_t* font) const;
+    };
+    /// Releases the reusable buffer owned by the coverage probe.
+    struct ProbeBufferDeleter {
+        /// Releases one retained HarfBuzz buffer.
+        /// - Parameter buffer: The owned buffer reference to release.
+        void operator()(hb_buffer_t* buffer) const;
     };
 
     struct FaceRecord {
@@ -97,8 +125,16 @@ private:
         int faceIndex = 0;
         Rendering::Font::FontStyle style = Rendering::Font::FontStyle::Regular;
         std::uint8_t variableWeight = 0;
+        double emSize = 0;
         Rendering::Font::FontHandle sizingBase {};
         Rendering::FontMetrics::FallbackSizing sizing { Rendering::FontMetrics::FallbackSizing::Inherit };
+        // The probe retains this face until explicitly destroyed before the FT
+        // library. Its metrics are refreshed whenever native face state changes.
+        std::unique_ptr<hb_font_t, ProbeFontDeleter> probeFont {};
+        std::array<long, 10> probeNativeState {};
+        unsigned probeAxisCount { 0 };
+        std::vector<long> probeCoordinates {};
+        std::vector<long> probeCurrentCoordinates {};
     };
 
     Rendering::Font::FontHandle loadFamily(const Rendering::Font::FontFamilyRequest&, bool requireExactFamily); // bool-ok: Validates the fontconfig family-match predicate.
@@ -114,6 +150,11 @@ private:
     Rendering::Font::FontHandle loadFile(std::string file, int faceIndex, const Rendering::Font::FontFamilyRequest&, FontFileSource fileSource, Rendering::Font::FontHandle sizingBase = {});
     Rendering::Font::FontHandle rememberFace(FT_FaceRec_* face, std::string family, std::string postScriptName,
         std::string bundledSource = std::string());
+    /// Synchronizes a cached shaper with its face's current size and axes.
+    ///
+    /// - Parameter record: The inventory-owned face and cached probe state.
+    /// - Returns: A font borrowed until the record or inventory is destroyed.
+    hb_font_t* probeFontFor(FaceRecord& record);
     FaceRecord* recordFor(Rendering::Font::FontHandle);
     [[nodiscard]] const FaceRecord* recordFor(Rendering::Font::FontHandle) const;
 
@@ -122,7 +163,8 @@ private:
     friend struct LinuxFontInventoryTestSeam;
 
     FT_LibraryRec_* m_library { nullptr };
-    int m_fontPixelSize { 16 };
+    std::unique_ptr<hb_buffer_t, ProbeBufferDeleter> m_probeBuffer {};
+    double m_fontPixelSize { 16 };
     Rendering::FontMetrics::FallbackSizing m_fallbackSizing;
     std::string m_primaryFamily;
     std::string m_bundledFontDirectory;

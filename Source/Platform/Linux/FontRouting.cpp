@@ -98,7 +98,7 @@ Rendering::Font::FontRouteAtlasFamily atlasFromRoute(const Rendering::Font::Glyp
 
 } // namespace
 
-void configureFontRouting(int fontPixelSize, const Preferences::Values& config)
+void configureFontRouting(double fontPixelSize, const Preferences::Values& config)
 {
     RoutingState& state = routeState();
     state.inventory.emplace(fontPixelSize, config.fontFamily.value_or(std::string()), std::string(),

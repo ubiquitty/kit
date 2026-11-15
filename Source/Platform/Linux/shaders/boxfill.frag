@@ -105,6 +105,11 @@ float boxCoverage()
             outer = max(outer, -winding * crossProduct(c - b, local - b) / max(length(c - b), 1e-6));
         float halfWidth = inPlB.z * inSizePx.y;
         distance = abs(outer + halfWidth) - halfWidth;
+        if (inShapeKind < 5.5) {
+            float capInset = inPlB.w * inSizePx.y;
+            distance = max(distance, capInset - dot(local - a, (b - a) / max(length(b - a), 1e-6)));
+            distance = max(distance, capInset - dot(local - c, (b - c) / max(length(b - c), 1e-6)));
+        }
     }
     float coverage = clamp(0.5 - distance, 0.0, 1.0);
     return inBitmapTier > 0.5 ? floor(coverage * 51.0 + 0.5) / 51.0 : coverage;

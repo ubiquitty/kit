@@ -236,6 +236,10 @@ extension TerminalSurface {
             sendWindowAction(#selector(TerminalWindowCommands.shrinkFontSize(_:)))
         case .ResetFontSize:
             sendWindowAction(#selector(TerminalWindowCommands.resetFontSize(_:)))
+        case .IncreaseLineSpacing:
+            sendWindowAction(#selector(TerminalWindowCommands.growLineSpacing(_:)))
+        case .DecreaseLineSpacing:
+            sendWindowAction(#selector(TerminalWindowCommands.shrinkLineSpacing(_:)))
         case .ToggleFullscreen:
             sendWindowAction(#selector(NSWindow.toggleFullScreen(_:)))
         case .NewTab:

@@ -12,6 +12,7 @@
 #include "Core/CellGrid.h"
 #include "Core/Rendering/BackgroundImage.h"
 #include "Core/Rendering/CellInstanceBuilder.h"
+#include "Core/Rendering/LetterLayout.h"
 #include "Core/Rendering/PaddingGeometry.h"
 #include "Core/Rendering/RenderConfiguration.h"
 
@@ -32,9 +33,14 @@ struct Cell;
 namespace Ubiquitty::Selection {
 struct Session;
 } // Selection/TerminalSelection.h — one view's selection over one terminal
+namespace Ubiquitty::Runtime {
+struct SyncFrameCaptureGeometry;
+}
 
 namespace Ubiquitty {
 namespace Rendering {
+struct FrameHoverLink;
+struct TerminalSnapshotOptions;
 struct GlyphRasterizer; // Rendering/GlyphRasterizer.h — the raster seam
 struct BeamGeometry; // Rendering/BeamLayout.h — the palette's drawn picture
 struct HintToastGeometry; // Rendering/HintToastLayout.h — a reserved gesture's hint
@@ -63,6 +69,10 @@ constexpr int fallbackCellWidth = 8; // Attribute::Wide cells span two
 constexpr int fallbackCellHeight = 16;
 
 struct PagePadding;
+
+/// Describes the atlas canvas separately from the face's natural pen advance.
+/// Tracking changes the canvas and the cell pitch, never the raster's scale.
+[[nodiscard]] Rendering::GlyphSlotGeometry glyphSlotGeometryForRasterizer(const Rendering::GlyphRasterizer& rasterizer);
 
 /// Owns one window's CPU cache and the capture settings shared with its GPU.
 ///
@@ -107,6 +117,36 @@ public:
     /// - Returns: The cell height in device pixels.
     int cellHeight() const;
 
+    /// The geometry and style shared by live and parser-boundary captures.
+    [[nodiscard]] Runtime::SyncFrameCaptureGeometry frameCaptureGeometry() const;
+
+    /// The native raster grid used by glyph masks and their atlas keys.
+    [[nodiscard]] int glyphPhaseCount() const;
+
+    /// Publishes the hovered run for the pane this context is about to draw.
+    ///
+    /// - Parameter hover: The verified link span in buffer coordinates.
+    void setFrameHoverLink(const Rendering::FrameHoverLink& hover);
+    /// Returns the hovered run carried into live and captured frames.
+    ///
+    /// - Returns: The current pane's verified link span.
+    [[nodiscard]] const Rendering::FrameHoverLink& frameHoverLink() const;
+    /// Supplies the toolkit's link emphasis color; transparent selects palette fallback.
+    ///
+    /// - Parameter color: The native link color in straight-alpha sRGB.
+    void setFrameLinkAccentColor(Rendering::Vec4);
+    /// Returns the native link color used by the current pane's frame options.
+    ///
+    /// - Returns: The native accent, or transparent for palette fallback.
+    [[nodiscard]] const Rendering::Vec4& frameLinkAccentColor() const;
+    /// Applies shared link styling and absolute-to-visible hover conversion.
+    ///
+    /// - Parameters:
+    ///   - options: The frame options that receive link styling and hover state.
+    ///   - terminal: The model owning declared hyperlink identifiers.
+    ///   - viewOffset: The viewport's distance above the live screen.
+    void applyFrameLinkOptions(Rendering::TerminalSnapshotOptions&, const Ubiquitty::Terminal&, int viewOffset) const;
+
     /// The column under a pixel along a row of the last CPU frame: the letter
     /// there where the primary face laid the row out as proportional runs
     /// (LetterLayout.h), else the column at the pitch.
@@ -116,6 +156,9 @@ public:
     ///   - xInPixels: The pixel, from the grid's left edge.
     /// - Returns: The column, clamped to the frame.
     [[nodiscard]] int columnAt(int row, double xInPixels) const;
+
+    /// The last CPU frame's row layout, borrowed until its next build.
+    [[nodiscard]] std::span<const Rendering::LetterExtent> rowLetters(int row) const;
 
     /// Where a pixel is along such a row, in cells, for ``PointerFact::xInCells``.
     ///

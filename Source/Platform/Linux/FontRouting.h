@@ -10,7 +10,7 @@
 
 namespace Ubiquitty::Linux {
 
-void configureFontRouting(int fontPixelSize, const Preferences::Values& config);
+void configureFontRouting(double fontPixelSize, const Preferences::Values& config);
 std::string diagnoseFontRoutes(std::string_view utf8Text, const char* rendererName);
 
 } // namespace Ubiquitty::Linux

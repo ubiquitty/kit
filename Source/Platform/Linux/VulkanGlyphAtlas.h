@@ -40,6 +40,19 @@ namespace Ubiquitty::Linux {
 /// keys carry ``sharedAtlasWideGlyphKey``'s tag and Metal's do not.
 class VulkanGlyphAtlas {
 public:
+    /// Describes the provider's slot geometry and its device-constrained grid.
+    struct Sizing {
+        Rendering::GlyphSlotGeometry geometry;
+        Rendering::AtlasGridFit fit;
+        int capacity = 0;
+    };
+    /// Derives the coverage geometry used by construction and cache identity.
+    ///
+    /// - Parameters:
+    ///   - maxTextureDimension: The device's maximum texture edge.
+    ///   - cellsInWidestScreen: The screen budget the atlas must accommodate.
+    /// - Returns: Matching geometry, grid fit and slot capacity facts.
+    [[nodiscard]] static Sizing sizingFor(const Rendering::GlyphRasterizer&, int maxTextureDimension, int cellsInWidestScreen);
     // Defaults to the owned UnifontRasterizer; pass a real-font rasterizer (the
     // same instance the SoftwareRenderer gets) to keep coverage byte-identical.
     // The caller owns the injected rasterizer.
@@ -107,6 +120,9 @@ public:
 
     /// Commits the dirty range and image layout after successful completion.
     void didUpload();
+    [[nodiscard]] bool hasPendingUploads() const { return m_firstDirtySlot <= m_lastDirtySlot; }
+    [[nodiscard]] bool hasPendingUpload() const { return m_firstDirtySlot != INT_MAX; }
+    [[nodiscard]] std::uint64_t rasterizedSlots() const { return m_rasterizedSlots; }
 
     [[nodiscard]] VkImageView view() const { return m_sheet.view(); }
     [[nodiscard]] VkSampler sampler() const { return m_sheet.sampler(); }
@@ -314,19 +330,20 @@ public:
     [[nodiscard]] int atlasWidthInPixels() const { return m_atlasWidth; }
 
 private:
+    [[nodiscard]] static Sizing sizingFor(int cellWidth, int cellHeight, const Rendering::GlyphRasterizer&, int maxTextureDimension, int cellsInWidestScreen);
     [[nodiscard]] Rendering::AtlasRowBand dirtyRows() const;
     Rendering::AtlasGlyph faultGlyph(std::uint32_t key, std::uint32_t codePoint, Rendering::FontFace);
     // The cluster counterpart of faultGlyph: the slot its key holds, or a fresh
     // one composited through the rasterizer's cluster path, and the cell box
     // inside it in atlas pixels.
-    Rendering::AtlasGlyph faultCluster(std::uint32_t key, std::span<const std::uint32_t> codePoints, Rendering::FontFace, std::uint32_t weight);
+    Rendering::AtlasGlyph faultCluster(std::uint32_t key, std::span<const std::uint32_t> codePoints, Rendering::FontFace, std::uint32_t weight, std::uint32_t variant = 0);
     // MIRRORS SoftwareRenderer::rasterizeInto via the same GlyphRasterizer: faults
     // coverage into a slot-local scratch and blits `slotWidthInPixels` px into the
     // host mirror. slotWidthInPixels is cellWidth for mono (left half), 2*cellWidth
     // for wide. The face is the cell's: the key already tells bold from regular,
     // so a raster that asked for the regular face regardless filled the bold
     // slot with regular ink, and every bold cell drew regular on this arm alone.
-    void rasterizeInto(int slot, int slotWidthInPixels, std::uint32_t codePoint, Rendering::FontFace);
+    void rasterizeInto(int slot, int slotWidthInPixels, std::uint32_t codePoint, Rendering::FontFace, double phaseInPixels = 0);
     /// Records the ink box a raster just written to `slot` covers.
     ///
     /// - Parameters:
@@ -336,7 +353,7 @@ private:
     ///   - heightInPixels: The plane's height.
     void recordInkBox(int slot, std::span<const std::uint8_t> plane, int widthInPixels, int heightInPixels);
     // The cluster counterpart of rasterizeInto, into the mono overflow canvas.
-    void rasterizeClusterInto(int slot, std::span<const std::uint32_t> codePoints, Rendering::FontFace, std::uint32_t weight);
+    void rasterizeClusterInto(int slot, std::span<const std::uint32_t> codePoints, Rendering::FontFace, std::uint32_t weight, std::uint32_t variant = 0);
     /// The canvas a sized window fills inside its slot.
     enum class SizedWindowCanvas : std::uint8_t {
         /// The mono overflow canvas: the cell with a margin at each side.
@@ -370,6 +387,7 @@ private:
     Rendering::LigatureSheet* m_proportionalStripSheet = nullptr;
     Rendering::ProportionalGlyphSheet* m_proportionalSheet = nullptr;
     Rendering::UnifontRasterizer m_unifont; // default raster + injected fallback
+    Sizing m_sizing;
     int m_monoMarginXInPixels; // horizontal overflow margin per side (0 ⇒ cell-tight)
     int m_monoMarginYInPixels; // vertical overflow margin per side (0 ⇒ cell-tight)
     int m_monoSlotWidthInPixels; // cellWidth + 2*m_monoMarginXInPixels — the mono overflow canvas
@@ -396,6 +414,7 @@ private:
     void markSlotDirty(int slot);
 
     Rendering::GlyphSlotCache m_cache;
+    std::uint64_t m_rasterizedSlots = 0;
     Rendering::GlyphSlotGeometry m_geometry; // grid-slot geometry (pitch = m_slotWidthInPixels)
     std::vector<std::uint8_t> m_coverage; // R8 host mirror, atlasWidth*atlasHeight
     Rendering::GlyphRasterizer& m_rasterizer; // == m_unifont unless one is injected

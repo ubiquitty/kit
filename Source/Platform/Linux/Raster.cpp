@@ -10,6 +10,7 @@
 #include "Core/CellPen.h"
 #include "Core/Cursor/RenderState.h"
 #include "Core/Rendering/OverlaySpanGather.h"
+#include "Core/Runtime/TerminalSession.h"
 #include "Core/Screen/Addressing.h"
 #include "Core/Selection/TerminalSelection.h"
 #include <span>
@@ -91,6 +92,8 @@ struct RasterContext::State {
     };
     WindowRenderSettings windowRenderSettings;
     float lastFocusedMatchAgeSeconds = -1.0f;
+    Rendering::FrameHoverLink frameHoverLink;
+    Rendering::Vec4 frameLinkAccentColor { 0, 0, 0, 0 };
 };
 
 RasterContext::RasterContext()
@@ -116,6 +119,131 @@ std::vector<IntRect> RasterContext::snapshotOverlayRegions(const Terminal& termi
         append(terminal.screens.active->cursorX, terminal.screens.active->cursorY, width, 1);
     }
     return regions;
+}
+
+Rendering::GlyphSlotGeometry glyphSlotGeometryForRasterizer(const Rendering::GlyphRasterizer& rasterizer)
+{
+    const auto metrics = rasterizer.cellMetrics();
+    const auto overhang = rasterizer.glyphOverhang();
+    const auto slot = Rendering::computeGlyphSlot(overhang);
+    Rendering::GlyphSlotGeometry geometry {};
+    // The actual CPU and Vulkan canvases use the rounded cell dimensions.
+    // Sampling them through an untracked quad resizes the bitmap whenever a
+    // boundary capture follows a live frame with nonzero character spacing.
+    geometry.glyphWidthInPixels = Rendering::cellDimension(metrics.cellWidth);
+    geometry.glyphMarginInPixels = slot.marginInPixels;
+    geometry.slotWidthInPixels = geometry.glyphWidthInPixels + 2 * slot.marginInPixels.width;
+    geometry.slotHeightInPixels = Rendering::cellDimension(metrics.cellHeight) + 2 * slot.marginInPixels.height;
+    geometry.referenceAdvanceInPixels = overhang.advanceWidth > 0.0 ? static_cast<float>(overhang.advanceWidth) : metrics.cellWidth;
+    geometry.referenceLineHeightInPixels = metrics.cellHeight;
+    return geometry;
+}
+
+namespace {
+
+template<typename Options>
+void applyLinkConfiguration(Options& options, const Rendering::RenderConfiguration& configuration, Rendering::Vec4 accent)
+{
+    Rendering::TerminalSnapshotOptions resolved;
+    Preferences::Effective::applyLinkSettings(resolved, configuration, nullptr);
+    options.shouldUnderlineLinks = resolved.shouldUnderlineLinks;
+    options.shouldResolveLinkKindsFromSource = configuration.shouldStyleLinksPerKind;
+    options.linkUnderlineStyle = resolved.linkUnderlineStyle;
+    options.linkUnderlineStyleFile = configuration.shouldStyleLinksPerKind
+        ? resolved.linkUnderlineStyleFile
+        : options.linkUnderlineStyle;
+    options.linkUnderlineStyleMailto = configuration.shouldStyleLinksPerKind
+        ? resolved.linkUnderlineStyleMailto
+        : options.linkUnderlineStyle;
+    // Zero alpha asks Core for the palette's accessible link blue. Geometry's
+    // default opaque black would suppress that shared palette resolution.
+    options.linkColor = configuration.shouldUseSystemBlueLinkColor ? accent : Rendering::Vec4 { 0, 0, 0, 0 };
+    options.linkHoverColor = accent;
+}
+
+} // namespace
+
+void RasterContext::setFrameHoverLink(const Rendering::FrameHoverLink& hover)
+{
+    m_state->frameHoverLink = hover;
+}
+
+const Rendering::FrameHoverLink& RasterContext::frameHoverLink() const
+{
+    return m_state->frameHoverLink;
+}
+
+void RasterContext::setFrameLinkAccentColor(Rendering::Vec4 color)
+{
+    m_state->frameLinkAccentColor = color;
+}
+
+const Rendering::Vec4& RasterContext::frameLinkAccentColor() const
+{
+    return m_state->frameLinkAccentColor;
+}
+
+void RasterContext::applyFrameLinkOptions(Rendering::TerminalSnapshotOptions& options, const Ubiquitty::Terminal& terminal, int viewOffset) const
+{
+    applyLinkConfiguration(options, renderConfiguration(), m_state->frameLinkAccentColor);
+    Rendering::applyFrameHoverLink(options, m_state->frameHoverLink, Screen::scrollbackCount(&terminal), viewOffset);
+    // The caller-built FrameSource carries composited cells, so its kind
+    // lookup explicitly borrows the model those OSC 8 identifiers belong to.
+    // Equal per-kind styles above retain the global style when kinds are off;
+    // action links still retain Core's own action presentation.
+    options.linkKindResolverContext = const_cast<Ubiquitty::Terminal*>(&terminal);
+    options.linkKindResolver = [](std::uint16_t identifier, void* context) -> std::uint8_t {
+        return static_cast<std::uint8_t>(Attributes::LinkRun::kindForLinkID(static_cast<const Ubiquitty::Terminal*>(context), identifier));
+    };
+}
+
+int RasterContext::glyphPhaseCount() const
+{
+    return m_state->injectedRasterizer ? m_state->injectedRasterizer->glyphPhaseCount() : 1;
+}
+
+Runtime::SyncFrameCaptureGeometry RasterContext::frameCaptureGeometry() const
+{
+    auto* injectedRasterizer = m_state->injectedRasterizer;
+    // The same rasterizer the atlas below is built from, so the capture's metrics
+    // and the glyphs it addresses come from one face.
+    const Rendering::CellMetrics metrics = injectedRasterizer != nullptr
+        ? injectedRasterizer->cellMetrics()
+        : Rendering::CellMetrics { .cellWidth = static_cast<float>(fallbackCellWidth), .cellHeight = static_cast<float>(fallbackCellHeight) };
+    // Built before the capture and handed to it. Writing these onto the
+    // BuildInputs afterwards reaches four of the eleven fields the geometry
+    // carries, and the seven a hand-written subset leaves at zero are what keeps
+    // a wide glyph off the wide pass on this arm.
+    //
+    // Zero overhang (Unifont, or no real face) yields zero margins and leaves the
+    // cell-baked path, which is what the injected-rasterizer test relies on.
+    Rendering::GlyphSlotGeometry slot {};
+    if (injectedRasterizer) {
+        slot = glyphSlotGeometryForRasterizer(*injectedRasterizer);
+        // The face's own box strokes, so procedural geometry — diagonals,
+        // arcs, the thin separators — carries the weight the face draws its
+        // rules at. Left unmeasured, every one of them falls back to the
+        // em-derived rule and draws heavier than the lines beside it.
+        slot.boxStrokeProfile = Rendering::BoxDrawing::measureBoxStrokeProfile(*injectedRasterizer,
+            Rendering::cellDimension(injectedRasterizer->cellMetrics().cellWidth),
+            Rendering::cellDimension(injectedRasterizer->cellMetrics().cellHeight));
+    }
+    Runtime::SyncFrameCaptureGeometry geometry;
+    geometry.metrics = metrics;
+    geometry.glyphSlot = slot;
+    geometry.subpixelPhaseCount = glyphPhaseCount();
+    const auto& configuration = renderConfiguration();
+    geometry.style.backgroundOpacity = backgroundOpacity();
+    geometry.style.shouldEnhanceTextContrast = configuration.shouldEnhanceTextContrast;
+    geometry.style.unifontScale = embeddedBitmapScale();
+    Preferences::Effective::applyRuleSettings(geometry.style, configuration, deviceScale());
+    geometry.cellHeightPoints = static_cast<double>(cellHeight()) / deviceScale();
+    geometry.lineSpacingPoints = configuration.lineSpacingPoints;
+    geometry.shouldDrawPasswordLock = true;
+    geometry.shouldCursorInvertText = configuration.shouldCursorInvertText;
+    geometry.toolkitCaret = toolkitCaret();
+    applyLinkConfiguration(geometry, configuration, m_state->frameLinkAccentColor);
+    return geometry;
 }
 
 bool RasterContext::snapshotCompositesOverlay() const
@@ -152,6 +280,7 @@ void RasterContext::setBackgroundImage(Rendering::BackgroundImagePixels pixels)
 Rendering::BackgroundImageLayer RasterContext::backgroundImageLayer() const
 {
     Rendering::TerminalSnapshotOptions options;
+    options.subpixelPhaseCount = glyphPhaseCount();
     Preferences::Effective::applyBackgroundImageSettings(options, m_state->windowRenderSettings.configuration,
         &m_state->windowRenderSettings.backgroundImage);
     return options.backgroundImage;
@@ -177,6 +306,11 @@ int RasterContext::deviceScale() const { return m_state->windowRenderSettings.de
 void RasterContext::setGlyphRasterizer(Rendering::GlyphRasterizer& rasterizer) { m_state->injectedRasterizer = &rasterizer; }
 
 void RasterContext::resetSoftwareRenderer() { m_state->softwareRenderer.reset(); }
+
+std::span<const Rendering::LetterExtent> RasterContext::rowLetters(int row) const
+{
+    return m_state->softwareRenderer ? m_state->softwareRenderer->rowLetters(row) : std::span<const Rendering::LetterExtent> {};
+}
 
 int RasterContext::columnAt(int row, double xInPixels) const
 {
@@ -376,6 +510,7 @@ void RasterContext::fillCursorState(const Ubiquitty::Terminal* term, int viewOff
     // `[cursor] alpha`, which the palette's three channels cannot.
     const Rendering::RenderConfiguration& configuration = m_state->windowRenderSettings.configuration;
     out.shouldInvertText = configuration.shouldCursorInvertText;
+    out.outlineThicknessPoints = static_cast<float>(configuration.cursorOutlineThicknessPoints);
     Rendering::setCursorTextColor(out, Rendering::cursorTextColor(*term));
     out.rgb = { Ubiquitty::channel16To8(color.red) / 255.0f, Ubiquitty::channel16To8(color.green) / 255.0f, Ubiquitty::channel16To8(color.blue) / 255.0f,
         static_cast<float>(configuration.cursorAlpha) };
@@ -403,7 +538,6 @@ void RasterContext::fillCursorState(const Ubiquitty::Terminal* term, int viewOff
 bool RasterContext::rasterizeTerm(Ubiquitty::Terminal* term, std::vector<uint8_t>& out, int& widthOut, int& heightOut, int viewOffset, Ubiquitty::Selection::Session* selection, const CursorOverlay* cursor, uint32_t blinkTicks, const PagePadding* page)
 {
     auto& softwareRenderer = m_state->softwareRenderer;
-    auto* injectedRasterizer = m_state->injectedRasterizer;
     const auto& windowRenderSettings = m_state->windowRenderSettings;
     if (!term)
         return false;
@@ -499,6 +633,7 @@ bool RasterContext::rasterizeTerm(Ubiquitty::Terminal* term, std::vector<uint8_t
     source.softFont = Ubiquitty::softFontOrNull(*term);
 
     Rendering::TerminalSnapshotOptions options;
+    options.subpixelPhaseCount = glyphPhaseCount();
     options.viewOffset = viewOffset;
     // No view layer here: the badge that says the terminal is taking a
     // password has to be part of the frame or it does not exist.
@@ -523,6 +658,7 @@ bool RasterContext::rasterizeTerm(Ubiquitty::Terminal* term, std::vector<uint8_t
     options.toolkitCaret = toolkitCaret();
     Preferences::Effective::applyTekSettings(options, configuration);
     options.tekDeviceScale = static_cast<float>(windowRenderSettings.deviceScale);
+    applyFrameLinkOptions(options, *term, viewOffset);
     options.backgroundImage = backgroundImageLayer();
     Rendering::applyPointSpace(options, static_cast<float>(cellHeight()), windowRenderSettings.deviceScale,
         configuration.lineSpacingPoints);
@@ -552,42 +688,9 @@ bool RasterContext::rasterizeTerm(Ubiquitty::Terminal* term, std::vector<uint8_t
     }
 
     Rendering::TerminalFrameInputs frame;
-    // The same rasterizer the atlas below is built from, so the capture's metrics
-    // and the glyphs it addresses come from one face.
-    const Rendering::CellMetrics metrics = injectedRasterizer != nullptr
-        ? injectedRasterizer->cellMetrics()
-        : Rendering::CellMetrics { .cellWidth = static_cast<float>(fallbackCellWidth), .cellHeight = static_cast<float>(fallbackCellHeight) };
-    // Built before the capture and handed to it. Writing these onto the
-    // BuildInputs afterwards reaches four of the eleven fields the geometry
-    // carries, and the seven a hand-written subset leaves at zero are what keeps
-    // a wide glyph off the wide pass on this arm.
-    //
-    // Zero overhang (Unifont, or no real face) yields zero margins and leaves the
-    // cell-baked path, which is what the injected-rasterizer test relies on.
-    Rendering::GlyphSlotGeometry slot {};
-    if (injectedRasterizer) {
-        const Rendering::GlyphOverhangInputs overhang = injectedRasterizer->glyphOverhang();
-        const Rendering::GlyphSlot glyphSlot = Rendering::computeGlyphSlot(overhang);
-        // The slot is cut to the face's own advance rather than to the cell
-        // pitch, because it holds INK: character spacing moves the column and
-        // leaves the glyph the size the face drew it. A slot sized from the
-        // pitch would stretch a glyph under positive tracking and clip one
-        // under negative. Zero overhang (Unifont, or no real face) reports no
-        // advance, and the pitch is then the only measurement there is.
-        const float inkAdvance = overhang.advanceWidth > 0.0 ? static_cast<float>(overhang.advanceWidth)
-                                                             : injectedRasterizer->cellMetrics().cellWidth;
-        slot.glyphMarginInPixels = glyphSlot.marginInPixels;
-        slot.slotWidthInPixels = Rendering::cellDimension(inkAdvance) + 2 * glyphSlot.marginInPixels.width;
-        slot.slotHeightInPixels = Rendering::cellDimension(injectedRasterizer->cellMetrics().cellHeight) + 2 * glyphSlot.marginInPixels.height;
-        slot.glyphWidthInPixels = Rendering::cellDimension(inkAdvance);
-        // The face's own box strokes, so procedural geometry — diagonals,
-        // arcs, the thin separators — carries the weight the face draws its
-        // rules at. Left unmeasured, every one of them falls back to the
-        // em-derived rule and draws heavier than the lines beside it.
-        slot.boxStrokeProfile = Rendering::BoxDrawing::measureBoxStrokeProfile(*injectedRasterizer,
-            Rendering::cellDimension(injectedRasterizer->cellMetrics().cellWidth),
-            Rendering::cellDimension(injectedRasterizer->cellMetrics().cellHeight));
-    }
+    const auto geometry = frameCaptureGeometry();
+    const auto& metrics = geometry.metrics;
+    const auto& slot = geometry.glyphSlot;
     // The atlas persists across frames (cross-frame glyph LRU) on the single
     // GTK thread that calls this. Built lazily so an injected rasterizer set
     // before the first call is wired in; otherwise it uses its own Unifont.

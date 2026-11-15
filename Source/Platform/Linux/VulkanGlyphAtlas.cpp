@@ -33,6 +33,23 @@ constexpr int atlasColumns = 32;
 
 } // namespace
 
+VulkanGlyphAtlas::Sizing VulkanGlyphAtlas::sizingFor(const Rendering::GlyphRasterizer& rasterizer, int maximum, int cells)
+{
+    return sizingFor(Rendering::cellDimension(rasterizer.cellMetrics().cellWidth), Rendering::cellDimension(rasterizer.cellMetrics().cellHeight), rasterizer, maximum, cells);
+}
+
+VulkanGlyphAtlas::Sizing VulkanGlyphAtlas::sizingFor(int width, int height, const Rendering::GlyphRasterizer& rasterizer, int maximum, int cells)
+{
+    const auto slot = Rendering::computeGlyphSlot(rasterizer.glyphOverhang());
+    Sizing result;
+    const int slotWidth = std::max(width * 2, width + 2 * slot.marginInPixels.width);
+    const int slotHeight = height + 2 * slot.marginInPixels.height;
+    result.fit = Rendering::glyphSheetGridForScreen(cells, 1, atlasColumns, { slotWidth, slotHeight }, maximum);
+    result.geometry = { result.fit.columns, slotWidth, slotHeight, width, slot.marginInPixels };
+    result.capacity = result.fit.columns * result.fit.rows;
+    return result;
+}
+
 VulkanGlyphAtlas::VulkanGlyphAtlas(int cellWidthInPixels, int cellHeightInPixels, int maxTextureDimension, int cellsInWidestScreen)
     : VulkanGlyphAtlas(cellWidthInPixels, cellHeightInPixels, m_unifont, maxTextureDimension, cellsInWidestScreen)
 {
@@ -48,21 +65,21 @@ VulkanGlyphAtlas::VulkanGlyphAtlas(Rendering::GlyphRasterizer& rasterizer, int m
 VulkanGlyphAtlas::VulkanGlyphAtlas(int cellWidthInPixels, int cellHeightInPixels, Rendering::GlyphRasterizer& rasterizer, int maxTextureDimension, int cellsInWidestScreen)
     : m_cellWidth(cellWidthInPixels)
     , m_cellHeight(cellHeightInPixels)
+    , m_sizing(sizingFor(cellWidthInPixels, cellHeightInPixels, rasterizer, maxTextureDimension, cellsInWidestScreen))
     // Overflow margin from the shared sizing policy over the rasterizer's font
     // overhang (the same margin the CPU path derives), so a Nerd-Font glyph wider
     // than the cell box has a slot to render into. Zero for Unifont ⇒
     // m_monoSlotWidthInPixels == cellWidth, every UV unchanged.
-    , m_monoMarginXInPixels(Rendering::computeGlyphSlot(rasterizer.glyphOverhang()).marginInPixels.width)
-    , m_monoMarginYInPixels(Rendering::computeGlyphSlot(rasterizer.glyphOverhang()).marginInPixels.height)
+    , m_monoMarginXInPixels(m_sizing.geometry.glyphMarginInPixels.width)
+    , m_monoMarginYInPixels(m_sizing.geometry.glyphMarginInPixels.height)
     , m_monoSlotWidthInPixels(cellWidthInPixels + 2 * m_monoMarginXInPixels)
-    , m_slotWidthInPixels(m_monoSlotWidthInPixels > cellWidthInPixels * 2 ? m_monoSlotWidthInPixels : cellWidthInPixels * 2)
-    , m_slotHeightInPixels(cellHeightInPixels + 2 * m_monoMarginYInPixels)
+    , m_slotWidthInPixels(m_sizing.geometry.slotWidthInPixels)
+    , m_slotHeightInPixels(m_sizing.geometry.slotHeightInPixels)
     // Rows to hold what Core asks for, then the device clamp cuts the grid to
     // what it will allocate. Asking generously is safe because that clamp is
     // what decides the real size; asking for a constant is what left a screen
     // able to reference more glyphs than the atlas could hold.
-    , m_fit(Rendering::glyphSheetGridForScreen(cellsInWidestScreen, 1, atlasColumns,
-          IntSize { m_slotWidthInPixels, m_slotHeightInPixels }, maxTextureDimension))
+    , m_fit(m_sizing.fit)
     , m_columns(m_fit.columns)
     , m_capacity(m_fit.columns * m_fit.rows)
     , m_atlasWidth(m_fit.columns * m_slotWidthInPixels)
@@ -73,8 +90,7 @@ VulkanGlyphAtlas::VulkanGlyphAtlas(int cellWidthInPixels, int cellHeightInPixels
     // harmless; they stop being harmless the moment a lookup routes through
     // atlasRectForSlot, which would then return the full slot and look correct against
     // any zero-overhang face.
-    , m_geometry { m_fit.columns, m_slotWidthInPixels, m_slotHeightInPixels, cellWidthInPixels,
-        Ubiquitty::IntSize { m_monoMarginXInPixels, m_monoMarginYInPixels } }
+    , m_geometry(m_sizing.geometry)
     , m_rasterizer(rasterizer)
     , m_slotScratch(static_cast<std::size_t>(m_slotWidthInPixels) * m_slotHeightInPixels, 0)
 {
@@ -129,7 +145,7 @@ void VulkanGlyphAtlas::beginFrame()
 // MIRROR of SoftwareRenderer::rasterizeInto via the same GlyphRasterizer: faults
 // coverage into a slot-local scratch and blits `slotWidthInPixels` px into the
 // host mirror. A false return (no glyph) clears those px.
-void VulkanGlyphAtlas::rasterizeInto(int slot, int slotWidthInPixels, std::uint32_t codePoint, Rendering::FontFace face)
+void VulkanGlyphAtlas::rasterizeInto(int slot, int slotWidthInPixels, std::uint32_t codePoint, Rendering::FontFace face, double phaseInPixels)
 {
     // Core's arithmetic, not this backend's. The Metal backend uploads to the
     // same slots from the same grid, and two derivations of where slot N sits
@@ -147,8 +163,8 @@ void VulkanGlyphAtlas::rasterizeInto(int slot, int slotWidthInPixels, std::uint3
     // frame stayed in the mirror and drew blank, and a blank glyph is what a
     // space looks like.
     markSlotDirty(slot);
-    const bool present = m_rasterizer.rasterizeGlyph(codePoint, face,
-        /*weight=*/0, slotWidthInPixels, slotHeightInPixels, m_slotScratch.data());
+    const bool present = m_rasterizer.rasterizeGlyphAtPhase(codePoint, face,
+        /*weight=*/0, phaseInPixels, slotWidthInPixels, slotHeightInPixels, m_slotScratch.data());
     const std::span<const std::uint8_t> plane = present
         ? std::span<const std::uint8_t>(m_slotScratch).first(static_cast<std::size_t>(slotWidthInPixels) * slotHeightInPixels)
         : std::span<const std::uint8_t> {};
@@ -186,14 +202,14 @@ bool VulkanGlyphAtlas::stageMonoCoverage(int slot, std::span<const std::uint8_t>
     return true;
 }
 
-void VulkanGlyphAtlas::rasterizeClusterInto(int slot, std::span<const std::uint32_t> codePoints, Rendering::FontFace face, std::uint32_t weight)
+void VulkanGlyphAtlas::rasterizeClusterInto(int slot, std::span<const std::uint32_t> codePoints, Rendering::FontFace face, std::uint32_t weight, std::uint32_t variant)
 {
     // The mono overflow canvas, as rasterizeInto fills it for one glyph: a
     // cluster composites into the same box its base alone would take.
     const int width = m_monoSlotWidthInPixels;
     const int height = m_slotHeightInPixels;
     const Rendering::AtlasSlotRegion region { (slot % m_columns) * m_slotWidthInPixels, (slot / m_columns) * m_slotHeightInPixels, width, height };
-    const bool inked = m_rasterizer.rasterizeCluster(codePoints.data(), static_cast<int>(codePoints.size()), face, weight, width, height, m_slotScratch.data());
+    const bool inked = m_rasterizer.rasterizeClusterAtPhase(codePoints.data(), static_cast<int>(codePoints.size()), face, weight, static_cast<double>(Rendering::variantPhase(variant)) / std::max(1, m_rasterizer.glyphPhaseCount()), width, height, m_slotScratch.data());
     const std::span<const std::uint8_t> plane = inked ? std::span<const std::uint8_t>(m_slotScratch).first(static_cast<std::size_t>(width) * static_cast<std::size_t>(height)) : std::span<const std::uint8_t> {};
     Rendering::writeAtlasCoverage(m_coverage, m_atlasWidth, region, plane);
     recordInkBox(slot, plane, width, height);
@@ -215,7 +231,7 @@ void VulkanGlyphAtlas::rasteriseSizedWindowInto(SizedWindowCanvas canvas, int sl
     const Rendering::AtlasSlotRegion region { (slot % m_columns) * m_slotWidthInPixels, (slot / m_columns) * m_slotHeightInPixels, window.width, window.height };
     markSlotDirty(slot);
     const std::span<std::uint8_t> pixels = std::span(m_slotScratch).first(static_cast<std::size_t>(window.width) * static_cast<std::size_t>(window.height));
-    if (!Rendering::rasteriseSizedWindow(m_rasterizer, codePoint, face, weight, tile, phase, window, m_sizedScratch, pixels)) {
+    if (!Rendering::rasteriseSizedWindow(m_rasterizer, codePoint, face, weight, tile, phase, window, m_sizedScratch, pixels, m_rasterizer.glyphPhaseCount())) {
         Rendering::writeAtlasCoverage(m_coverage, m_atlasWidth, region, {});
         return;
     }
@@ -292,7 +308,7 @@ Rendering::AtlasGlyph VulkanGlyphAtlas::faultGlyph(std::uint32_t key, std::uint3
     const int wideWidthInPixels = m_cellWidth * 2;
     const int slotWidthInPixels = isWide ? wideWidthInPixels : m_monoSlotWidthInPixels;
     if (fresh) {
-        rasterizeInto(slot, slotWidthInPixels, codePoint, face);
+        rasterizeInto(slot, slotWidthInPixels, codePoint, face, isWide ? 0 : static_cast<double>(Rendering::variantPhase(key)) / std::max(1, m_rasterizer.glyphPhaseCount()));
         markSlotDirty(slot);
     }
 
@@ -317,14 +333,14 @@ Rendering::AtlasGlyph VulkanGlyphAtlas::faultGlyph(std::uint32_t key, std::uint3
     return out;
 }
 
-Rendering::AtlasGlyph VulkanGlyphAtlas::faultCluster(std::uint32_t key, std::span<const std::uint32_t> codePoints, Rendering::FontFace face, std::uint32_t weight)
+Rendering::AtlasGlyph VulkanGlyphAtlas::faultCluster(std::uint32_t key, std::span<const std::uint32_t> codePoints, Rendering::FontFace face, std::uint32_t weight, std::uint32_t variant)
 {
     bool isFresh = false;
     const int slot = m_cache.slotForKeyVerified(key, codePoints.data(), static_cast<int>(codePoints.size()), &isFresh);
     if (slot < 0)
         return {}; // the sheet is full this frame: background only
     if (isFresh) {
-        rasterizeClusterInto(slot, codePoints, face, weight);
+        rasterizeClusterInto(slot, codePoints, face, weight, variant);
         markSlotDirty(slot);
     }
     // The cell box inside the mono slot, past the margin, in atlas pixels: the
@@ -347,6 +363,7 @@ Rendering::AtlasGlyph VulkanGlyphAtlas::monoGlyph(std::uint32_t codePoint, Rende
 Rendering::MonoAtlasBinding VulkanGlyphAtlas::bindMonoAtlas()
 {
     Rendering::MonoAtlasBinding binding;
+    binding.phaseCount = m_rasterizer.glyphPhaseCount();
     binding.cache = &m_cache;
     binding.geometry = m_geometry;
     binding.slotCapacity = m_capacity;
@@ -358,19 +375,19 @@ Rendering::MonoAtlasBinding VulkanGlyphAtlas::bindMonoAtlas()
 // The mono overflow canvas (cell + 2*margin), not the grid pitch: the pitch is
 // max(2*cell, monoSlot) and rasterising to it would stretch the glyph wherever
 // the mono margin pushes the pitch past two cells.
-bool VulkanGlyphAtlas::rasteriseMonoGlyph(std::uint32_t codePoint, Rendering::FontFace face, std::uint32_t, int slot)
+bool VulkanGlyphAtlas::rasteriseMonoGlyph(std::uint32_t codePoint, Rendering::FontFace face, std::uint32_t variant, int slot)
 {
     // No branch leaves before the upload: a code point the rasterizer declines
     // still lands in the slot as a blank, which is a defined answer this key
     // owns rather than the last tenant's ink.
-    rasterizeInto(slot, m_monoSlotWidthInPixels, codePoint, face);
+    rasterizeInto(slot, m_monoSlotWidthInPixels, codePoint, face, static_cast<double>(Rendering::variantPhase(variant)) / std::max(1, m_rasterizer.glyphPhaseCount()));
     return true;
 }
 
 Rendering::AtlasGlyph VulkanGlyphAtlas::clusterGlyph(const std::uint32_t* codePoints, int count, Rendering::FontFace face, std::uint32_t weight, std::uint32_t phase)
 {
     const std::span<const std::uint32_t> cluster = count > 0 ? std::span(codePoints, static_cast<std::size_t>(count)) : std::span<const std::uint32_t> {};
-    return faultCluster(Rendering::coverageClusterKey(codePoints, count, phase, face), cluster, face, weight);
+    return faultCluster(Rendering::coverageClusterKey(codePoints, count, phase, face), cluster, face, weight, phase);
 }
 
 // Weight 0: the Vulkan rasterizer applies no variable weight, so keying a single
@@ -496,6 +513,7 @@ void VulkanGlyphAtlas::markSlotDirty(int slot)
 {
     if (slot < 0)
         return;
+    ++m_rasterizedSlots;
     if (slot < m_firstDirtySlot)
         m_firstDirtySlot = slot;
     if (m_lastDirtySlot == INT_MAX || slot > m_lastDirtySlot)

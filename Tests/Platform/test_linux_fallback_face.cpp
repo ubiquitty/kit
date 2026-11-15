@@ -26,6 +26,7 @@
 #include "Core/Preferences/Preferences.h"
 #include "Core/Rendering/BoxDrawingRasterizer.h"
 #include "Core/Rendering/GlyphTiling.h"
+#include "Core/Rendering/SizedMaster.h"
 #include "Platform/Linux/FontInventory.h"
 #include "Platform/Linux/FreeTypeRasterizer.h"
 #include <cmath>
@@ -35,6 +36,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <memory>
 #include <string>
 #include <strings.h>
 #include <unistd.h>
@@ -42,7 +44,11 @@
 
 #include <fontconfig/fontconfig.h>
 #include <ft2build.h>
+#include <hb-ft.h>
+#include <pango/pangocairo.h>
+#include <pango/pangofc-fontmap.h>
 #include FT_FREETYPE_H
+#include FT_OUTLINE_H
 
 namespace {
 
@@ -104,6 +110,62 @@ bool registerBundledFonts()
         return false;
     return FcConfigAppFontAddDir(FcConfigGetCurrent(), reinterpret_cast<const FcChar8*>(UBQ_BUNDLED_FONTS_DIR)) == FcTrue;
 }
+
+// Independent native reference, restricted to the exact bundled symbol file.
+// The renderer's adapter is not used: Pango shapes and paints this reference.
+struct NativeSymbolReference {
+    FcConfig* configuration { FcConfigCreate() };
+    PangoFontMap* map { pango_cairo_font_map_new() };
+    PangoContext* context { nullptr };
+
+    NativeSymbolReference()
+    {
+        CHECK(FcConfigAppFontAddFile(configuration, reinterpret_cast<const FcChar8*>(bundled("SymbolsNerdFontMono-Regular.ttf").c_str())));
+        pango_fc_font_map_set_config(PANGO_FC_FONT_MAP(map), configuration);
+        context = pango_font_map_create_context(map);
+        pango_context_set_round_glyph_positions(context, TRUE);
+        auto* options = cairo_font_options_create();
+        cairo_font_options_set_antialias(options, CAIRO_ANTIALIAS_GRAY);
+        cairo_font_options_set_hint_style(options, CAIRO_HINT_STYLE_NONE);
+        cairo_font_options_set_hint_metrics(options, CAIRO_HINT_METRICS_ON);
+        pango_cairo_context_set_font_options(context, options);
+        cairo_font_options_destroy(options);
+    }
+
+    ~NativeSymbolReference()
+    {
+        g_object_unref(context);
+        g_object_unref(map);
+        FcConfigDestroy(configuration);
+    }
+
+    std::vector<std::uint8_t> draw(std::uint32_t codePoint, double em, int width, int height, double x, double baseline)
+    {
+        auto* description = pango_font_description_new();
+        pango_font_description_set_family(description, "Symbols Nerd Font Mono");
+        pango_font_description_set_absolute_size(description, em * PANGO_SCALE);
+        auto* layout = pango_layout_new(context);
+        pango_layout_set_font_description(layout, description);
+        std::array<char, 7> text {};
+        const int length = g_unichar_to_utf8(codePoint, text.data());
+        pango_layout_set_text(layout, text.data(), length);
+        auto* surface = cairo_image_surface_create(CAIRO_FORMAT_A8, width, height);
+        auto* painter = cairo_create(surface);
+        cairo_set_source_rgba(painter, 1, 1, 1, 1);
+        cairo_move_to(painter, x, baseline);
+        pango_cairo_show_layout_line(painter, pango_layout_get_line_readonly(layout, 0));
+        cairo_surface_flush(surface);
+        std::vector<std::uint8_t> result(static_cast<std::size_t>(width) * height);
+        for (int row = 0; row < height; ++row)
+            std::copy_n(cairo_image_surface_get_data(surface) + row * cairo_image_surface_get_stride(surface), width,
+                result.data() + static_cast<std::size_t>(row) * width);
+        cairo_destroy(painter);
+        cairo_surface_destroy(surface);
+        g_object_unref(layout);
+        pango_font_description_free(description);
+        return result;
+    }
+};
 
 /// The `[font]` fallback preferences a configuration with one range map
 /// builds.
@@ -241,7 +303,9 @@ TEST(aCascadedBaseCarriesItsMarkAboveTheSameLetter)
         return;
     }
     const int width = static_cast<int>(std::lround(rasterizer.glyphOverhang().advanceWidth)) * 2 + 4;
-    const int height = static_cast<int>(std::lround(rasterizer.cellMetrics().cellHeight)) + 8;
+    // This case measures the mark's complete raster, independently of atlas
+    // clipping. Its canvas must leave room above the full-height CJK base.
+    const int height = static_cast<int>(std::lround(rasterizer.cellMetrics().cellHeight)) + 2 * fontPixelSize;
     std::vector<std::uint8_t> alone(static_cast<std::size_t>(width) * height, 0);
     CHECK(rasterizer.rasterizeGlyph(hiragana, Ubiquitty::Rendering::FontFace::Regular, 0, width, height, alone.data()));
     const std::array<std::uint32_t, 2> marked { hiragana, 0x0301 };
@@ -280,17 +344,70 @@ TEST(aCascadedBaseCarriesItsMarkAboveTheSameLetter)
     };
     CHECK_MSG(inkTop(cluster, &alone) < inkTop(alone, nullptr), "and it stands above the letter's top stroke, not inside it");
 
-    // The face the cascade names for the cluster draws the acute this wide.
+    // The production policy supplies the primary as the sizing base. Asking
+    // the inventory without it leaves a fallback at its nominal point size,
+    // while this rasterizer matches fallback text to the primary's x-height.
     Ubiquitty::Linux::LinuxFontInventory inventory(fontPixelSize, "JetBrains Mono", UBQ_BUNDLED_FONTS_DIR);
     Ubiquitty::Rendering::Font::CascadeRequest request;
     request.codePoints = marked;
+    request.baseFont = inventory.primaryFont(Ubiquitty::Rendering::Font::FontStyle::Regular, 0);
+    CHECK_MSG(request.baseFont.isValid(), "the same bundled primary sets the fallback's visible size");
     const Ubiquitty::Rendering::Font::CascadeResult routed = inventory.cascadeForRun(request);
     FT_FaceRec_* const markFace = routed.present ? inventory.faceFor(routed.font) : nullptr;
     CHECK_MSG(markFace && FT_Load_Char(markFace, 0x0301, FT_LOAD_RENDER) == 0, "the cascade names a face carrying the cluster");
     if (markFace) {
-        const int designedWidth = static_cast<int>(markFace->glyph->bitmap.width);
-        std::printf("    mark ink %d..%d, the routed face's acute %d wide\n", markFirst, markLast, designedWidth);
+        const int cmapWidth = static_cast<int>(markFace->glyph->bitmap.width);
+        const auto shapedMarkWidth = [&](FT_FaceRec_* face) {
+            const std::unique_ptr<hb_font_t, decltype(&hb_font_destroy)> font(hb_ft_font_create_referenced(face), hb_font_destroy);
+            const std::unique_ptr<hb_buffer_t, decltype(&hb_buffer_destroy)> buffer(hb_buffer_create(), hb_buffer_destroy);
+            for (unsigned int index = 0; index < marked.size(); ++index)
+                hb_buffer_add(buffer.get(), marked[index], index);
+            hb_buffer_set_cluster_level(buffer.get(), HB_BUFFER_CLUSTER_LEVEL_MONOTONE_CHARACTERS);
+            hb_buffer_set_content_type(buffer.get(), HB_BUFFER_CONTENT_TYPE_UNICODE);
+            hb_buffer_guess_segment_properties(buffer.get());
+            hb_shape(font.get(), buffer.get(), nullptr, 0);
+            unsigned int count = 0;
+            const auto* glyphs = hb_buffer_get_glyph_infos(buffer.get(), &count);
+            if (!glyphs || count != 2 || FT_Load_Glyph(face, static_cast<const hb_glyph_info_t&>(glyphs[1]).codepoint, FT_LOAD_RENDER) != 0)
+                return -1;
+            const auto& bitmap = face->glyph->bitmap;
+            int first = static_cast<int>(bitmap.width);
+            int last = -1;
+            for (int row = 0; row < static_cast<int>(bitmap.rows); ++row) {
+                const auto* pixels = bitmap.buffer + static_cast<long>(row) * bitmap.pitch;
+                for (int column = 0; column < static_cast<int>(bitmap.width); ++column) {
+                    const bool hasInk = bitmap.pixel_mode == FT_PIXEL_MODE_MONO
+                        ? (pixels[column / 8] & (0x80 >> (column % 8))) != 0
+                        : pixels[column] != 0;
+                    if (hasInk) {
+                        first = std::min(first, column);
+                        last = std::max(last, column);
+                    }
+                }
+            }
+            return last < first ? 0 : last - first + 1;
+        };
+        const int designedWidth = shapedMarkWidth(markFace);
+        CHECK_MSG(designedWidth >= 0, "the routed font shapes the fixture as a base and acute");
+        std::printf("    routed family %s, nominal cmap acute %d, shaped acute %d wide\n", markFace->family_name, cmapWidth, designedWidth);
+        std::printf("    mark ink %d..%d at row %d, the routed face's acute %d wide\n", markFirst, markLast, inkTop(cluster, &alone), designedWidth);
         CHECK_MSG(std::abs((markLast - markFirst + 1) - designedWidth) <= 1, "drawn from the face the base comes from, at its size");
+        // A different nominal raster must not pass as the matched one. Some
+        // installed faces match the primary and need no rescaling;
+        // where they differ, this control proves matching actually happened.
+        Ubiquitty::Linux::LinuxFontInventory nominalInventory(fontPixelSize, "JetBrains Mono", UBQ_BUNDLED_FONTS_DIR,
+            Ubiquitty::Rendering::FontMetrics::FallbackSizing::Nominal);
+        auto nominalRequest = request;
+        nominalRequest.baseFont = nominalInventory.primaryFont(Ubiquitty::Rendering::Font::FontStyle::Regular, 0);
+        const auto nominalRoute = nominalInventory.cascadeForRun(nominalRequest);
+        FT_FaceRec_* const nominalFace = nominalRoute.present ? nominalInventory.faceFor(nominalRoute.font) : nullptr;
+        CHECK_MSG(nominalFace && FT_Load_Char(nominalFace, 0x0301, FT_LOAD_RENDER) == 0, "the original-size control carries the same mark");
+        if (nominalFace) {
+            const int nominalWidth = shapedMarkWidth(nominalFace);
+            std::printf("    matched acute %d wide, nominal acute %d wide\n", designedWidth, nominalWidth);
+            if (std::abs(designedWidth - nominalWidth) > 2)
+                CHECK_MSG(std::abs((markLast - markFirst + 1) - nominalWidth) > 1, "the nominal-size control differs from the matched raster");
+        }
     }
 }
 
@@ -503,6 +620,91 @@ TEST(aShippedFamilyDrawsItsItalicsFromItsOwnLetterforms)
         CHECK_MSG(boldItalic.lean > 1.0, (name + ": and so does the bold italic: " + std::to_string(boldItalic.lean)).c_str());
         CHECK_MSG(boldItalic.total > italic.total, (name + ": the bold italic carries more ink than the italic").c_str());
     }
+}
+
+TEST(anInstalledStaticFamilyUsesItsOwnBoldAndItalicFaces)
+{
+    REQUIRE(registerBundledFonts());
+    // No bundle paths: the same family must now be resolved as an installed
+    // font, exercising the route a user's Nerd Font takes.
+    Ubiquitty::Linux::FreeTypeRasterizer rasterizer(32, "Monaspace Neon");
+    REQUIRE(rasterizer.ready());
+    constexpr int slot = 48;
+    const auto draw = [&](Ubiquitty::Rendering::FontFace face) {
+        std::vector<std::uint8_t> coverage(slot * slot);
+        CHECK(rasterizer.rasterizeGlyph('I', face, 0, slot, slot, coverage.data()));
+        return coverage;
+    };
+    const auto regular = draw(Ubiquitty::Rendering::FontFace::Regular);
+    const auto bold = draw(Ubiquitty::Rendering::FontFace::Bold);
+    const auto italic = draw(Ubiquitty::Rendering::FontFace::Italic);
+    const auto boldItalic = draw(Ubiquitty::Rendering::FontFace::BoldItalic);
+    const auto ink = [](const std::vector<std::uint8_t>& coverage) {
+        std::uint64_t sum = 0;
+        for (const auto pixel : coverage)
+            sum += pixel;
+        return sum;
+    };
+    CHECK(ink(regular) > 0);
+    CHECK(ink(bold) > ink(regular));
+    CHECK(italic != regular);
+    CHECK(boldItalic != bold);
+    CHECK(ink(boldItalic) > ink(italic));
+}
+
+TEST(aFontconfigFamilyAliasDoesNotFallBackToUnifont)
+{
+    REQUIRE(registerBundledFonts());
+    std::unique_ptr<FcConfig, decltype(&FcConfigDestroy)> previous(FcConfigReference(FcConfigGetCurrent()), FcConfigDestroy);
+    std::unique_ptr<FcConfig, decltype(&FcConfigDestroy)> isolated(FcConfigCreate(), FcConfigDestroy);
+    REQUIRE(isolated);
+    const auto file = bundled("MonaspaceNeon-Regular.otf");
+    REQUIRE(FcConfigAppFontAddFile(isolated.get(), reinterpret_cast<const FcChar8*>(file.c_str())) == FcTrue);
+    FcFontSet* applicationFonts = FcConfigGetFonts(isolated.get(), FcSetApplication);
+    REQUIRE(applicationFonts && applicationFonts->nfont > 0);
+    std::unique_ptr<FcPattern, decltype(&FcPatternDestroy)> aliased(FcPatternDuplicate(applicationFonts->fonts[0]), FcPatternDestroy);
+    REQUIRE(aliased);
+    constexpr const char* alias = "Ubiquitty Installed Family Alias";
+    REQUIRE(FcPatternAddString(aliased.get(), FC_FAMILY, reinterpret_cast<const FcChar8*>(alias)) == FcTrue);
+    REQUIRE(FcFontSetAdd(applicationFonts, aliased.get()) == FcTrue);
+    (void)aliased.release(); // The font set owns the mutable aliased pattern.
+    REQUIRE(FcConfigSetCurrent(isolated.get()) == FcTrue);
+    {
+        // The metadata advertises the alias, while FreeType still calls the
+        // face Monaspace Neon. Both names identify this same installed file.
+        Ubiquitty::Linux::FreeTypeRasterizer rasterizer(32, alias);
+        CHECK(rasterizer.ready());
+        CHECK(std::string_view(rasterizer.faceName()).starts_with("Monaspace Neon "));
+        CHECK(std::string_view(rasterizer.familyName()) == "Monaspace Neon");
+    }
+    CHECK(FcConfigSetCurrent(previous.get()) == FcTrue);
+}
+
+TEST(anUnavailableFamilyKeepsTheFontconfigSuggestedNativeFace)
+{
+    constexpr const char* missing = "Ubiquitty Unavailable Family Fixture";
+    std::unique_ptr<FcPattern, decltype(&FcPatternDestroy)> request(FcNameParse(reinterpret_cast<const FcChar8*>(missing)), FcPatternDestroy);
+    REQUIRE(request);
+    REQUIRE(FcConfigSubstitute(FcConfigGetCurrent(), request.get(), FcMatchPattern) == FcTrue);
+    FcDefaultSubstitute(request.get());
+    FcResult result = FcResultNoMatch;
+    std::unique_ptr<FcPattern, decltype(&FcPatternDestroy)> suggested(FcFontMatch(FcConfigGetCurrent(), request.get(), &result), FcPatternDestroy);
+    REQUIRE(suggested && result == FcResultMatch);
+    FcChar8* file = nullptr;
+    REQUIRE(FcPatternGetString(suggested.get(), FC_FILE, 0, &file) == FcResultMatch && file);
+    int faceIndex = 0;
+    (void)FcPatternGetInteger(suggested.get(), FC_INDEX, 0, &faceIndex);
+    FT_Library openedLibrary = nullptr;
+    REQUIRE(FT_Init_FreeType(&openedLibrary) == 0);
+    std::unique_ptr<FT_LibraryRec_, decltype(&FT_Done_FreeType)> library(openedLibrary, FT_Done_FreeType);
+    FT_Face openedFace = nullptr;
+    REQUIRE(FT_New_Face(library.get(), reinterpret_cast<const char*>(file), faceIndex, &openedFace) == 0);
+    std::unique_ptr<FT_FaceRec_, decltype(&FT_Done_Face)> face(openedFace, FT_Done_Face);
+    Ubiquitty::Linux::FreeTypeRasterizer rasterizer(32, missing);
+    CHECK(rasterizer.ready());
+    const std::string expected = std::string(face->family_name ? face->family_name : "?") + " " + (face->style_name ? face->style_name : "");
+    CHECK(rasterizer.faceName() == expected);
+    CHECK(std::string_view(rasterizer.familyName()) == face->family_name);
 }
 
 TEST(anUnavailableProportionalBoldBorrowsRegularThroughTeardown)
@@ -778,6 +980,173 @@ TEST(completeLinuxAssembliesConnectAtNativeAndScaledSizes)
             }
         }
     }
+}
+
+TEST(nerdIconsShareThePrimaryDesignCentreWithoutChangingTheirNominalSize)
+{
+    NativeSymbolReference native;
+    FT_Library library = nullptr;
+    CHECK(FT_Init_FreeType(&library) == 0);
+    FT_Face primary = nullptr;
+    FT_Face symbols = nullptr;
+    CHECK(FT_New_Face(library, bundled("JetBrainsMono[wght].ttf").c_str(), 0, &primary) == 0);
+    CHECK(FT_New_Face(library, bundled("SymbolsNerdFontMono-Regular.ttf").c_str(), 0, &symbols) == 0);
+    const double primaryCentre = static_cast<double>(primary->ascender + primary->descender) / (2 * primary->units_per_EM);
+    const double symbolCentre = static_cast<double>(symbols->ascender + symbols->descender) / (2 * symbols->units_per_EM);
+    for (int points : { 11, 12, 15 }) {
+        for (int scale : { 1, 2 }) {
+            const int size = points * scale;
+            CHECK(FT_Set_Pixel_Sizes(symbols, 0, size) == 0);
+            for (double spacing : { 0.0, 0.5, 1.0 }) {
+                Ubiquitty::Linux::FreeTypeRasterizer rasterizer {
+                    static_cast<double>(size), "JetBrains Mono", "Symbols Nerd Font Mono", bundled("SymbolsNerdFontMono-Regular.ttf"),
+                    bundled("JetBrainsMono[wght].ttf"), scale, static_cast<int>(std::lround(spacing * scale))
+                };
+                CHECK(rasterizer.ready());
+                const auto metrics = rasterizer.cellMetrics();
+                constexpr int width = 64;
+                const int height = static_cast<int>(metrics.cellHeight) + 66;
+                const int baseline = static_cast<int>(metrics.baselineFromTop) + 33;
+                Ubiquitty::Linux::FreeTypeRasterizer textFallback {
+                    static_cast<double>(size), "JetBrains Mono", "Noto Sans", bundled("SymbolsNerdFontMono-Regular.ttf"),
+                    bundled("JetBrainsMono[wght].ttf"), scale, static_cast<int>(std::lround(spacing * scale))
+                };
+                for (std::uint32_t character : { 0x48U, 0x78U, 0xE0A0U }) {
+                    std::vector<std::uint8_t> actual(static_cast<std::size_t>(width) * height);
+                    std::vector<std::uint8_t> control(actual.size());
+                    CHECK(rasterizer.rasterizeGlyph(character, Ubiquitty::Rendering::FontFace::Regular, 0, width, height, actual.data()));
+                    CHECK(textFallback.rasterizeGlyph(character, Ubiquitty::Rendering::FontFace::Regular, 0, width, height, control.data()));
+                    CHECK_MSG(actual == control, "primary ASCII and primary-owned PUA retain the primary face's placement");
+                }
+                for (std::uint32_t icon : { 0xF07BU, 0xF0C7U, 0xF08C7U, 0xE615U, 0xE61DU }) {
+                    std::vector<std::uint8_t> actual(static_cast<std::size_t>(width) * height);
+                    CHECK(rasterizer.rasterizeGlyph(icon, Ubiquitty::Rendering::FontFace::Regular, 0, width, height, actual.data()));
+                    CHECK(FT_Load_Char(symbols, icon, FT_LOAD_DEFAULT) == 0);
+                    // Independent font-metric normalization, as a patched Nerd
+                    // font places the symbol face's line centre in its host.
+                    CHECK(FT_Render_Glyph(symbols->glyph, FT_RENDER_MODE_NORMAL) == 0);
+                    const auto slot = symbols->glyph;
+                    const int left = (width - static_cast<int>(slot->bitmap.width)) / 2;
+                    const double raise = (primaryCentre - symbolCentre) * size;
+                    const auto reference = native.draw(icon, size, width, height, left - slot->bitmap_left, baseline - raise);
+                    CHECK_MSG(actual == reference, "icons keep their native size and share their host face's design centre");
+                    const std::array<std::uint32_t, 2> textSelected { icon, 0xFE0E };
+                    std::vector<std::uint8_t> selected(actual.size());
+                    CHECK(rasterizer.rasterizeCluster(textSelected.data(), 2, Ubiquitty::Rendering::FontFace::Regular, 0, width, height, selected.data()));
+                    CHECK_MSG(selected == actual, "a PUA text-selector cluster keeps the single icon's normalized baseline");
+
+                    std::vector<std::uint8_t> bold(actual.size());
+                    CHECK(rasterizer.rasterizeGlyph('H', Ubiquitty::Rendering::FontFace::Bold, 700, width, height, bold.data()));
+                    std::vector<std::uint8_t> afterBold(actual.size());
+                    CHECK(rasterizer.rasterizeGlyph(icon, Ubiquitty::Rendering::FontFace::Regular, 0, width, height, afterBold.data()));
+                    CHECK_MSG(afterBold == actual, "an intervening bold glyph cannot change an icon's baseline");
+                }
+            }
+        }
+    }
+    FT_Done_Face(symbols);
+    FT_Done_Face(primary);
+    FT_Done_FreeType(library);
+}
+
+TEST(sizedNerdIconsNormalizeAtTheirActualWholeAndFractionalEm)
+{
+    using namespace Ubiquitty::Rendering;
+    NativeSymbolReference native;
+    FT_Library library = nullptr;
+    CHECK(FT_Init_FreeType(&library) == 0);
+    FT_Face symbols = nullptr;
+    CHECK(FT_New_Face(library, bundled("SymbolsNerdFontMono-Regular.ttf").c_str(), 0, &symbols) == 0);
+    constexpr int size = 11;
+    Ubiquitty::Linux::FreeTypeRasterizer rasterizer {
+        size, "JetBrains Mono", "Symbols Nerd Font Mono", bundled("SymbolsNerdFontMono-Regular.ttf"),
+        bundled("JetBrainsMono[wght].ttf"), 1, 1
+    };
+    for (RasterScale scale : { RasterScale { 2 }, RasterScale { 5, 4 } }) {
+        SizedMaster master;
+        master.scale = scale;
+        const int width = scale.scaled(64);
+        const int height = scale.scaled(static_cast<int>(rasterizer.cellMetrics().cellHeight) + 66);
+        const int baseline = scale.scaled(static_cast<int>(rasterizer.cellMetrics().baselineFromTop)
+            + (scale.unscaled(height) - static_cast<int>(rasterizer.cellMetrics().cellHeight)) / 2);
+        CHECK(FT_Set_Char_Size(symbols, 0, static_cast<FT_F26Dot6>(std::lround(size * scale.value() * 64)), 72, 72) == 0);
+        const double symbolEm = static_cast<double>(FT_MulFix(symbols->units_per_EM, symbols->size->metrics.y_scale)) / 64;
+        const double raise = 0.36 * size * scale.value()
+            - static_cast<double>(symbols->ascender + symbols->descender) / (2 * symbols->units_per_EM) * symbolEm;
+        for (std::uint32_t icon : { 0xF07BU, 0xF0C7U, 0xF08C7U }) {
+            std::vector<std::uint8_t> actual(static_cast<std::size_t>(width) * height);
+            CHECK(rasterizer.rasterizeSizedMaster(icon, FontFace::Regular, 0, master, width, height, actual.data()));
+            CHECK(FT_Load_Char(symbols, icon, FT_LOAD_DEFAULT) == 0);
+            CHECK(FT_Render_Glyph(symbols->glyph, FT_RENDER_MODE_NORMAL) == 0);
+            const auto slot = symbols->glyph;
+            const int left = (width - static_cast<int>(slot->bitmap.width)) / 2;
+            const auto expected = native.draw(icon, size * scale.value(), width, height, left - slot->bitmap_left, baseline - raise);
+            CHECK_MSG(actual == expected, "sized icon normalization retains fractional em and native Pango placement");
+        }
+    }
+    FT_Done_Face(symbols);
+    FT_Done_FreeType(library);
+}
+
+TEST(explicitPrivateUseRangesKeepTheirChosenFaceBaselineBeforeTheSymbolTier)
+{
+    using namespace Ubiquitty::Rendering;
+    constexpr std::uint32_t icon = 0xF07B;
+    constexpr int size = 12;
+    const auto makeRasterizer = [&](const char* rangeFamily) {
+        auto preferences = rangeMapTo(icon, rangeFamily);
+        preferences.rangeMaps.front().sizing = FontMetrics::FallbackSizing::Nominal;
+        return std::make_unique<Ubiquitty::Linux::FreeTypeRasterizer>(
+            size, "JetBrains Mono", "Symbols Nerd Font Mono", bundled("SymbolsNerdFontMono-Regular.ttf"),
+            bundled("JetBrainsMono[wght].ttf"), 1, 0, 0, 0, 0, 0.0, std::string(), std::string(),
+            Ubiquitty::Linux::Ligatures::Enabled, std::move(preferences));
+    };
+    auto mapped = makeRasterizer("Symbols Nerd Font Mono");
+    auto unavailable = makeRasterizer("Ubiquitty Unavailable PUA Fixture");
+    Ubiquitty::Linux::FreeTypeRasterizer ordinary {
+        size, "JetBrains Mono", "Symbols Nerd Font Mono", bundled("SymbolsNerdFontMono-Regular.ttf"),
+        bundled("JetBrainsMono[wght].ttf")
+    };
+    FT_Library library = nullptr;
+    CHECK(FT_Init_FreeType(&library) == 0);
+    FT_Face symbols = nullptr;
+    CHECK(FT_New_Face(library, bundled("SymbolsNerdFontMono-Regular.ttf").c_str(), 0, &symbols) == 0);
+    for (RasterScale scale : { RasterScale { 1 }, RasterScale { 2 }, RasterScale { 5, 4 } }) {
+        SizedMaster master;
+        master.scale = scale;
+        const int width = scale.scaled(64);
+        const int height = scale.scaled(static_cast<int>(mapped->cellMetrics().cellHeight) + 64);
+        const int baseline = scale.scaled(static_cast<int>(mapped->cellMetrics().baselineFromTop)
+            + (scale.unscaled(height) - static_cast<int>(mapped->cellMetrics().cellHeight)) / 2);
+        std::vector<std::uint8_t> actual(static_cast<std::size_t>(width) * height);
+        std::vector<std::uint8_t> defaultSymbols(actual.size());
+        std::vector<std::uint8_t> invalid(actual.size());
+        CHECK(mapped->rasterizeSizedMaster(icon, FontFace::Regular, 0, master, width, height, actual.data()));
+        CHECK(ordinary.rasterizeSizedMaster(icon, FontFace::Regular, 0, master, width, height, defaultSymbols.data()));
+        CHECK(unavailable->rasterizeSizedMaster(icon, FontFace::Regular, 0, master, width, height, invalid.data()));
+        CHECK_MSG(invalid == defaultSymbols, "an unavailable explicit range retains the ordinary symbol fallback");
+        CHECK_MSG(actual != defaultSymbols, "an explicit text range does not acquire adopted-icon baseline normalization");
+        CHECK(FT_Set_Char_Size(symbols, 0, static_cast<FT_F26Dot6>(std::lround(size * scale.value() * 64)), 72, 72) == 0);
+        CHECK(FT_Load_Char(symbols, icon, FT_LOAD_RENDER) == 0);
+        const auto slot = symbols->glyph;
+        std::vector<std::uint8_t> reference(actual.size());
+        const int left = (width - static_cast<int>(slot->bitmap.width)) / 2;
+        for (unsigned row = 0; row < slot->bitmap.rows; ++row) {
+            const int top = baseline - slot->bitmap_top + static_cast<int>(row);
+            for (unsigned column = 0; column < slot->bitmap.width; ++column)
+                reference[static_cast<std::size_t>(top) * width + left + column]
+                    = slot->bitmap.buffer[row * slot->bitmap.pitch + column];
+        }
+        CHECK_MSG(actual == reference, "the explicit nominal range draws its actual native face on the text baseline");
+        if (scale.value() == 1) {
+            const std::array<std::uint32_t, 2> selected { icon, 0xFE0E };
+            std::vector<std::uint8_t> cluster(actual.size());
+            CHECK(mapped->rasterizeCluster(selected.data(), 2, FontFace::Regular, 0, width, height, cluster.data()));
+            CHECK(cluster == actual);
+        }
+    }
+    FT_Done_Face(symbols);
+    FT_Done_FreeType(library);
 }
 
 UBIQUITTY_TEST_MAIN()

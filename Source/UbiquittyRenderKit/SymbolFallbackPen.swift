@@ -17,8 +17,8 @@ package enum SymbolFallbackPen {
     /// The pen that places `ink` inside the slot.
     ///
     /// Horizontal centres on the cell box, then clamps to the slot. Vertical
-    /// keeps the text baseline and moves only for an icon that would hard-clip,
-    /// so symbols sit on the same baseline as the text beside them.
+    /// uses the supplied baseline raise for an adopted icon face, then moves only
+    /// when the icon would hard-clip. Other fallback text retains its baseline.
     ///
     /// Ink LARGER than the slot cannot be contained by a translation, and the
     /// slot bitmap crops what it cannot hold. Such a glyph keeps its centring
@@ -47,6 +47,7 @@ package enum SymbolFallbackPen {
     ///   - slotWidth: The slot bitmap's width in pixels.
     ///   - slotHeight: The slot bitmap's height in pixels.
     ///   - baselinePen: The text baseline, in pixels from the slot's bottom.
+    ///   - baselineRaise: Shared face-design alignment for an adopted PUA symbol, otherwise zero.
     /// - Returns: The pen, in pixels from the slot's bottom-left.
     package static func pen(
         codePoint: UInt32,
@@ -56,7 +57,8 @@ package enum SymbolFallbackPen {
         glyphWidth: CGFloat,
         slotWidth: CGFloat,
         slotHeight: CGFloat,
-        baselinePen: CGFloat
+        baselinePen: CGFloat,
+        baselineRaise: CGFloat = 0
     ) -> CGPoint {
         var pen = CGPoint(x: glyphMarginX + subpixel, y: baselinePen)
         if Ubiquitty.Rendering.tilesOnTextPen(codePoint) {
@@ -85,18 +87,10 @@ package enum SymbolFallbackPen {
                 pen.x -= inkLeft + ink.width - slotWidth
             }
         }
-        if ink.height <= slotHeight {
-            let inkBottom = pen.y + ink.origin.y
-            if inkBottom < 0 {
-                pen.y -= inkBottom
-            } else if inkBottom + ink.height > slotHeight {
-                pen.y -= inkBottom + ink.height - slotHeight
-            }
-        } else {
-            // Too tall to contain: centre the crop on the slot rather than
-            // spending it all below the baseline.
-            pen.y = (slotHeight - ink.height) * 0.5 - ink.origin.y
-        }
+        pen.y += baselineRaise
+        let inkTop = slotHeight - (pen.y + ink.origin.y + ink.height)
+        let placedTop = Ubiquitty.Rendering.fallbackInkTopInSlot(codePoint, Double(inkTop), Double(ink.height), Double(slotHeight))
+        pen.y += inkTop - CGFloat(placedTop)
         return pen
     }
 }

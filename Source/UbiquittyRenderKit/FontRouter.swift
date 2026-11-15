@@ -269,6 +269,21 @@ package final class FontRouter {
         return catalogue.isVariant(font, of: bundledSymbolFace)
     }
 
+    /// True only for Core's symbol route, excluding primary and explicit range maps.
+    func usesSymbolFallback(for codePoint: UInt32, face: Ubiquitty.Rendering.FontFace, font: CTFont) -> Bool {
+        let points = [codePoint]
+        return usesSymbolFallback(for: points.span, face: face, font: font)
+    }
+
+    // swift-only: cluster routing must preserve the source of the complete request.
+    func usesSymbolFallback(for codePoints: Span<UInt32>, face: Ubiquitty.Rendering.FontFace, font: CTFont) -> Bool {
+        var isSymbol = false
+        let resolved = resolveFont(for: codePoints, face: face, variableWeight: 0, wantsEmoji: false) {
+            isSymbol = $0
+        }
+        return isSymbol && resolved === font && isSymbolFallbackFace(font)
+    }
+
     /// The symbol fallback face this router adopted, or nil when none loaded.
     ///
     /// A reader, not a route: the box family resolves its own face rather than
@@ -319,7 +334,8 @@ package final class FontRouter {
         for codePoints: Span<UInt32>,
         face: Ubiquitty.Rendering.FontFace,
         variableWeight: UInt8,
-        wantsEmoji: Bool
+        wantsEmoji: Bool,
+        symbolRole: ((Bool) -> Void)? = nil
     ) -> CTFont? {
         guard !codePoints.isEmpty else { return nil }
         let codePoint = codePoints[0]
@@ -350,6 +366,7 @@ package final class FontRouter {
         guard !Ubiquitty.Rendering.Font.isMissing(route) else {
             return nil
         }
+        symbolRole?(route.source == .SymbolFallback)
         return catalogue.resolvedFont(for: route.font)
     }
 }

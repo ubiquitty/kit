@@ -24,6 +24,8 @@
 #include "Platform/Linux/ImageExtent.h"
 #include "Platform/Linux/Raster.h"
 #include "Platform/Linux/VulkanColorGlyphAtlas.h"
+#include "Platform/Linux/VulkanDevice.h"
+#include "Platform/Linux/VulkanFontAtlas.h"
 #include "Platform/Linux/VulkanGlyphAtlas.h"
 #include "Platform/Linux/VulkanImageTextures.h"
 
@@ -37,6 +39,7 @@
 #include <utility>
 #include <vector>
 
+#include "Core/Rendering/FrameCapture.h"
 #include <vulkan/vulkan.h>
 
 namespace Ubiquitty {
@@ -67,13 +70,25 @@ class VulkanRenderer {
 public:
     bool init();
     void shutdown();
+    /// Releases a closed view's font leases while exported frame pixels remain alive.
+    void releaseFontResources();
 
     // Inject the glyph rasterizer the GPU atlas faults through so GPU coverage
     // matches the CPU path that took the same rasterizer. Call before the first
     // renderGrid (the atlas is created lazily there); the caller owns the
     // rasterizer and must outlive the renderer. Without it, the atlas defaults to
     // its own UnifontRasterizer.
-    void setGlyphRasterizer(Rendering::GlyphRasterizer& rasterizer) { m_injectedRasterizer = &rasterizer; }
+    void setGlyphRasterizer(Rendering::GlyphRasterizer&);
+    /// Selects an immutable provider lease and Core's complete font identity.
+    void setSharedGlyphRasterizer(std::shared_ptr<Rendering::GlyphRasterizer>,
+        std::shared_ptr<const Rendering::AtlasConfiguration>, int largestScreenCells = 0);
+    /// Presentation-thread diagnostics for cross-window resource regressions.
+    [[nodiscard]] std::uintptr_t sharedDeviceIdentity() const { return reinterpret_cast<std::uintptr_t>(m_sharedDevice.get()); }
+    [[nodiscard]] std::uintptr_t sharedFontAtlasIdentity() const { return reinterpret_cast<std::uintptr_t>(m_fontAtlas.get()); }
+    [[nodiscard]] std::weak_ptr<void> sharedFontAtlasWeak() const { return m_fontAtlas; }
+    [[nodiscard]] std::string_view sharedFontAtlasKey() const { return m_fontAtlas ? std::string_view(m_fontAtlas->sharingKey) : std::string_view(); }
+    [[nodiscard]] VulkanFontAtlas::Statistics sharedAtlasStatistics() const { return m_fontAtlas ? m_fontAtlas->statistics() : VulkanFontAtlas::Statistics {}; }
+    [[nodiscard]] std::uintptr_t privateTargetIdentity() const { return reinterpret_cast<std::uintptr_t>(m_image); }
 
     /// Injects the face the ligature strip sheet shapes runs through.
     ///
@@ -100,7 +115,7 @@ public:
     ///   that loaded no shaper leaves the sheet unusable, and the hook is not
     ///   published at all rather than published over a sheet with nothing to
     ///   give.
-    void setLigatureRasterizer(Rendering::GlyphRasterizer& rasterizer) { m_ligatureRasterizer = &rasterizer; }
+    void setLigatureRasterizer(Rendering::GlyphRasterizer&);
 
     [[nodiscard]] std::string diagnoseFontRoutes(std::string_view utf8Text) const;
 
@@ -136,7 +151,9 @@ public:
     ///     before any GPU work, so a caller holding the model lock for the
     ///     capture can release it while the frame is drawn and read back;
     ///     an empty handoff is never called.
-    bool renderGrid(RasterContext& rasterContext, Ubiquitty::Terminal* term, std::vector<uint8_t>& outRGBA, int& widthOut, int& heightOut, int viewOffset = 0, Ubiquitty::Selection::Session* selection = nullptr, const CursorOverlay* cursor = nullptr, uint32_t blinkTicks = 0, ModelCaptureHandoff handoff = {});
+    ///   - capturedFrame: An admitted parser-boundary frame; when supplied,
+    ///     its owned cells, palette, clusters and images replace the live read.
+    bool renderGrid(RasterContext& rasterContext, Ubiquitty::Terminal* term, std::vector<uint8_t>& outRGBA, int& widthOut, int& heightOut, int viewOffset = 0, Ubiquitty::Selection::Session* selection = nullptr, const CursorOverlay* cursor = nullptr, uint32_t blinkTicks = 0, ModelCaptureHandoff handoff = {}, const Rendering::FrameCapture* capturedFrame = nullptr, const Rendering::FrameCapture::ViewTierOverrides* capturedView = nullptr);
 
     // Drop the GPU glyph atlas so the next renderGrid rebuilds it from the
     // currently-injected rasterizer. Idles the device first; cell dims + target
@@ -249,6 +266,9 @@ public:
     /// - Returns: The column, clamped to the frame.
     [[nodiscard]] int columnAt(int row, double xInPixels) const;
 
+    /// The last rendered row layout; borrowed until the next frame is built.
+    [[nodiscard]] std::span<const Rendering::LetterExtent> rowLetters(int row) const;
+
     /// Where a pixel is along such a row, in cells, for ``PointerFact::xInCells``.
     ///
     /// - Parameters:
@@ -276,17 +296,12 @@ public:
     ///   - style: The face the run is set in; the weight is the face's own.
     ///   - glyphsOut: Receives the shaped glyphs.
     /// - Returns: How many were written, or zero.
-    [[nodiscard]] int shapeProportionalRun(std::span<const std::uint32_t> codePoints, Ubiquitty::ProportionalRunStyle style, std::span<Ubiquitty::ProportionalShapedGlyph> glyphsOut) const
-    {
-        if (!m_proportionalStripSheet || m_cellWidth <= 0)
-            return 0;
-        return m_proportionalStripSheet->shapeProportionalRun(codePoints, static_cast<Rendering::FontFace>(style.faceBits), glyphsOut);
-    }
+    [[nodiscard]] int shapeProportionalRun(std::span<const std::uint32_t> codePoints, Ubiquitty::ProportionalRunStyle style, std::span<Ubiquitty::ProportionalShapedGlyph> glyphsOut) const;
     /// One cell's advance in the sheet's pixels, for the measurer seam.
     /// Whether the focused search match's pill is mid-bounce on the last
     /// frame, so the window keeps painting until the curve rests.
     [[nodiscard]] bool isFocusedMatchBouncing() const { return m_focusedMatchAgeSeconds >= 0.0f && m_focusedMatchAgeSeconds < Rendering::focusedPillBounceSeconds; }
-    [[nodiscard]] float proportionalCellAdvanceInPixels() const { return static_cast<float>(m_cellWidth); }
+    [[nodiscard]] float proportionalCellAdvanceInPixels() const;
 
     /// How many ligature strip slices the last grid frame drew.
     ///
@@ -303,13 +318,19 @@ public:
     [[nodiscard]] std::uint32_t lastFrameProportionalInstanceCount() const { return m_lastFrameProportionalInstances; }
     /// How many bounded proportional strip tiles the last frame drew.
     [[nodiscard]] std::uint32_t lastFrameProportionalStripInstanceCount() const { return m_lastFrameProportionalStripInstances; }
+    /// Selects whether coverage-free quads contribute to diagnostic counts.
+    enum class CoverageFilter {
+        All,
+        Inked,
+    };
     /// Counts the last frame's proportional glyphs and strips whose quad is wider than the atlas rect it samples.
     ///
     /// A smoke comparing the glyph stage's spread of a rect across a wider quad against the software renderer
     /// reads this to know the frame held such a quad: with none, the two agree whatever the stage does.
     ///
+    /// - Parameter coverageFilter: Counts all quads or only quads that sample coverage.
     /// - Returns: The number of stretched instances in the two proportional streams.
-    [[nodiscard]] std::uint32_t lastFrameStretchedProportionalInstanceCount() const;
+    [[nodiscard]] std::uint32_t lastFrameStretchedProportionalInstanceCount(CoverageFilter coverageFilter = CoverageFilter::All) const;
     /// Counts mono glyph quads whose dimensions differ from their full atlas rect.
     ///
     /// A script-glyph smoke uses the count to require the scaled path for a
@@ -410,6 +431,18 @@ private:
     /// Releases what ``ensureBackdropPipeline`` built.
     void destroyBackdropPipeline();
 
+    /// Retains CPU shaping state independently of GPU atlas storage.
+    struct ProportionalMeasurer {
+        std::shared_ptr<Rendering::GlyphRasterizer> owner;
+        Rendering::GlyphRasterizer* rasterizer = nullptr;
+        float cellAdvance = 0;
+    };
+    // Ingest readers hold only CPU font state. A final reader must not destroy
+    // GPU storage or wait for a queue while it owns the terminal model lock.
+    std::atomic<std::shared_ptr<const ProportionalMeasurer>> m_proportionalMeasurer;
+    /// Publishes the selected face to ingest readers without GPU ownership.
+    void publishProportionalMeasurer();
+    std::shared_ptr<VulkanDevice> m_sharedDevice;
     VkInstance m_instance = VK_NULL_HANDLE;
     VkPhysicalDevice m_physical = VK_NULL_HANDLE;
     VkDevice m_device = VK_NULL_HANDLE;
@@ -605,23 +638,20 @@ private:
     // The frame last declined, so a grid that stays too large is reported once.
     ImageExtent m_lastDeclinedExtent;
 
-    std::optional<VulkanGlyphAtlas> m_atlas;
-    // The colour sheet bound at descriptor 1. Constructed beside the mono atlas
-    // whether or not a colour face exists, because the binding is in every set
-    // and a descriptor a shader could sample must point at a real image.
-    std::optional<VulkanColorGlyphAtlas> m_colorAtlas;
-    bool m_atlasCreated = false;
+    std::shared_ptr<VulkanFontAtlas> m_fontAtlas;
+    std::optional<VulkanFontAtlas::ViewLease> m_fontAtlasLease;
+    std::shared_ptr<Rendering::GlyphRasterizer> m_sharedRasterizerOwner;
+    std::shared_ptr<const Rendering::AtlasConfiguration> m_sharedFontConfiguration;
+    int m_sharedAtlasCellBudget = 0;
+    /// Releases this view's glyph leases before dropping its shared atlas.
+    void releaseFontAtlas();
 
     // Core owns the proportional glyph cache and its host mirror. This image is
     // only the Vulkan storage for that sheet.
-    std::optional<Rendering::ProportionalGlyphSheet> m_proportionalSheet;
-    VulkanCoverageSheet m_proportionalImage;
     std::uint32_t m_lastFrameProportionalInstances = 0;
 
     // The bounded proportional-run fallback is a separate strip sheet. It
     // shares no slots, image, descriptor, or instance stream with ligatures.
-    std::optional<Rendering::LigatureSheet> m_proportionalStripSheet;
-    VulkanCoverageSheet m_proportionalStripImage;
     std::uint32_t m_lastFrameProportionalStripInstances = 0;
 
     // The ligature strip sheet and the device image it uploads through. Built
@@ -633,8 +663,6 @@ private:
     // keeping the image out here is what lets the same sheet serve a second
     // backend without carrying a device it has no use for.
     Rendering::GlyphRasterizer* m_ligatureRasterizer = nullptr;
-    std::optional<Rendering::LigatureSheet> m_ligatureSheet;
-    VulkanCoverageSheet m_ligatureImage;
     // A second set over one layout, differing only in what binding 0 points at.
     // This is how the ligature strips reach the mono glyph pipeline: macOS draws
     // them with that pipeline over a rebound texture, and a descriptor set is
@@ -674,9 +702,23 @@ private:
     std::vector<Rendering::LetterExtent> m_letters;
     std::vector<std::uint8_t> m_letterRows;
     int m_letterColumns = 0;
-    [[nodiscard]] std::span<const Rendering::LetterExtent> rowLetters(int row) const;
     // Read and advanced by Core's planRetainedFrame; this side only stores it.
     Ubiquitty::Rendering::RetainedFrameBaseline m_retainedBaseline;
+    // The boundary-frame lineage whose pixels the retained pair holds. The
+    // terminal identity separates independent panes whose record numbers match.
+    const Ubiquitty::Terminal* m_capturedTargetOwner = nullptr;
+    std::uint64_t m_capturedTargetSequence = 0;
+    std::uint64_t m_capturedTargetViewGeneration = 0;
+    std::uint64_t m_capturedTargetPaletteGeneration = 0;
+    std::optional<Rendering::RenderConfiguration> m_capturedTargetConfiguration;
+    bool m_doesCapturedTargetHaveViewTiers = false;
+    bool m_doesCapturedTargetHaveImages = false;
+    // Core owns live link classification, including OSC 8, spans and digest
+    // verification. This bounded capture keeps its buffers across frames.
+    std::unique_ptr<Rendering::TerminalFrameInputs> m_liveLinkInputs;
+    std::array<std::uint64_t, 17> m_liveLinkPresentationKey {};
+    const Ubiquitty::Terminal* m_liveLinkOwner = nullptr;
+
     // Where this frame's build carried ink across a row edge, and where the
     // pair's ink does, as the last frame that built every row into it drew
     // it. One byte per row boundary (CellInstanceBuilder.h rowInkCrossings).

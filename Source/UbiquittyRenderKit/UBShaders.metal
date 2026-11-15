@@ -716,9 +716,8 @@ static float4 overlayShade(OverlayOut in, float4 destination, bool isEncodedPass
             }
         } else if (in.shapeKind > 4.5) {
             // Thin separators: the band from the shape's outer boundary
-            // INWARD by the full stroke, so the boundary lines pass through
-            // the cell corners / apex and the quad clip finishes the stroke
-            // ends as points — the bundled face's construction.
+            // INWARD by the full stroke. Chevron end planes are perpendicular
+            // to the arms, with their inset resolved by Core in device space.
             float2 va = in.plA.xy * sz;
             float2 vb = in.plA.zw * sz;
             float2 vc = in.plB.xy * sz;
@@ -736,6 +735,11 @@ static float4 overlayShade(OverlayOut in, float4 destination, bool isEncodedPass
                 outer = plLineDistInward(p, va, vb, s);
             }
             dist = abs(outer + strokeHalf) - strokeHalf;
+            if (in.shapeKind < 5.5) {
+                float capInset = in.plB.w * sz.y;
+                dist = max(dist, capInset - dot(p - va, (vb - va) / max(length(vb - va), 1e-6)));
+                dist = max(dist, capInset - dot(p - vc, (vb - vc) / max(length(vb - vc), 1e-6)));
+            }
         } else {
             // Half-disc. plA=centre,radii (unit); plB.x=sideSign, plB.y=strokeHalf.
             float2 c  = in.plA.xy * sz;

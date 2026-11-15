@@ -85,6 +85,8 @@ public:
 
     /// Commits the dirty range and image layout after successful completion.
     void didUpload();
+    [[nodiscard]] bool hasPendingUploads() const { return m_firstDirtySlot <= m_lastDirtySlot; }
+    [[nodiscard]] bool hasPendingUpload() const { return m_firstDirtySlot != INT_MAX; }
 
     [[nodiscard]] VkImageView view() const { return m_view; }
 

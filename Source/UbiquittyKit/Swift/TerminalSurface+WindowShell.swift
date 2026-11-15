@@ -44,6 +44,18 @@ public protocol TerminalWindowCommands: AnyObject {
     @objc
     func shrinkFontSize(_ sender: Any?)
 
+    /// Increases line spacing by one backing pixel.
+    ///
+    /// - Parameter sender: The control that sent the command.
+    @objc
+    func growLineSpacing(_ sender: Any?)
+
+    /// Decreases line spacing by one backing pixel.
+    ///
+    /// - Parameter sender: The control that sent the command.
+    @objc
+    func shrinkLineSpacing(_ sender: Any?)
+
     /// Returns the window's font to the configured size.
     ///
     /// - Parameter sender: The control that sent the command.

@@ -31,6 +31,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 // Opaque FreeType handles kept out of the header (no ft2build.h leak).
@@ -41,6 +42,8 @@ struct hb_font_t;
 namespace Ubiquitty::Linux {
 // The resolved feature run, defined where HarfBuzz's headers already are.
 struct ShapingFeatures;
+class NativeClusterRasterizer;
+struct NativeClusterFont;
 }
 
 namespace Ubiquitty::Linux {
@@ -81,11 +84,11 @@ public:
     // width, line height for height, FT underline/ascender for decoration
     // positions — so a glyph fills the cell the face itself defines instead of a
     // hardcoded box.
-    explicit FreeTypeRasterizer(int fontPixelSize);
+    explicit FreeTypeRasterizer(double fontPixelSize);
 
     // As above, but fc-match `family` (config [font] family) instead of the
     // generic "monospace" alias. An empty family is treated as "monospace".
-    FreeTypeRasterizer(int fontPixelSize, std::string family);
+    FreeTypeRasterizer(double fontPixelSize, std::string family);
 
     /// As above, with a glyph-fallback face for code points the primary lacks,
     /// tried before the Unifont last resort, and the metrics the configuration
@@ -126,8 +129,13 @@ public:
     ///     tier routes through Core's fallback policy with these, the set the
     ///     route diagnostics answer with, so a cell draws from the face the
     ///     diagnostics name. Empty configures nothing.
-    FreeTypeRasterizer(int fontPixelSize, std::string family, std::string fallbackFontName, std::string bundledFallbackPath, std::string bundledPrimaryPath = std::string(), int deviceScale = 1, int lineSpacingInPixels = 0, int trackingInPixels = 0, int uprightWeight = 0, int boldWeight = 0, double widthPercent = 0.0, std::string fontVariations = std::string(), std::string fontFeatures = std::string(), Ligatures ligatures = Ligatures::Enabled, Preferences::FontRoutePreferences fallbackPreferences = {});
+    FreeTypeRasterizer(double fontPixelSize, std::string family, std::string fallbackFontName, std::string bundledFallbackPath, std::string bundledPrimaryPath = std::string(), int deviceScale = 1, int lineSpacingInPixels = 0, int trackingInPixels = 0, int uprightWeight = 0, int boldWeight = 0, double widthPercent = 0.0, std::string fontVariations = std::string(), std::string fontFeatures = std::string(), Ligatures ligatures = Ligatures::Enabled, Preferences::FontRoutePreferences fallbackPreferences = {});
     ~FreeTypeRasterizer();
+    [[nodiscard]] int glyphPhaseCount() const override { return ready() ? 4 : 1; }
+    bool rasterizeGlyphAtPhase(std::uint32_t, Rendering::FontFace, std::uint32_t weight, double phaseInPixels,
+        int slotWidth, int slotHeight, std::uint8_t* coverageOut) override;
+    bool rasterizeClusterAtPhase(const std::uint32_t*, int count, Rendering::FontFace, std::uint32_t weight, double phaseInPixels,
+        int slotWidth, int slotHeight, std::uint8_t* coverageOut) override;
 
     FreeTypeRasterizer(const FreeTypeRasterizer&) = delete;
     FreeTypeRasterizer& operator=(const FreeTypeRasterizer&) = delete;
@@ -139,6 +147,9 @@ public:
 
     // The matched family/style (for diagnostics); empty until a face loads.
     [[nodiscard]] const char* faceName() const { return m_faceName; }
+
+    /// The loaded primary family without its style, for live font queries.
+    [[nodiscard]] const char* familyName() const;
 
     /// The file the glyph-fallback face was opened from.
     ///
@@ -296,6 +307,12 @@ public:
     bool rasterizeColorCluster(const std::uint32_t* codePoints, int count, int slotInPixels, std::uint8_t* pixelsOut) override;
 
 private:
+    /// Selects baseline handling for a primary face or an adopted icon face.
+    enum class GlyphBaseline : std::uint8_t {
+        Primary,
+        SymbolDesignCenter,
+    };
+
     bool loadMatchedFace();
     // fc-match `pattern` (a family name) to a face file and FT_New_Face it into
     // *outFace (sized by the caller). Shared by loadMatchedFace + the named
@@ -303,7 +320,7 @@ private:
     // Null when fontconfig resolves nothing loadable. The handle is the whole
     // answer — a bool beside it would say the same thing twice, and a caller can
     // only disagree with itself about which of the two to trust.
-    [[nodiscard]] FT_FaceRec_* loadFaceByPattern(const char* pattern);
+    [[nodiscard]] FT_FaceRec_* loadFaceByPattern(const char* pattern, Rendering::FontFace style = Rendering::FontFace::Regular, const char* requiredFamily = nullptr);
     /// The face a cell of this style rasterises from.
     ///
     /// The bold member only when the family ships one as its own file — a
@@ -551,9 +568,16 @@ public:
     [[nodiscard]] unsigned int glyphIndexForCodePoint(std::uint32_t codePoint) const;
 
 private:
-    // The primary face's baseline (rounded ascender, clamped into the slot) —
-    // fallback glyphs share it so they sit on the text baseline. m_face != null.
+    // The cached shared cell-layout baseline plus the slot overflow margin.
+    // Adopted private-use symbol faces apply their own design-centre raise.
     [[nodiscard]] int primaryBaselineY(int slotHeight) const;
+    /// Aligns an adopted symbol face's design centre with the primary text band.
+    ///
+    /// - Parameters:
+    ///   - face: The borrowed symbol face at its current size.
+    ///   - scale: The sized master's scale relative to the primary font.
+    /// - Returns: The upward baseline translation in device pixels.
+    double symbolBaselineRaise(FT_FaceRec_* face, double scale = 1.0) const;
     // The one pen walk both shaped-run spellings share; a null inkOut draws
     // without recording, a non-null one is one entry per glyph, caller-checked.
     bool drawShapedRun(std::span<const ShapedGlyph> glyphs, int stripWidthInPixels,
@@ -595,12 +619,21 @@ private:
     /// - Parameter face: Regular or bold.
     /// - Returns: The shaper, or null when no face loaded.
     [[nodiscard]] hb_font_t* proportionalShaper(Rendering::FontFace face) const;
-    // Load + render + center-blit `codePoint` from `face` into coverageOut at the
-    // given (primary-derived) baseline. False when the face is null, lacks the
-    // glyph, or FreeType fails — so the caller falls through to the next tier.
-    // A sized master stretches the outline across by its horizontal scale and
-    // places the pen on its phase grid; the face must already carry its size.
-    bool renderGlyphFromFace(FT_FaceRec_* face, std::uint32_t codePoint, int baselineY, int slotWidth, int slotHeight, std::uint8_t* coverageOut, const Rendering::SizedMaster& master = {});
+    /// Draws one face's glyph at the primary baseline and requested sized pen.
+    ///
+    /// The borrowed face must already carry the master's size. A missing
+    /// glyph or failed draw leaves the caller to try the next routing tier.
+    /// - Parameters:
+    ///   - face: The borrowed face to draw from.
+    ///   - codePoint: The cell's code point.
+    ///   - baselineY: The primary baseline in slot rows from the top.
+    ///   - slotWidth: The coverage plane's width in device pixels.
+    ///   - slotHeight: The coverage plane's height in device pixels.
+    ///   - coverageOut: Caller-owned storage for `slotWidth * slotHeight` bytes.
+    ///   - master: The sized master, or the identity for an ordinary cell.
+    ///   - glyphBaseline: The baseline policy for adopted private-use icons.
+    /// - Returns: True when the face supplied and drew the glyph.
+    bool renderGlyphFromFace(FT_FaceRec_* face, std::uint32_t codePoint, int baselineY, int slotWidth, int slotHeight, std::uint8_t* coverageOut, const Rendering::SizedMaster& master = {}, GlyphBaseline glyphBaseline = GlyphBaseline::Primary);
     /// ``renderGlyphFromFace`` at whatever coordinates the face carries.
     ///
     /// - Parameters:
@@ -611,8 +644,9 @@ private:
     ///   - slotHeight: The slot's height in pixels.
     ///   - coverageOut: The slot's coverage.
     ///   - master: The sized master, or the identity for the cell's own glyph.
+    ///   - glyphBaseline: The baseline policy for adopted private-use icons.
     /// - Returns: False when the face lacks the glyph or FreeType fails.
-    bool renderGlyphAtCurrentCoordinates(FT_FaceRec_* face, std::uint32_t codePoint, int baselineY, int slotWidth, int slotHeight, std::uint8_t* coverageOut, const Rendering::SizedMaster& master);
+    bool renderGlyphAtCurrentCoordinates(FT_FaceRec_* face, std::uint32_t codePoint, int baselineY, int slotWidth, int slotHeight, std::uint8_t* coverageOut, const Rendering::SizedMaster& master, GlyphBaseline glyphBaseline);
     // Query the face's variation axes (once, at load) — caches the 'wght' and
     // 'wdth' axis indices + ranges so the setters can place a coordinate per
     // glyph without re-walking fvar.
@@ -683,7 +717,8 @@ private:
 
     static constexpr int maxVariationAxes = 8;
 
-    int m_fontPixelSize;
+    double m_fontPixelSize;
+    double m_phaseInPixels { 0 };
     // The tracking folded into the column pitch, device pixels, possibly
     // negative. The cell grows or shrinks around a glyph the face still draws
     // at its own size, which is what separates tracking from a scale.
@@ -746,6 +781,8 @@ private:
     // Glyph-fallback face for code points the primary lacks. Glyph-only: never
     // influences cellMetrics() and never gets the wght variation axis.
     /* owned via FT_Done_Face */ FT_FaceRec_* m_fallbackFace = nullptr;
+    double m_primaryAscentInEm = 0;
+    double m_primaryDescentInEm = 0;
     // The primary family's bold member, when the bundle table names one as a
     // separate file. A variable face expresses bold on its `wght` axis and has
     // no such file; a static one has no axis to place, so without this a bold
@@ -774,6 +811,22 @@ private:
     // primary covers pays nothing for it.
     struct CascadeRouting;
     std::unique_ptr<CascadeRouting> m_cascade;
+    std::unique_ptr<NativeClusterRasterizer> m_nativeClusters;
+    std::unordered_map<FT_FaceRec_*, std::string> m_faceSources;
+    [[nodiscard]] FT_FaceRec_* openFace(const std::string& file, int index = 0);
+    [[nodiscard]] NativeClusterFont nativeFont(FT_FaceRec_*, Rendering::FontFace) const;
+    /// Draws a primary-base cluster using native positioning and Core-selected fallback runs.
+    ///
+    /// Borrows every routed face for the duration of the call. A cluster whose
+    /// base belongs to another face keeps the existing terminal attachment path.
+    /// - Parameters:
+    ///   - codePoints: The bounded complete cluster, with its base included.
+    ///   - style: The primary face's requested style.
+    ///   - slotWidth: The coverage plane's width in device pixels.
+    ///   - slotHeight: The coverage plane's height in device pixels.
+    ///   - coverageOut: Caller-owned storage for `slotWidth * slotHeight` bytes.
+    /// - Returns: True when native positioning filled the coverage plane.
+    bool rasterizeNativeCluster(std::span<const std::uint32_t> codePoints, Rendering::FontFace style, int slotWidth, int slotHeight, std::uint8_t* coverageOut);
     /// Returns the face Core's fallback policy routes a code point to once the
     /// primary and glyph-fallback faces have missed it.
     ///
@@ -786,12 +839,13 @@ private:
     /// - Parameter codePoint: The character the earlier tiers lacked.
     /// - Returns: A sized face carrying it, owned by the cascade inventory, or
     ///   null when no scalable system face does.
-    [[nodiscard]] FT_FaceRec_* cascadeFace(std::uint32_t codePoint);
+    [[nodiscard]] FT_FaceRec_* cascadeFace(std::uint32_t codePoint, bool* isSymbolFallback = nullptr);
     /// Returns the face Core's fallback policy routes a whole cluster to.
     ///
     /// - Parameter codePoints: The cluster, base first.
     /// - Returns: A sized face carrying every code point of it, or null.
-    [[nodiscard]] FT_FaceRec_* cascadeFace(std::span<const std::uint32_t> codePoints);
+    [[nodiscard]] FT_FaceRec_* cascadeFace(std::span<const std::uint32_t> codePoints, Rendering::FontFace style = Rendering::FontFace::Regular, bool* isSymbolFallback = nullptr, bool* isRangeMap = nullptr);
+    [[nodiscard]] FT_FaceRec_* rangeMappedIconFace(std::span<const std::uint32_t>, Rendering::FontFace);
     // The system colour-emoji face. Null when none is installed, which is the
     // question hasColorGlyphs answers.
     /* owned via FT_Done_Face */ FT_FaceRec_* m_emojiFace = nullptr;

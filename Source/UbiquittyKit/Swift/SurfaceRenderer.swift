@@ -2933,6 +2933,7 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
         // reading two spellings of one preference make the cursor pulse
         // between their answers on alternate frames.
         options.cursorAlpha = surface.drive.cursorAlphaUnit()
+        options.cursorOutlineThicknessPoints = surface.drive.cursorOutlineThicknessPoints()
         lastFrameCursorAlpha = options.cursorAlpha
         // Measured at the tick this frame is being assembled at, because that
         // is the last point both arms pass through: an envelope read off a

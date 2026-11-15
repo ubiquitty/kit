@@ -49,7 +49,7 @@ extension TerminalSurface {
         let sent = sendKey(press)
         // A press acts on the live screen, so the view leaves history to show
         // it; a release only reports. The Metal arm draws the same line.
-        if sent, eventType != .Release {
+        if sent, Ubiquitty.Runtime.keyPressCountsAsUserActivity(press) {
             snapToTailOnKeypress()
             // The caret holds solid over what is being typed, and the pointer
             // leaves until the next move. A release is not typing: it reports.

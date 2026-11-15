@@ -30,7 +30,7 @@ extension TerminalSurface {
     /// flicker rather than as focus.
     package func noteUserActivity() {
         drive.noteUserActivity()
-        cursorPresentationBypassUntil = CACurrentMediaTime() + 0.1
+        cursorPresentationBypassUntil = CACurrentMediaTime() + Ubiquitty.Rendering.cursorPresentationInputBypassSeconds
         userActivityNotesForTesting += 1
         needsDisplay = true
         frameClock.noteAnimationActivity()

@@ -30,17 +30,17 @@ namespace Ubiquitty::Linux {
     return std::min(dpi / 72.0 * std::max(deviceScale, 1), 16.0);
 }
 
-/// Rounds after converting points to device pixels, retaining fractional sizes.
+/// Converts points to device pixels without rounding the font em.
 ///
 /// - Parameters:
 ///   - points: The configured or zoomed font size in points.
 ///   - logicalDPI: Logical dots per inch from the desktop font settings.
 ///   - deviceScale: Backing pixels per logical pixel.
 /// - Returns: A device em size between 1 and 4096 pixels.
-[[nodiscard]] inline int fontPixelSize(double points, double logicalDPI, int deviceScale)
+[[nodiscard]] inline double fontPixelSize(double points, double logicalDPI, int deviceScale)
 {
     const double size = std::isfinite(points) ? points : 12.0;
-    return static_cast<int>(std::lround(std::clamp(size * fontPixelsPerPoint(logicalDPI, deviceScale), 1.0, 4096.0)));
+    return std::clamp(size * fontPixelsPerPoint(logicalDPI, deviceScale), 1.0, 4096.0);
 }
 
 } // namespace Ubiquitty::Linux

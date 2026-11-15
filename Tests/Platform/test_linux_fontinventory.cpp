@@ -11,10 +11,13 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <vector>
 
 #include <fontconfig/fontconfig.h>
 #include <ft2build.h>
 #include FT_FREETYPE_H
+#include FT_MULTIPLE_MASTERS_H
+#include <hb-ft.h>
 
 using namespace Ubiquitty::Rendering::Font;
 
@@ -34,6 +37,8 @@ struct LinuxFontInventoryTestSeam {
     /// The faces the inventory has opened, each one a FreeType open it paid
     /// for and keeps resident.
     static std::size_t openFaceCount(const LinuxFontInventory& inventory) { return inventory.m_faces.size(); }
+    static hb_font_t* cachedProbe(LinuxFontInventory& inventory, FontHandle handle) { return inventory.recordFor(handle)->probeFont.get(); }
+    static hb_buffer_t* cachedBuffer(LinuxFontInventory& inventory) { return inventory.m_probeBuffer.get(); }
 };
 } // namespace Ubiquitty::Linux
 
@@ -313,6 +318,82 @@ TEST(namedFallbackSizeOverridesDoNotAliasCachedFaces)
     request.sizing = FallbackSizing::MatchPrimary;
     CHECK(inventory.validateFamily(request) == matched);
     CHECK(inventory.faceFor(matched)->size->metrics.y_scale == matchedHeight);
+}
+
+TEST(coverageProbeReusesNativeShapersAndTracksBorrowedFaceChanges)
+{
+    CHECK(registerBundledFonts());
+    FT_Library library = nullptr;
+    CHECK(FT_Init_FreeType(&library) == 0);
+    FT_Face face = nullptr;
+    const std::string file = std::string(UBQ_BUNDLED_FONTS_DIR) + "/JetBrainsMono[wght].ttf";
+    CHECK(FT_New_Face(library, file.c_str(), 0, &face) == 0);
+    CHECK(FT_Set_Pixel_Sizes(face, 0, 18) == 0);
+    {
+        Ubiquitty::Linux::LinuxFontInventory inventory(18, "JetBrains Mono", UBQ_BUNDLED_FONTS_DIR);
+        inventory.setPrimaryFaces(face, nullptr);
+        const auto handle = inventory.primaryFont(FontStyle::Regular, 0);
+        bool didShapeMissingCanonical = false;
+        for (std::uint32_t character : { 0x0340U, 0x0341U, 0x0343U, 0x0344U, 0x2126U, 0x212AU, 0x212BU }) {
+            if (FT_Get_Char_Index(face, character) == 0) {
+                const std::array<std::uint32_t, 1> points { character };
+                if (inventory.glyphForCluster(handle, points, Presentation::Text).present)
+                    didShapeMissingCanonical = true;
+            }
+        }
+        CHECK_MSG(didShapeMissingCanonical, "HarfBuzz canonical decomposition covers a character absent from the face's cmap");
+
+        using Seam = Ubiquitty::Linux::LinuxFontInventoryTestSeam;
+        const std::array<std::uint32_t, 3> marked { 'a', 0x0301, 0x0308 };
+        CHECK(inventory.glyphForCluster(handle, marked, Presentation::Text).present);
+        auto* cached = Seam::cachedProbe(inventory, handle);
+        auto* buffer = Seam::cachedBuffer(inventory);
+        const auto serial = hb_font_get_serial(cached);
+        CHECK(inventory.glyphForCluster(handle, marked, Presentation::Text).present);
+        CHECK(Seam::cachedProbe(inventory, handle) == cached);
+        CHECK(Seam::cachedBuffer(inventory) == buffer);
+        CHECK_MSG(hb_font_get_serial(cached) == serial, "an unchanged native face keeps its shaper caches");
+        FT_MM_Var* axes = nullptr;
+        CHECK(FT_Get_MM_Var(face, &axes) == 0);
+        std::vector<FT_Fixed> coordinates(axes->num_axis);
+        for (int size : { 12, 27, 18 }) {
+            CHECK(FT_Set_Char_Size(face, 0, size * 64 + 16, 72, 72) == 0);
+            for (unsigned index = 0; index < axes->num_axis; ++index)
+                coordinates[index] = axes->axis[index].tag == FT_MAKE_TAG('w', 'g', 'h', 't') ? axes->axis[index].maximum : axes->axis[index].def;
+            CHECK(FT_Set_Var_Design_Coordinates(face, axes->num_axis, coordinates.data()) == 0);
+            const auto actual = inventory.glyphForCluster(handle, marked, Presentation::Text);
+            CHECK(actual.present);
+            CHECK(Seam::cachedProbe(inventory, handle) == cached);
+            CHECK(hb_font_get_serial(cached) != serial);
+            hb_font_t* fresh = hb_ft_font_create_referenced(face);
+            int cachedX = 0, cachedY = 0, freshX = 0, freshY = 0;
+            hb_font_get_scale(cached, &cachedX, &cachedY);
+            hb_font_get_scale(fresh, &freshX, &freshY);
+            CHECK(cachedX == freshX && cachedY == freshY);
+            const auto glyph = FT_Get_Char_Index(face, 'M');
+            CHECK(hb_font_get_glyph_h_advance(cached, glyph) == hb_font_get_glyph_h_advance(fresh, glyph));
+            hb_buffer_t* reference = hb_buffer_create();
+            for (unsigned index = 0; index < marked.size(); ++index)
+                hb_buffer_add(reference, marked[index], index);
+            hb_buffer_set_content_type(reference, HB_BUFFER_CONTENT_TYPE_UNICODE);
+            hb_buffer_set_flags(reference, HB_BUFFER_FLAG_PRESERVE_DEFAULT_IGNORABLES);
+            hb_buffer_guess_segment_properties(reference);
+            hb_shape(fresh, reference, nullptr, 0);
+            unsigned count = 0;
+            const auto* glyphs = hb_buffer_get_glyph_infos(reference, &count);
+            CHECK(count > 0 && actual.glyph.value == static_cast<const hb_glyph_info_t&>(glyphs[0]).codepoint);
+            hb_buffer_destroy(reference);
+            hb_font_destroy(fresh);
+            const std::array<std::uint32_t, 1> missing { 0x10FFFF };
+            CHECK(!inventory.glyphForCluster(handle, missing, Presentation::Text).present);
+            CHECK(inventory.glyphForCluster(handle, marked, Presentation::Text).present);
+        }
+        FT_Done_MM_Var(library, axes);
+    }
+    // Inventory released its retained references before the external owner.
+    CHECK(FT_Load_Char(face, 'M', FT_LOAD_DEFAULT) == 0);
+    FT_Done_Face(face);
+    FT_Done_FreeType(library);
 }
 
 UBIQUITTY_TEST_MAIN()

@@ -470,6 +470,7 @@ extension TerminalSurface {
         var hover = Ubiquitty.Rendering.FrameHoverLink()
         if let run = hoveredLinkRun {
             hover.isActive = true
+            hover.linkID = run.linkID
             hover.rowAbsoluteFirst = run.rowFirst
             hover.rowAbsoluteLast = run.rowLast
             hover.columnFirst = run.columnFirst

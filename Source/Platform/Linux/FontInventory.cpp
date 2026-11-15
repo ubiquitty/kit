@@ -63,9 +63,9 @@ void addStyle(FcPattern* pattern, const Rendering::Font::FontFamilyRequest& requ
     FcPatternAddInteger(pattern, FC_SLANT, isItalic ? FC_SLANT_ITALIC : FC_SLANT_ROMAN);
 }
 
-bool setFaceSize(FT_Face face, int fontPixelSize)
+bool setFaceSize(FT_Face face, double fontPixelSize)
 {
-    if (FT_Set_Pixel_Sizes(face, 0, static_cast<FT_UInt>(fontPixelSize)) == 0) {
+    if (FT_Set_Char_Size(face, 0, static_cast<FT_F26Dot6>(std::lround(fontPixelSize * 64)), 72, 72) == 0) {
         return true;
     }
     if (face->num_fixed_sizes <= 0) {
@@ -120,7 +120,7 @@ bool rendersColorGlyph(FT_Face face, unsigned int glyph)
 
 } // namespace
 
-LinuxFontInventory::LinuxFontInventory(int fontPixelSize, std::string primaryFamily,
+LinuxFontInventory::LinuxFontInventory(double fontPixelSize, std::string primaryFamily,
     std::string bundledFontDirectory, Rendering::FontMetrics::FallbackSizing fallbackSizing)
     : m_fontPixelSize(fontPixelSize > 0 ? fontPixelSize : 16)
     , m_fallbackSizing(fallbackSizing)
@@ -131,9 +131,21 @@ LinuxFontInventory::LinuxFontInventory(int fontPixelSize, std::string primaryFam
         m_library = nullptr;
 }
 
+void LinuxFontInventory::ProbeFontDeleter::operator()(hb_font_t* font) const
+{
+    hb_font_destroy(font);
+}
+
+void LinuxFontInventory::ProbeBufferDeleter::operator()(hb_buffer_t* buffer) const
+{
+    hb_buffer_destroy(buffer);
+}
+
 LinuxFontInventory::~LinuxFontInventory()
 {
+    m_probeBuffer.reset();
     for (FaceRecord& record : m_faces) {
+        record.probeFont.reset();
         if (record.face)
             FT_Done_Face(record.face);
     }
@@ -192,26 +204,63 @@ Rendering::Font::CascadeResult LinuxFontInventory::cascadeForRun(const Rendering
     return { probe.font, probe.glyph, probe.present, probe.lastResort };
 }
 
+hb_font_t* LinuxFontInventory::probeFontFor(FaceRecord& record)
+{
+    const auto face = record.face;
+    const bool isNew = !record.probeFont;
+    if (isNew) {
+        record.probeFont.reset(hb_ft_font_create_referenced(face));
+        FT_MM_Var* axes = nullptr;
+        if (FT_Get_MM_Var(face, &axes) == 0 && axes) {
+            record.probeAxisCount = axes->num_axis;
+            record.probeCoordinates.resize(record.probeAxisCount);
+            record.probeCurrentCoordinates.resize(record.probeAxisCount);
+            FT_Done_MM_Var(face->glyph->library, axes);
+        }
+    }
+    FT_Matrix matrix;
+    FT_Vector delta;
+    FT_Get_Transform(face, &matrix, &delta);
+    const auto& metrics = face->size->metrics;
+    const std::array<long, 10> state { metrics.x_scale, metrics.y_scale, metrics.x_ppem, metrics.y_ppem,
+        matrix.xx, matrix.xy, matrix.yx, matrix.yy, delta.x, delta.y };
+    const bool hasCoordinates = record.probeAxisCount == 0
+        || FT_Get_Var_Design_Coordinates(face, record.probeAxisCount, record.probeCurrentCoordinates.data()) == 0;
+    // Primary faces are borrowed and can change size or axes between probes.
+    // Synchronize the cached font rather than retaining stale advances or GSUB
+    // variation conditions. Do not replace shaping with cmap-only coverage:
+    // canonical decomposition may cover a character absent from that cmap.
+    if (!isNew && (state != record.probeNativeState || !hasCoordinates || record.probeCoordinates != record.probeCurrentCoordinates))
+        hb_ft_font_changed(record.probeFont.get());
+    record.probeNativeState = state;
+    record.probeCoordinates = record.probeCurrentCoordinates;
+    return record.probeFont.get();
+}
+
 Rendering::Font::GlyphProbeResult LinuxFontInventory::glyphForCluster(Rendering::Font::FontHandle handle, std::span<const std::uint32_t> codePoints, Rendering::Font::Presentation presentation)
 {
     using Rendering::Font::Presentation;
-    FT_Face face = faceFor(handle);
+    FaceRecord* record = recordFor(handle);
+    FT_Face face = record ? record->face : nullptr;
     if (!face || codePoints.empty() || (presentation == Presentation::Text && FT_HAS_COLOR(face))) {
         return {};
     }
-    const std::unique_ptr<hb_font_t, decltype(&hb_font_destroy)> shaper(hb_ft_font_create_referenced(face), hb_font_destroy);
-    const std::unique_ptr<hb_buffer_t, decltype(&hb_buffer_destroy)> buffer(hb_buffer_create(), hb_buffer_destroy);
+    hb_font_t* shaper = probeFontFor(*record);
+    if (!m_probeBuffer)
+        m_probeBuffer.reset(hb_buffer_create());
+    hb_buffer_t* buffer = m_probeBuffer.get();
+    hb_buffer_reset(buffer);
     for (std::size_t index = 0; index < codePoints.size(); ++index) {
-        hb_buffer_add(buffer.get(), codePoints[index], static_cast<unsigned int>(index));
+        hb_buffer_add(buffer, codePoints[index], static_cast<unsigned int>(index));
     }
-    hb_buffer_set_content_type(buffer.get(), HB_BUFFER_CONTENT_TYPE_UNICODE);
+    hb_buffer_set_content_type(buffer, HB_BUFFER_CONTENT_TYPE_UNICODE);
     // Unconsumed joiners and tags must remain visible to the coverage proof;
     // otherwise an unsupported sequence can look like its covered lead glyph.
-    hb_buffer_set_flags(buffer.get(), HB_BUFFER_FLAG_PRESERVE_DEFAULT_IGNORABLES);
-    hb_buffer_guess_segment_properties(buffer.get());
-    hb_shape(shaper.get(), buffer.get(), nullptr, 0);
+    hb_buffer_set_flags(buffer, HB_BUFFER_FLAG_PRESERVE_DEFAULT_IGNORABLES);
+    hb_buffer_guess_segment_properties(buffer);
+    hb_shape(shaper, buffer, nullptr, 0);
     unsigned int count = 0;
-    const hb_glyph_info_t* glyphs = hb_buffer_get_glyph_infos(buffer.get(), &count);
+    const hb_glyph_info_t* glyphs = hb_buffer_get_glyph_infos(buffer, &count);
     unsigned int firstGlyph = 0;
     unsigned int visibleGlyphs = 0;
     for (unsigned int index = 0; index < count; ++index) {
@@ -263,10 +312,15 @@ Rendering::Font::FontHandle LinuxFontInventory::loadFamily(const Rendering::Font
     // that file, everywhere else to ours, and a golden the two machines share
     // records whichever of them minted it.
     std::string shipped = bundledFontPath(familyString, m_bundledFontDirectory);
-    const std::string_view boldFile = Rendering::bundledBoldFontFile(request.family);
-    if (isBoldStyle(request.style) && !boldFile.empty() && !shipped.empty()) {
-        shipped = shipped.substr(0, shipped.find_last_of('/') + 1) + std::string(boldFile);
-    }
+    const bool isItalic = request.style == Rendering::Font::FontStyle::Italic || request.style == Rendering::Font::FontStyle::BoldItalic;
+    std::string_view styleFile = isItalic
+        ? (isBoldStyle(request.style) ? Rendering::bundledBoldItalicFontFile(request.family) : Rendering::bundledItalicFontFile(request.family))
+        : isBoldStyle(request.style) ? Rendering::bundledBoldFontFile(request.family)
+                                     : std::string_view();
+    if (styleFile.empty() && isBoldStyle(request.style))
+        styleFile = Rendering::bundledBoldFontFile(request.family);
+    if (!styleFile.empty() && !shipped.empty())
+        shipped = shipped.substr(0, shipped.find_last_of('/') + 1) + std::string(styleFile);
     if (!shipped.empty()) {
         const Rendering::Font::FontHandle bundled = loadFile(shipped, 0, request, FontFileSource::Bundled);
         if (bundled.isValid()) {
@@ -442,10 +496,12 @@ Rendering::Font::FontHandle LinuxFontInventory::loadFile(std::string file, int f
         FT_Set_Var_Design_Coordinates(face, variations->num_axis, coordinates.data());
         FT_Done_MM_Var(m_library, variations);
     }
+    double emSize = m_fontPixelSize;
     if (sizing == Rendering::FontMetrics::FallbackSizing::MatchPrimary && !FT_HAS_COLOR(face)) {
         if (FT_Face base = faceFor(sizingBase)) {
             const double scale = Rendering::FontMetrics::fallbackScale(fallbackMetrics(base), fallbackMetrics(face));
-            const auto height = static_cast<FT_F26Dot6>(std::lround(std::clamp(m_fontPixelSize * scale, 1.0, 4096.0) * 64.0));
+            emSize = std::clamp(m_fontPixelSize * scale, 1.0, 4096.0);
+            const auto height = static_cast<FT_F26Dot6>(std::lround(emSize * 64.0));
             if (FT_Set_Char_Size(face, 0, height, 72, 72) != 0) {
                 FT_Done_Face(face);
                 return {};
@@ -460,6 +516,7 @@ Rendering::Font::FontHandle LinuxFontInventory::loadFile(std::string file, int f
     record.variableWeight = request.variableWeight;
     record.sizingBase = sizingBase;
     record.sizing = sizing;
+    record.emSize = emSize;
     return handle;
 }
 
@@ -485,6 +542,23 @@ FT_FaceRec_* LinuxFontInventory::faceFor(Rendering::Font::FontHandle handle) con
 {
     const FaceRecord* record = recordFor(handle);
     return record ? record->face : nullptr;
+}
+
+std::string_view LinuxFontInventory::sourceFileFor(FT_FaceRec_* face) const
+{
+    for (const auto& record : m_faces) {
+        if (record.face == face)
+            return record.file;
+    }
+    return {};
+}
+
+double LinuxFontInventory::pixelSizeFor(FT_FaceRec_* face) const
+{
+    for (const auto& record : m_faces)
+        if (record.face == face)
+            return record.emSize > 0 ? record.emSize : m_fontPixelSize;
+    return m_fontPixelSize;
 }
 
 LinuxFontInventory::FaceRecord* LinuxFontInventory::recordFor(Rendering::Font::FontHandle handle)

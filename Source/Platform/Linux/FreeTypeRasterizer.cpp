@@ -16,9 +16,11 @@
 #include "Core/Rendering/RuleGeometry.h"
 #include "Core/Rendering/SizedMaster.h"
 #include "Core/Rendering/SubpixelPhase.h"
+#include "Core/Unicode/GraphemeBreak.h"
 #include "Core/Unicode/Width.h"
 #include "Platform/Linux/ColorChannel.h"
 #include "Platform/Linux/FontInventory.h"
+#include "Platform/Linux/NativeClusterRasterizer.h"
 
 #include <algorithm>
 #include <array>
@@ -40,6 +42,7 @@
 #include FT_OUTLINE_H
 
 #include <hb-ft.h>
+#include <hb-ot.h>
 #include <hb.h>
 #include FT_MULTIPLE_MASTERS_H
 #include FT_COLOR_H
@@ -214,7 +217,7 @@ const char* colorGlyphFormatName(ColorGlyphFormat format)
 
 // The resolved run, opaque to the header so HarfBuzz stays out of it.
 struct FreeTypeRasterizer::CascadeRouting {
-    CascadeRouting(int fontPixelSize, std::string family, std::string bundledFontDirectory, Rendering::FontMetrics::FallbackSizing sizing)
+    CascadeRouting(double fontPixelSize, std::string family, std::string bundledFontDirectory, Rendering::FontMetrics::FallbackSizing sizing)
         : inventory(fontPixelSize, std::move(family), std::move(bundledFontDirectory), sizing)
     {
     }
@@ -228,12 +231,12 @@ struct ShapingFeatures {
     bool hasUserFeatures { false };
 };
 
-FreeTypeRasterizer::FreeTypeRasterizer(int fontPixelSize)
+FreeTypeRasterizer::FreeTypeRasterizer(double fontPixelSize)
     : FreeTypeRasterizer(fontPixelSize, std::string(), std::string(), std::string())
 {
 }
 
-FreeTypeRasterizer::FreeTypeRasterizer(int fontPixelSize, std::string family)
+FreeTypeRasterizer::FreeTypeRasterizer(double fontPixelSize, std::string family)
     : FreeTypeRasterizer(fontPixelSize, std::move(family), std::string(), std::string())
 {
 }
@@ -264,7 +267,7 @@ std::vector<hb_feature_t> shapingFeatureRunFor(Ligatures ligatures, const std::s
 
 } // namespace
 
-FreeTypeRasterizer::FreeTypeRasterizer(int fontPixelSize, std::string family, std::string fallbackFontName, std::string bundledFallbackPath, std::string bundledPrimaryPath, int deviceScale, int lineSpacingInPixels, int trackingInPixels, int uprightWeight, int boldWeight, double widthPercent, std::string fontVariations, std::string fontFeatures, Ligatures ligatures, Preferences::FontRoutePreferences fallbackPreferences)
+FreeTypeRasterizer::FreeTypeRasterizer(double fontPixelSize, std::string family, std::string fallbackFontName, std::string bundledFallbackPath, std::string bundledPrimaryPath, int deviceScale, int lineSpacingInPixels, int trackingInPixels, int uprightWeight, int boldWeight, double widthPercent, std::string fontVariations, std::string fontFeatures, Ligatures ligatures, Preferences::FontRoutePreferences fallbackPreferences)
     : m_fontPixelSize(fontPixelSize > 0 ? fontPixelSize : 1)
     // Not clamped at zero the way line spacing is: tightening a wide face is
     // the reason character spacing exists, and Core's floor keeps the column
@@ -302,9 +305,18 @@ FreeTypeRasterizer::FreeTypeRasterizer(int fontPixelSize, std::string family, st
     // After both faces, because the overhang fold reads the fallback's bounding
     // box and the cell reads the primary's advances. Nothing below reopens
     // either, so this is the only place the two can be measured.
+    if (m_face && m_face->units_per_EM > 0) {
+        m_primaryAscentInEm = static_cast<double>(m_face->ascender) / m_face->units_per_EM;
+        m_primaryDescentInEm = -static_cast<double>(m_face->descender) / m_face->units_per_EM;
+    }
     m_cellMetrics = computeCellMetrics();
     m_faceMetrics = computeFaceMetrics();
     m_glyphOverhang = computeGlyphOverhang(m_cellMetrics);
+}
+
+const char* FreeTypeRasterizer::familyName() const
+{
+    return m_face && m_face->family_name ? m_face->family_name : "";
 }
 
 FreeTypeRasterizer::~FreeTypeRasterizer()
@@ -365,19 +377,19 @@ void FreeTypeRasterizer::ensureProportionalFaces()
     const std::string bundledBold = bundledPath(Rendering::bundledBoldFontFile("Noto Sans"));
     FT_FaceRec_* regular = nullptr;
     FT_FaceRec_* bold = nullptr;
-    if (!bundledRegular.empty() && FT_New_Face(m_library, bundledRegular.c_str(), 0, &regular) != 0)
-        regular = nullptr;
-    if (regular && !bundledBold.empty() && FT_New_Face(m_library, bundledBold.c_str(), 0, &bold) != 0)
-        bold = nullptr;
+    if (!bundledRegular.empty())
+        regular = openFace(bundledRegular);
+    if (regular && !bundledBold.empty())
+        bold = openFace(bundledBold);
     if (!regular) {
         regular = loadFaceByPattern("sans-serif");
         bold = loadFaceByPattern("sans-serif:bold");
     }
-    if (regular && FT_Set_Pixel_Sizes(regular, 0, static_cast<FT_UInt>(m_fontPixelSize)) != 0) {
+    if (regular && FT_Set_Char_Size(regular, 0, static_cast<FT_F26Dot6>(std::lround(m_fontPixelSize * 64)), 72, 72) != 0) {
         FT_Done_Face(regular);
         regular = nullptr;
     }
-    if (bold && FT_Set_Pixel_Sizes(bold, 0, static_cast<FT_UInt>(m_fontPixelSize)) != 0) {
+    if (bold && FT_Set_Char_Size(bold, 0, static_cast<FT_F26Dot6>(std::lround(m_fontPixelSize * 64)), 72, 72) != 0) {
         FT_Done_Face(bold);
         bold = nullptr;
     }
@@ -495,7 +507,7 @@ bool FreeTypeRasterizer::rasteriseSizedProportionalRun(std::span<const Ubiquitty
     if (FT_Request_Size(drawn, &request) != 0)
         return false;
     const bool isDrawn = drawProportionalRunWithFace(drawn, glyphs, stripWidthInPixels, stripHeightInPixels, coverageOut, master, baselineY);
-    (void)FT_Set_Pixel_Sizes(drawn, 0, static_cast<FT_UInt>(m_fontPixelSize));
+    (void)FT_Set_Char_Size(drawn, 0, static_cast<FT_F26Dot6>(std::lround(m_fontPixelSize * 64)), 72, 72);
     return isDrawn;
 }
 
@@ -511,6 +523,21 @@ bool FreeTypeRasterizer::drawProportionalRunWithFace(FT_FaceRec_* face, std::spa
     if (!m_face || !face)
         return false;
     const int baselineY = baselineOverride ? *baselineOverride : primaryBaselineY(stripHeightInPixels);
+    if (!m_nativeClusters)
+        m_nativeClusters = std::make_unique<NativeClusterRasterizer>();
+    auto native = nativeFont(face, Rendering::FontFace::Regular);
+    native.emSize *= master.scale.value();
+    native.horizontalScale = master.horizontalScale;
+    std::vector<NativePositionedGlyph> positioned;
+    positioned.reserve(glyphs.size());
+    double nativePen = 0;
+    for (const auto& shaped : glyphs) {
+        positioned.push_back({ shaped.glyph, nativePen + shaped.offsetXInPixels, baselineY - shaped.offsetYInPixels });
+        nativePen += shaped.advanceInPixels;
+    }
+    if (m_nativeClusters->drawGlyphs(positioned, native, stripWidthInPixels, stripHeightInPixels, coverageOut))
+        return true;
+
     FT_Matrix stretch { static_cast<FT_Fixed>(std::lround(master.horizontalScale * 65536.0)), 0, 0, 65536 };
     FT_Matrix* const stretchOrNull = master.horizontalScale != 1.0 ? &stretch : nullptr;
     double penX = 0.0;
@@ -571,10 +598,37 @@ bool FreeTypeRasterizer::drawProportionalRunWithFace(FT_FaceRec_* face, std::spa
     return didLoadGlyph;
 }
 
-// fc-match `pattern` (a family name) to a font file and FT_New_Face it into
-// *outFace (UNSIZED — the caller sets the pixel size). The caller owns the
-// returned face. Leaves *outFace null and returns false on any failure.
-FT_FaceRec_* FreeTypeRasterizer::loadFaceByPattern(const char* pattern)
+FT_FaceRec_* FreeTypeRasterizer::openFace(const std::string& file, int index)
+{
+    FT_FaceRec_* face = nullptr;
+    if (FT_New_Face(m_library, file.c_str(), index, &face) != 0)
+        return nullptr;
+    m_faceSources[face] = file;
+    return face;
+}
+
+NativeClusterFont FreeTypeRasterizer::nativeFont(FT_FaceRec_* face, Rendering::FontFace style) const
+{
+    if (!face)
+        return {};
+    const auto source = m_faceSources.find(face);
+    const std::string file = source != m_faceSources.end() ? source->second
+        : m_cascade                                        ? std::string(m_cascade->inventory.sourceFileFor(face))
+                                                           : std::string();
+    // A static fallback without an italic member remains the real face Core
+    // selected, as native fallback does; a requested style must not invent a
+    // synthetic slant. Variable primaries carry their style on live axes.
+    if (!FT_HAS_MULTIPLE_MASTERS(face))
+        style = Rendering::fontFace((face->style_flags & FT_STYLE_FLAG_BOLD) != 0, (face->style_flags & FT_STYLE_FLAG_ITALIC) != 0);
+    const bool isConfiguredFace = face == m_face || face == m_boldFace || face == m_italicFace || face == m_boldItalicFace || face == m_fallbackFace;
+    const double em = isConfiguredFace || !m_cascade ? m_fontPixelSize : m_cascade->inventory.pixelSizeFor(face);
+    return { face, file, style, em };
+}
+
+// Match a family and optional style to an unsized face. A required family is
+// checked against every Fontconfig family alias for diagnostics. An installed
+// substitute remains usable: Fontconfig owns the configured fallback order.
+FT_FaceRec_* FreeTypeRasterizer::loadFaceByPattern(const char* pattern, Rendering::FontFace style, const char* requiredFamily)
 {
     if (!m_library)
         return nullptr;
@@ -585,6 +639,12 @@ FT_FaceRec_* FreeTypeRasterizer::loadFaceByPattern(const char* pattern)
     FcPattern* pat = FcNameParse(reinterpret_cast<const FcChar8*>(pattern));
     if (!pat)
         return nullptr;
+    if (style != Rendering::FontFace::Regular) {
+        FcPatternDel(pat, FC_WEIGHT);
+        FcPatternDel(pat, FC_SLANT);
+        FcPatternAddInteger(pat, FC_WEIGHT, Rendering::isBold(style) ? FC_WEIGHT_BOLD : FC_WEIGHT_REGULAR);
+        FcPatternAddInteger(pat, FC_SLANT, Rendering::isItalic(style) ? FC_SLANT_ITALIC : FC_SLANT_ROMAN);
+    }
     FcConfigSubstitute(config, pat, FcMatchPattern);
     FcDefaultSubstitute(pat);
 
@@ -596,6 +656,20 @@ FT_FaceRec_* FreeTypeRasterizer::loadFaceByPattern(const char* pattern)
             FcPatternDestroy(matched);
         return nullptr;
     }
+    if (requiredFamily) {
+        bool isFamilyMatched = false;
+        FcChar8* matchedFamily = nullptr;
+        for (int index = 0; FcPatternGetString(matched, FC_FAMILY, index, &matchedFamily) == FcResultMatch; ++index) {
+            if (matchedFamily && strcasecmp(reinterpret_cast<const char*>(matchedFamily), requiredFamily) == 0) {
+                isFamilyMatched = true;
+                break;
+            }
+        }
+        if (!isFamilyMatched) {
+            std::fprintf(stderr, "ubiquitty-linux: font family '%s' is not installed; using fontconfig match '%s'\n",
+                requiredFamily, matchedFamily ? reinterpret_cast<const char*>(matchedFamily) : "?");
+        }
+    }
 
     FcChar8* file = nullptr;
     int faceIndex = 0;
@@ -606,7 +680,7 @@ FT_FaceRec_* FreeTypeRasterizer::loadFaceByPattern(const char* pattern)
 
     FT_FaceRec_* face = nullptr;
     if (haveFile)
-        FT_New_Face(m_library, reinterpret_cast<const char*>(file), faceIndex, &face);
+        face = openFace(reinterpret_cast<const char*>(file), faceIndex);
     FcPatternDestroy(matched);
     return face;
 }
@@ -618,25 +692,11 @@ bool FreeTypeRasterizer::loadMatchedFace()
 {
     const char* familyPattern = m_family.empty() ? "monospace" : m_family.c_str();
     if (m_bundledPrimaryPath.empty()) {
-        m_face = loadFaceByPattern(familyPattern);
-        // Confirm the family, as the fallback below confirms its own:
-        // fontconfig answers every pattern with its nearest match, so a family
-        // nobody installed comes back as some other typeface and the grid
-        // draws that one instead, saying nothing. A snapshot case could then
-        // name a face only one machine carries and mint goldens of the
-        // substitute everywhere else. A named family that does not resolve is
-        // reported and refused; the caller's fallback then applies.
-        if (m_face && !m_family.empty()) {
-            const char* got = m_face->family_name;
-            if (got == nullptr || strcasecmp(got, m_family.c_str()) != 0) {
-                std::fprintf(stderr, "ubiquitty-linux: font family '%s' is not installed; fontconfig offered '%s'\n",
-                    m_family.c_str(), got != nullptr ? got : "?");
-                FT_Done_Face(m_face);
-                m_face = nullptr;
-            }
-        }
-    } else if (FT_New_Face(m_library, m_bundledPrimaryPath.c_str(), 0, &m_face) != 0)
-        m_face = nullptr;
+        // Report a substituted family, while keeping Fontconfig's working
+        // native match rather than degrading to the embedded bitmap face.
+        m_face = loadFaceByPattern(familyPattern, Rendering::FontFace::Regular, m_family.empty() ? nullptr : m_family.c_str());
+    } else
+        m_face = openFace(m_bundledPrimaryPath);
     if (!m_face)
         return false;
 
@@ -645,7 +705,7 @@ bool FreeTypeRasterizer::loadMatchedFace()
     const char* style = m_face->style_name != nullptr ? m_face->style_name : "";
     std::snprintf(m_faceName, sizeof(m_faceName), "%s %s", family, style);
 
-    if (FT_Set_Pixel_Sizes(m_face, 0, static_cast<FT_UInt>(m_fontPixelSize)) != 0) {
+    if (FT_Set_Char_Size(m_face, 0, static_cast<FT_F26Dot6>(std::lround(m_fontPixelSize * 64)), 72, 72) != 0) {
         FT_Done_Face(m_face);
         m_face = nullptr;
         return false;
@@ -663,9 +723,8 @@ bool FreeTypeRasterizer::loadMatchedFace()
     // the grid would be the regular's either way.
     const std::string bundledBold = bundledPath(Rendering::bundledBoldFontFile(m_family));
     if (!bundledBold.empty()) {
-        if (FT_New_Face(m_library, bundledBold.c_str(), 0, &m_boldFace) != 0)
-            m_boldFace = nullptr;
-        if (m_boldFace && FT_Set_Pixel_Sizes(m_boldFace, 0, static_cast<FT_UInt>(m_fontPixelSize)) != 0) {
+        m_boldFace = openFace(bundledBold);
+        if (m_boldFace && FT_Set_Char_Size(m_boldFace, 0, static_cast<FT_F26Dot6>(std::lround(m_fontPixelSize * 64)), 72, 72) != 0) {
             FT_Done_Face(m_boldFace);
             m_boldFace = nullptr;
         }
@@ -674,10 +733,10 @@ bool FreeTypeRasterizer::loadMatchedFace()
     // never contribute to the cell, which is the upright's.
     const auto openStyleFile = [&](std::string_view file) -> FT_FaceRec_* {
         const std::string path = bundledPath(file);
-        FT_FaceRec_* styleFace = nullptr;
-        if (path.empty() || FT_New_Face(m_library, path.c_str(), 0, &styleFace) != 0)
+        FT_FaceRec_* styleFace = path.empty() ? nullptr : openFace(path);
+        if (!styleFace)
             return nullptr;
-        if (FT_Set_Pixel_Sizes(styleFace, 0, static_cast<FT_UInt>(m_fontPixelSize)) != 0) {
+        if (FT_Set_Char_Size(styleFace, 0, static_cast<FT_F26Dot6>(std::lround(m_fontPixelSize * 64)), 72, 72) != 0) {
             FT_Done_Face(styleFace);
             return nullptr;
         }
@@ -685,6 +744,33 @@ bool FreeTypeRasterizer::loadMatchedFace()
     };
     m_italicFace = openStyleFile(Rendering::bundledItalicFontFile(m_family));
     m_boldItalicFace = openStyleFile(Rendering::bundledBoldItalicFontFile(m_family));
+    // Installed static families carry their styles in separate files too.
+    // Keep bundled families on their shipped files, and variable weights on
+    // the primary's axis, so style matching cannot change their source.
+    if (m_bundledPrimaryPath.empty() && m_face->family_name) {
+        const auto matchedStyle = [&](Rendering::FontFace requested) -> FT_FaceRec_* {
+            std::unique_ptr<FT_FaceRec_, decltype(&FT_Done_Face)> matched(loadFaceByPattern(m_face->family_name, requested), FT_Done_Face);
+            const FT_Long wantedFlags = (Rendering::isBold(requested) ? FT_STYLE_FLAG_BOLD : 0)
+                | (Rendering::isItalic(requested) ? FT_STYLE_FLAG_ITALIC : 0);
+            if (!matched)
+                return nullptr;
+            // Fontconfig may substitute another family or return regular
+            // when the requested style is missing. Neither is a styled
+            // member of this primary family.
+            if (!matched->family_name || strcasecmp(matched->family_name, m_face->family_name) != 0
+                || (matched->style_flags & wantedFlags) != wantedFlags
+                || FT_Set_Char_Size(matched.get(), 0, static_cast<FT_F26Dot6>(std::lround(m_fontPixelSize * 64)), 72, 72) != 0) {
+                return nullptr;
+            }
+            return matched.release();
+        };
+        if (!m_boldFace && m_wghtAxisIndex < 0)
+            m_boldFace = matchedStyle(Rendering::FontFace::Bold);
+        if (!m_italicFace)
+            m_italicFace = matchedStyle(Rendering::FontFace::Italic);
+        if (!m_boldItalicFace && m_wghtAxisIndex < 0)
+            m_boldItalicFace = matchedStyle(Rendering::FontFace::BoldItalic);
+    }
     m_doesItalicShareAxes = false;
     if (m_italicFace && m_axisCount > 0 && (m_italicFace->face_flags & FT_FACE_FLAG_MULTIPLE_MASTERS) != 0) {
         FT_MM_Var* italicAxes = nullptr;
@@ -764,8 +850,8 @@ bool FreeTypeRasterizer::loadFallbackFace()
     // pinned.
     if (!m_fallbackFontName.empty()) {
         const std::string shipped = bundledPath(Rendering::bundledFontFile(m_fallbackFontName));
-        if (!shipped.empty() && FT_New_Face(m_library, shipped.c_str(), 0, &m_fallbackFace) != 0)
-            m_fallbackFace = nullptr;
+        if (!shipped.empty())
+            m_fallbackFace = openFace(shipped);
         if (m_fallbackFace)
             m_bundledFallbackFaceSource = shipped;
     }
@@ -782,15 +868,14 @@ bool FreeTypeRasterizer::loadFallbackFace()
     }
 
     if (!m_fallbackFace && !m_bundledFallbackPath.empty()) {
-        if (FT_New_Face(m_library, m_bundledFallbackPath.c_str(), 0, &m_fallbackFace) != 0)
-            m_fallbackFace = nullptr;
+        m_fallbackFace = openFace(m_bundledFallbackPath);
         if (m_fallbackFace)
             m_bundledFallbackFaceSource = m_bundledFallbackPath;
     }
 
     if (!m_fallbackFace)
         return false;
-    if (FT_Set_Pixel_Sizes(m_fallbackFace, 0, static_cast<FT_UInt>(m_fontPixelSize)) != 0) {
+    if (FT_Set_Char_Size(m_fallbackFace, 0, static_cast<FT_F26Dot6>(std::lround(m_fontPixelSize * 64)), 72, 72) != 0) {
         FT_Done_Face(m_fallbackFace);
         m_fallbackFace = nullptr;
         m_bundledFallbackFaceSource.clear();
@@ -1034,7 +1119,7 @@ Rendering::CellMetrics FreeTypeRasterizer::computeCellMetrics() const
     if (cellHeight <= 0)
         cellHeight = roundToInt(static_cast<double>(sm.ascender - sm.descender) / 64.0);
     if (cellHeight <= 0)
-        cellHeight = m_fontPixelSize;
+        cellHeight = roundToInt(m_fontPixelSize);
 
     // Baseline from the cell top = the ascender (26.6).
     int baseline = roundToInt(static_cast<double>(sm.ascender) / 64.0);
@@ -1172,24 +1257,29 @@ Rendering::GlyphOverhangInputs FreeTypeRasterizer::computeGlyphOverhang(const Re
     return in;
 }
 
-// The primary face's baseline = its rounded ascender (matching cellMetrics()),
-// clamped into the slot. Fallback glyphs share this baseline so every face lines
-// up with the text + underline/strike rules. m_face must be non-null.
+// Use the cached shared cell layout, including the exact split of line spacing,
+// then add the overflow margin. Mutable FT face sizes/weights must not move the
+// baseline relative to Core's text and rule geometry. m_face must be non-null.
 int FreeTypeRasterizer::primaryBaselineY(int slotHeight) const
 {
-    const FT_Size_Metrics& sizeMetrics = m_face->size->metrics;
-    int baselineY = roundToInt(static_cast<double>(sizeMetrics.ascender) / 64.0);
-    // In a TALLER overflow slot the cell box is vertically centered, so shift the
-    // baseline down by that margin to keep the glyph on the cell baseline. A
-    // cell-tight slot (slotHeight == cellHeight) ⇒ no shift.
-    int cellHeight = roundToInt(static_cast<double>(sizeMetrics.height) / 64.0);
-    if (cellHeight <= 0)
-        cellHeight = roundToInt(static_cast<double>(sizeMetrics.ascender - sizeMetrics.descender) / 64.0);
-    if (cellHeight > 0 && slotHeight > cellHeight)
+    const auto metrics = cellMetrics();
+    int baselineY = roundToInt(metrics.baselineFromTop);
+    const int cellHeight = roundToInt(metrics.cellHeight);
+    if (slotHeight > cellHeight)
         baselineY += (slotHeight - cellHeight) / 2;
     if (baselineY <= 0 || baselineY > slotHeight)
         baselineY = slotHeight > 1 ? slotHeight - 1 : slotHeight;
     return baselineY;
+}
+
+double FreeTypeRasterizer::symbolBaselineRaise(FT_FaceRec_* face, double scale) const
+{
+    if (!face || face->units_per_EM <= 0)
+        return 0;
+    const double em = static_cast<double>(FT_MulFix(face->units_per_EM, face->size->metrics.y_scale)) / 64;
+    return Rendering::symbolFallbackBaselineRaise(m_primaryAscentInEm * m_fontPixelSize * scale,
+        m_primaryDescentInEm * m_fontPixelSize * scale,
+        face->ascender * em / face->units_per_EM, -face->descender * em / face->units_per_EM);
 }
 
 // Load + render `codePoint` from `face` and center-blit its coverage into the
@@ -1197,12 +1287,12 @@ int FreeTypeRasterizer::primaryBaselineY(int slotHeight) const
 // the face is null, lacks the glyph (FT_Get_Char_Index == 0 / ".notdef"), or
 // FreeType fails to load/render it. A blank (empty bitmap, e.g. space) is a
 // valid success — the pre-cleared buffer is already correct.
-bool FreeTypeRasterizer::renderGlyphFromFace(FT_FaceRec_* face, std::uint32_t codePoint, int baselineY, int slotWidth, int slotHeight, std::uint8_t* coverageOut, const Rendering::SizedMaster& master)
+bool FreeTypeRasterizer::renderGlyphFromFace(FT_FaceRec_* face, std::uint32_t codePoint, int baselineY, int slotWidth, int slotHeight, std::uint8_t* coverageOut, const Rendering::SizedMaster& master, GlyphBaseline glyphBaseline)
 {
-    return renderGlyphAtCurrentCoordinates(face, codePoint, baselineY, slotWidth, slotHeight, coverageOut, master);
+    return renderGlyphAtCurrentCoordinates(face, codePoint, baselineY, slotWidth, slotHeight, coverageOut, master, glyphBaseline);
 }
 
-bool FreeTypeRasterizer::renderGlyphAtCurrentCoordinates(FT_FaceRec_* face, std::uint32_t codePoint, int baselineY, int slotWidth, int slotHeight, std::uint8_t* coverageOut, const Rendering::SizedMaster& master)
+bool FreeTypeRasterizer::renderGlyphAtCurrentCoordinates(FT_FaceRec_* face, std::uint32_t codePoint, int baselineY, int slotWidth, int slotHeight, std::uint8_t* coverageOut, const Rendering::SizedMaster& master, GlyphBaseline glyphBaseline)
 {
     if (!face)
         return false;
@@ -1227,6 +1317,40 @@ bool FreeTypeRasterizer::renderGlyphAtCurrentCoordinates(FT_FaceRec_* face, std:
         FT_Set_Transform(face, nullptr, nullptr);
     if (!isLoaded)
         return false;
+    if (!Rendering::tilesOnTextPen(codePoint) && !isUnhinted && face->glyph->format == FT_GLYPH_FORMAT_OUTLINE) {
+        if (!m_nativeClusters)
+            m_nativeClusters = std::make_unique<NativeClusterRasterizer>();
+        auto font = nativeFont(face, Rendering::FontFace::Regular);
+        font.emSize *= master.scale.value();
+        font.horizontalScale = master.horizontalScale;
+        const bool isPrimary = face == m_face || face == m_boldFace || face == m_italicFace || face == m_boldItalicFace;
+        const auto across = master.horizontalMagnification();
+        double penX = across.scaled(std::max(0, (across.unscaled(slotWidth) - roundToInt(m_cellAdvanceInPixels)) / 2));
+        if (!isPrimary) {
+            // Keep Core's existing ink-centred fallback placement. The phase
+            // moves the pen, not this anchor, so coverage cannot recenter at a
+            // different quarter-pixel phase.
+            if (FT_Render_Glyph(face->glyph, FT_RENDER_MODE_NORMAL) != 0)
+                return false;
+            penX = (slotWidth - static_cast<int>(face->glyph->bitmap.width)) / 2 - face->glyph->bitmap_left;
+        }
+        double baseline = baselineY + master.shiftY;
+        if (glyphBaseline == GlyphBaseline::SymbolDesignCenter && Rendering::Font::isPrivateUse(codePoint)) {
+            const double em = font.emSize;
+            baseline -= Rendering::symbolFallbackBaselineRaise(m_primaryAscentInEm * m_fontPixelSize * master.scale.value(),
+                m_primaryDescentInEm * m_fontPixelSize * master.scale.value(),
+                face->ascender * em / face->units_per_EM, -face->descender * em / face->units_per_EM);
+        }
+        penX += master.shiftX + m_phaseInPixels;
+        NativeGlyphBounds bounds;
+        if (!isPrimary && m_nativeClusters->glyphBounds(font, glyphIndex, bounds)) {
+            const double top = baseline + bounds.top;
+            baseline += Rendering::fallbackInkTopInSlot(codePoint, top, bounds.height, slotHeight) - top;
+        }
+        const NativePositionedGlyph glyph { glyphIndex, penX, baseline };
+        return m_nativeClusters->drawGlyphs(std::span(&glyph, 1), font, slotWidth, slotHeight,
+            { coverageOut, static_cast<std::size_t>(slotWidth) * slotHeight });
+    }
     const Rendering::RasterScale rasterScale = master.scale;
     const int cellHeight = std::min(slotHeight, rasterScale.scaled(roundToInt(cellMetrics().cellHeight)));
     const int marginY = (slotHeight - cellHeight) / 2;
@@ -1278,6 +1402,12 @@ bool FreeTypeRasterizer::renderGlyphAtCurrentCoordinates(FT_FaceRec_* face, std:
         FT_Outline_Translate(&face->glyph->outline, static_cast<FT_Pos>(std::lround(64.0 * (master.shiftX - wholeShift))),
             -static_cast<FT_Pos>(std::lround(64.0 * master.shiftY)));
     }
+    double symbolRaise = 0;
+    if (glyphBaseline == GlyphBaseline::SymbolDesignCenter && Rendering::Font::isPrivateUse(codePoint) && !Rendering::tilesOnTextPen(codePoint) && face->units_per_EM > 0) {
+        symbolRaise = symbolBaselineRaise(face, master.scale.value());
+        if (outline)
+            FT_Outline_Translate(&face->glyph->outline, 0, static_cast<FT_Pos>(std::lround(symbolRaise * 64)));
+    }
     if (face->glyph->format != FT_GLYPH_FORMAT_BITMAP && FT_Render_Glyph(face->glyph, FT_RENDER_MODE_NORMAL) != 0)
         return false;
 
@@ -1291,7 +1421,10 @@ bool FreeTypeRasterizer::renderGlyphAtCurrentCoordinates(FT_FaceRec_* face, std:
     // bitmap_top = rows of ink above the baseline (top row at baselineY -
     // bitmap_top). Core places it horizontally; the bounds checks clamp a wide
     // glyph's overflow instead of spilling into neighbours.
-    const int destTop = fit.isApplicable ? slotHeight - slot->bitmap_top : baselineY - slot->bitmap_top;
+    int destTop = fit.isApplicable ? slotHeight - slot->bitmap_top : baselineY - slot->bitmap_top - (outline ? 0 : roundToInt(symbolRaise));
+    const bool isPrimaryFace = face == m_face || face == m_boldFace || face == m_italicFace || face == m_boldItalicFace;
+    if (!fit.isApplicable && !isPrimaryFace)
+        destTop = roundToInt(Rendering::fallbackInkTopInSlot(codePoint, destTop, bh, slotHeight));
     // An unhinted load keeps the advance's fraction, which the hinted one
     // rounds; the pen is the whole-pixel advance either way, so an unhinted
     // piece is placed exactly where the hinted one was.
@@ -1308,14 +1441,20 @@ bool FreeTypeRasterizer::renderGlyphAtCurrentCoordinates(FT_FaceRec_* face, std:
     const bool isProportionalLetter = m_facePitch == Rendering::FontMetrics::FacePitch::Proportional
         && (face == m_face || face == m_boldFace || face == m_italicFace || face == m_boldItalicFace)
         && !Rendering::keepsFacePlacement(codePoint);
+    // Native monospaced letters keep their bearings too. Centring each ink
+    // bitmap separately shifts an italic or an asymmetric letter by a pixel
+    // relative to Pango's pen, even though the font and its advance agree.
+    const bool isFixedPrimaryLetter = m_facePitch == Rendering::FontMetrics::FacePitch::Fixed
+        && (face == m_face || face == m_boldFace || face == m_italicFace || face == m_boldItalicFace)
+        && !Rendering::keepsFacePlacement(codePoint);
     const Rendering::RasterScale across = master.horizontalMagnification();
     const int letterPenX = across.scaled(std::max(0, (across.unscaled(slotWidth) - roundToInt(m_cellAdvanceInPixels)) / 2));
     const int inkLeft = unshiftedInk ? unshiftedInk->left : slot->bitmap_left;
     const int inkWidth = unshiftedInk ? unshiftedInk->width : bw;
-    const int unshiftedPenX = fit.isApplicable ? slot->bitmap_left + (outline ? 0 : marginX)
-        : masterPen                            ? masterPen->snappedPenX + slot->bitmap_left
-        : isProportionalLetter                 ? letterPenX + inkLeft
-                                               : Rendering::rasterLeftInSlot(codePoint, slotWidth, inkLeft, inkWidth, penAdvance);
+    const int unshiftedPenX = fit.isApplicable         ? slot->bitmap_left + (outline ? 0 : marginX)
+        : masterPen                                    ? masterPen->snappedPenX + slot->bitmap_left
+        : isProportionalLetter || isFixedPrimaryLetter ? letterPenX + inkLeft
+                                                       : Rendering::rasterLeftInSlot(codePoint, slotWidth, inkLeft, inkWidth, penAdvance);
     // The shifted bitmap's own left edge replaces the unshifted one the
     // placement was made for, which carries the fraction.
     const int penX = unshiftedInk ? unshiftedPenX + unshiftedInk->wholeShift + slot->bitmap_left - inkLeft : unshiftedPenX;
@@ -1348,14 +1487,14 @@ bool FreeTypeRasterizer::renderGlyphAtCurrentCoordinates(FT_FaceRec_* face, std:
     return true;
 }
 
-FT_FaceRec_* FreeTypeRasterizer::cascadeFace(std::uint32_t codePoint)
+FT_FaceRec_* FreeTypeRasterizer::cascadeFace(std::uint32_t codePoint, bool* isSymbolFallback)
 {
     const unsigned donor = Rendering::stemDonor(codePoint);
     const std::uint32_t routed = donor ? donor : codePoint;
-    return cascadeFace(std::span<const std::uint32_t>(&routed, 1));
+    return cascadeFace(std::span<const std::uint32_t>(&routed, 1), Rendering::FontFace::Regular, isSymbolFallback);
 }
 
-FT_FaceRec_* FreeTypeRasterizer::cascadeFace(std::span<const std::uint32_t> codePoints)
+FT_FaceRec_* FreeTypeRasterizer::cascadeFace(std::span<const std::uint32_t> codePoints, Rendering::FontFace style, bool* isSymbolFallback, bool* isRangeMap)
 {
     if (!m_library || !m_face || codePoints.empty())
         return nullptr;
@@ -1375,15 +1514,76 @@ FT_FaceRec_* FreeTypeRasterizer::cascadeFace(std::span<const std::uint32_t> code
     request.codePoints = codePoints;
     request.script = Rendering::Font::classifyScript(codePoints.front());
     request.presentation = Rendering::Font::Presentation::Text;
-    // Upright regular, whatever the cell's style: a fallback face is drawn
-    // unweighted, as the glyph-fallback tier is, so a style in the key would
-    // only split one answer across four cache entries.
-    request.style = Rendering::Font::FontStyle::Regular;
+    request.style = static_cast<Rendering::Font::FontStyle>(style);
     request.preferenceGeneration = m_fallbackPreferences.generation;
     const Rendering::Font::GlyphRoute route = policy.route(request, m_fallbackPreferences.view());
-    if (Rendering::Font::isMissing(route) || route.font == m_cascade->inventory.primaryFont(Rendering::Font::FontStyle::Regular, 0))
+    if (Rendering::Font::isMissing(route) || route.font == m_cascade->inventory.primaryFont(request.style, 0))
         return nullptr;
+    if (isSymbolFallback)
+        *isSymbolFallback = route.source == Rendering::Font::FontSource::SymbolFallback;
+    if (isRangeMap)
+        *isRangeMap = route.source == Rendering::Font::FontSource::RangeMap;
     return m_cascade->inventory.faceFor(route.font);
+}
+
+FT_FaceRec_* FreeTypeRasterizer::rangeMappedIconFace(std::span<const std::uint32_t> points, Rendering::FontFace style)
+{
+    if (points.empty() || !Rendering::Font::isPrivateUse(points.front()))
+        return nullptr;
+    const bool hasMap = std::ranges::any_of(m_fallbackPreferences.rangeMaps, [&](const auto& range) {
+        return points.front() >= range.firstCodePoint && points.front() <= range.lastCodePoint;
+    });
+    if (!hasMap)
+        return nullptr;
+    bool isRangeMap = false;
+    auto* face = cascadeFace(points, style, nullptr, &isRangeMap);
+    return isRangeMap ? face : nullptr;
+}
+
+bool FreeTypeRasterizer::rasterizeNativeCluster(std::span<const std::uint32_t> codePoints, Rendering::FontFace style,
+    int slotWidth, int slotHeight, std::uint8_t* coverageOut)
+{
+    const auto base = codePoints[Unicode::clusterBaseIndex(codePoints)];
+    FT_FaceRec_* primary = monoFace(style);
+    const bool isPrimaryBase = primary && FT_Get_Char_Index(primary, base) != 0;
+    // Keep the terminal's established fallback-base centering and attachment
+    // path. All primary-base clusters use native Pango positioning; a wholly
+    // cascaded base retains its own terminal positioning contract.
+    if (!isPrimaryBase)
+        return false;
+    FT_FaceRec_* selected = isPrimaryBase                                ? primary
+        : m_fallbackFace && FT_Get_Char_Index(m_fallbackFace, base) != 0 ? m_fallbackFace
+                                                                         : cascadeFace(std::span(&base, 1), style);
+    if (!selected)
+        return false;
+    const NativeClusterFont baseFont = nativeFont(selected, style);
+    if (baseFont.file.empty())
+        return false;
+    const auto resolve = [](void* context, std::span<const std::uint32_t> points, Rendering::FontFace requested) -> NativeClusterFont {
+        auto& rasterizer = *static_cast<FreeTypeRasterizer*>(context);
+        const auto covers = [&](FT_FaceRec_* face) {
+            return face && std::ranges::all_of(points, [&](auto point) { return FT_Get_Char_Index(face, point) != 0; });
+        };
+        FT_FaceRec_* face = rasterizer.monoFace(requested);
+        if (!covers(face))
+            face = covers(rasterizer.m_fallbackFace) ? rasterizer.m_fallbackFace : rasterizer.cascadeFace(points, requested);
+        return rasterizer.nativeFont(face, requested);
+    };
+    std::string features;
+    for (auto feature : m_shapingFeatures->run) {
+        std::array<char, 128> encoded {};
+        hb_feature_to_string(&feature, encoded.data(), static_cast<unsigned>(encoded.size()));
+        if (!features.empty())
+            features += ',';
+        features += encoded.data();
+    }
+    double penX = std::max(0, (slotWidth - roundToInt(m_cellAdvanceInPixels)) / 2) + m_phaseInPixels;
+    if (!isPrimaryBase && FT_Load_Char(selected, base, FT_LOAD_RENDER) == 0)
+        penX = (slotWidth - static_cast<int>(selected->glyph->bitmap.width)) / 2 - selected->glyph->bitmap_left;
+    if (!m_nativeClusters)
+        m_nativeClusters = std::make_unique<NativeClusterRasterizer>();
+    return m_nativeClusters->draw(codePoints, baseFont, resolve, this, features, penX, primaryBaselineY(slotHeight),
+        slotWidth, slotHeight, { coverageOut, static_cast<std::size_t>(slotWidth) * slotHeight });
 }
 
 bool FreeTypeRasterizer::rasterizeCluster(const std::uint32_t* codePoints, int count, Rendering::FontFace face, std::uint32_t weight, int slotWidth, int slotHeight, std::uint8_t* coverageOut)
@@ -1392,8 +1592,7 @@ bool FreeTypeRasterizer::rasterizeCluster(const std::uint32_t* codePoints, int c
     if (count < 2 || !codePoints || !m_face || slotWidth <= 0 || slotHeight <= 0)
         return overprint();
     const std::uint32_t base = codePoints[0];
-    if (Rendering::tilesOnTextPen(base) || FT_Get_Char_Index(monoFace(face), base) != 0
-        || (m_fallbackFace && FT_Get_Char_Index(m_fallbackFace, base) != 0))
+    if (Rendering::tilesOnTextPen(base))
         return overprint();
     // A selector or joiner carries no glyph and its presentation is already
     // decided, so it neither routes the cluster nor makes one: a base with
@@ -1406,12 +1605,35 @@ bool FreeTypeRasterizer::rasterizeCluster(const std::uint32_t* codePoints, int c
     }
     if (routed.size() < 2)
         return overprint();
-    FT_FaceRec_* const cascaded = cascadeFace(std::span<const std::uint32_t>(routed));
+    const auto coversCluster = [&](FT_FaceRec_* candidate) {
+        return candidate && std::ranges::all_of(routed, [&](std::uint32_t codePoint) { return FT_Get_Char_Index(candidate, codePoint) != 0; });
+    };
+    applyWeightAxis(face, weight);
+    FT_FaceRec_* const primary = monoFace(face);
+    const bool isPrimaryCluster = coversCluster(primary);
+    if (rasterizeNativeCluster(routed, face, slotWidth, slotHeight, coverageOut))
+        return true;
+    FT_FaceRec_* const mapped = isPrimaryCluster ? nullptr : rangeMappedIconFace(routed, face);
+    bool isSymbolFallback = !isPrimaryCluster && !mapped && coversCluster(m_fallbackFace);
+    FT_FaceRec_* const cascaded = isPrimaryCluster ? primary
+        : mapped                                   ? mapped
+        : isSymbolFallback                         ? m_fallbackFace
+                                                   : cascadeFace(std::span<const std::uint32_t>(routed), face, &isSymbolFallback);
+    const double symbolRaise = isSymbolFallback && Rendering::Font::isPrivateUse(routed.front())
+            && !Rendering::tilesOnTextPen(routed.front())
+        ? symbolBaselineRaise(cascaded)
+        : 0;
     if (!cascaded)
         return overprint();
-
     const std::unique_ptr<hb_font_t, decltype(&hb_font_destroy)> shaper(hb_ft_font_create_referenced(cascaded), hb_font_destroy);
     const std::unique_ptr<hb_buffer_t, decltype(&hb_buffer_destroy)> buffer(hb_buffer_create(), hb_buffer_destroy);
+    const double shapeUnits = isPrimaryCluster ? 1024.0 : 64.0;
+    if (isPrimaryCluster) {
+        // Pango shapes with OpenType design metrics at 1/1024 pixel, rather
+        // than the FreeType shaper's already-quantized 26.6 mark anchors.
+        hb_ot_font_set_funcs(shaper.get());
+        hb_font_set_scale(shaper.get(), roundToInt(m_fontPixelSize * 1024), roundToInt(m_fontPixelSize * 1024));
+    }
     for (int index = 0; index < count; ++index)
         hb_buffer_add(buffer.get(), codePoints[index], static_cast<unsigned int>(index));
     // Each glyph keeps the index of the character it came from, so a mark's
@@ -1419,18 +1641,37 @@ bool FreeTypeRasterizer::rasterizeCluster(const std::uint32_t* codePoints, int c
     hb_buffer_set_cluster_level(buffer.get(), HB_BUFFER_CLUSTER_LEVEL_MONOTONE_CHARACTERS);
     hb_buffer_set_content_type(buffer.get(), HB_BUFFER_CONTENT_TYPE_UNICODE);
     hb_buffer_guess_segment_properties(buffer.get());
-    hb_shape(shaper.get(), buffer.get(), nullptr, 0);
+    hb_shape(shaper.get(), buffer.get(), m_shapingFeatures->run.data(), static_cast<unsigned int>(m_shapingFeatures->run.size()));
     unsigned int glyphCount = 0;
     const hb_glyph_info_t* infos = hb_buffer_get_glyph_infos(buffer.get(), &glyphCount);
     const hb_glyph_position_t* positions = hb_buffer_get_glyph_positions(buffer.get(), nullptr);
     if (!glyphCount || !infos || !positions)
         return overprint();
 
+    if (isPrimaryCluster) {
+        if (!m_nativeClusters)
+            m_nativeClusters = std::make_unique<NativeClusterRasterizer>();
+        const double pen = std::max(0, (slotWidth - roundToInt(m_cellAdvanceInPixels)) / 2) + m_phaseInPixels;
+        double x = pen;
+        const double baseline = primaryBaselineY(slotHeight);
+        std::vector<NativePositionedGlyph> nativeGlyphs;
+        nativeGlyphs.reserve(glyphCount);
+        for (unsigned index = 0; index < glyphCount; ++index) {
+            const auto px = Rendering::phaseForPen(static_cast<float>(x + positions[index].x_offset / shapeUnits), 4);
+            const auto py = Rendering::phaseForPen(static_cast<float>(baseline - positions[index].y_offset / shapeUnits), 4);
+            nativeGlyphs.push_back({ glyphIndexOf(infos[index]), px.snappedPenX + px.phase / 4.0, py.snappedPenX + py.phase / 4.0 });
+            x += positions[index].x_advance / shapeUnits;
+        }
+        if (m_nativeClusters->drawGlyphs(nativeGlyphs, nativeFont(primary, face), slotWidth, slotHeight,
+                { coverageOut, static_cast<std::size_t>(slotWidth) * slotHeight }))
+            return true;
+    }
+
     std::ranges::fill(std::span(coverageOut, static_cast<std::size_t>(slotWidth) * slotHeight), std::uint8_t { 0 });
     const int baselineY = primaryBaselineY(slotHeight);
     // The pen starts where the base's ink lands when it is drawn alone,
     // centred in the slot, so a marked cell and its unmarked twin agree.
-    double penX = 0.0;
+    double penX = isPrimaryCluster ? std::max(0, (slotWidth - roundToInt(m_cellAdvanceInPixels)) / 2) : 0.0;
     int baseInkLeft = 0;
     int baseInkWidth = 0;
     // The ink the cluster has stacked so far, which an unattached mark clears.
@@ -1440,15 +1681,31 @@ bool FreeTypeRasterizer::rasterizeCluster(const std::uint32_t* codePoints, int c
     hb_unicode_funcs_t* const unicode = hb_unicode_funcs_get_default();
     bool didDraw = false;
     for (unsigned int index = 0; index < glyphCount; ++index) {
-        if (FT_Load_Glyph(cascaded, glyphIndexOf(infos[index]), FT_LOAD_DEFAULT) != 0)
-            continue;
-        if (cascaded->glyph->format != FT_GLYPH_FORMAT_BITMAP && FT_Render_Glyph(cascaded->glyph, FT_RENDER_MODE_NORMAL) != 0)
+        const double glyphX = penX + positions[index].x_offset / shapeUnits;
+        const double glyphBaseline = baselineY - positions[index].y_offset / shapeUnits;
+        // Cairo's image compositor keys native glyph masks on quarter-pixel
+        // phases. Use Core's shared phase resolver for both axes so this mask
+        // has the same coverage as Pango/Cairo at the same shaped origin.
+        const auto xPhase = Rendering::phaseForPen(static_cast<float>(glyphX), 4);
+        const auto yPhase = Rendering::phaseForPen(static_cast<float>(glyphBaseline), 4);
+        if (isPrimaryCluster) {
+            FT_Vector delta { xPhase.phase * 16, -yPhase.phase * 16 };
+            FT_Set_Transform(cascaded, nullptr, &delta);
+        }
+        const bool didLoad = FT_Load_Glyph(cascaded, glyphIndexOf(infos[index]), FT_LOAD_DEFAULT) == 0;
+        const bool isOutline = didLoad && cascaded->glyph->format == FT_GLYPH_FORMAT_OUTLINE;
+        if (symbolRaise != 0 && isOutline)
+            FT_Outline_Translate(&cascaded->glyph->outline, 0, static_cast<FT_Pos>(std::lround(symbolRaise * 64)));
+        const bool didRender = didLoad && (cascaded->glyph->format == FT_GLYPH_FORMAT_BITMAP || FT_Render_Glyph(cascaded->glyph, FT_RENDER_MODE_NORMAL) == 0);
+        if (isPrimaryCluster)
+            FT_Set_Transform(cascaded, nullptr, nullptr);
+        if (!didRender)
             continue;
         const FT_GlyphSlot slot = cascaded->glyph;
         const FT_Bitmap& bitmap = slot->bitmap;
         const int inkWidth = static_cast<int>(bitmap.width);
         const int inkHeight = static_cast<int>(bitmap.rows);
-        if (index == 0) {
+        if (index == 0 && !isPrimaryCluster) {
             penX = (slotWidth - inkWidth) / 2 - slot->bitmap_left - positions[0].x_offset / 64.0;
             baseInkLeft = (slotWidth - inkWidth) / 2;
             baseInkWidth = inkWidth;
@@ -1458,12 +1715,16 @@ bool FreeTypeRasterizer::rasterizeCluster(const std::uint32_t* codePoints, int c
         // clear of the ink stacked so far on its side: its bearing and height
         // assume a Latin lowercase base, which would stand it past a two-cell
         // letter's edge or inside its top stroke.
-        const bool isUnattachedMark = index > 0 && positions[index].x_advance == 0 && positions[index].x_offset == 0
+        const bool isUnattachedMark = !isPrimaryCluster && index > 0 && positions[index].x_advance == 0 && positions[index].x_offset == 0
             && positions[index].y_offset == 0;
-        const int left = isUnattachedMark
+        const int left = isPrimaryCluster ? xPhase.snappedPenX + slot->bitmap_left
+            : isUnattachedMark
             ? baseInkLeft + (baseInkWidth - inkWidth) / 2
             : static_cast<int>(std::lround(penX + positions[index].x_offset / 64.0)) + slot->bitmap_left;
-        int top = baselineY - static_cast<int>(std::lround(positions[index].y_offset / 64.0)) - slot->bitmap_top;
+        int top = isPrimaryCluster ? yPhase.snappedPenX - slot->bitmap_top
+                                   : baselineY - static_cast<int>(std::lround(positions[index].y_offset / 64.0)) - slot->bitmap_top;
+        if (symbolRaise != 0 && !isOutline)
+            top -= roundToInt(symbolRaise);
         if (isUnattachedMark && inkHeight > 0) {
             const hb_unicode_combining_class_t combiningClass = hb_unicode_combining_class(unicode,
                 codePoints[std::min<int>(static_cast<int>(infos[index].cluster), count - 1)]);
@@ -1495,11 +1756,13 @@ bool FreeTypeRasterizer::rasterizeCluster(const std::uint32_t* codePoints, int c
                     ? ((source[column / 8] & (0x80 >> (column % 8))) ? 255 : 0)
                     : source[column];
                 std::uint8_t& destination = coverageOut[static_cast<std::size_t>(y) * slotWidth + x];
-                destination = std::max(destination, value);
+                destination = isPrimaryCluster
+                    ? static_cast<std::uint8_t>(std::min(255, static_cast<int>(value) + destination))
+                    : std::max(destination, value);
             }
         }
         didDraw = didDraw || (inkWidth > 0 && inkHeight > 0);
-        penX += positions[index].x_advance / 64.0;
+        penX += isPrimaryCluster ? std::round(positions[index].x_advance / shapeUnits) : positions[index].x_advance / shapeUnits;
     }
     return didDraw || overprint();
 }
@@ -1667,7 +1930,7 @@ bool FreeTypeRasterizer::loadEmojiFace()
     // draw it, and a host can rank a face this build declines ahead of one it
     // accepts; taking the first answer alone would leave the host monochrome.
     for (const auto& [path, faceIndex] : emojiFaceCandidates()) {
-        FT_FaceRec_* loaded = openSizedColorFace(m_library, path.c_str(), faceIndex, m_fontPixelSize);
+        FT_FaceRec_* loaded = openSizedColorFace(m_library, path.c_str(), faceIndex, roundToInt(m_fontPixelSize));
         if (!loaded)
             continue;
         const ColorGlyphFormat format = classifyColorFace(loaded);
@@ -1841,11 +2104,12 @@ int FreeTypeRasterizer::shapeTextRun(std::span<const std::uint32_t> codePoints, 
     for (unsigned int i = 0; i < glyphCount; ++i) {
         // HarfBuzz reports positions in 26.6 fixed point.
         out[i].glyph = glyphIndexOf(infos[i]);
-        // 26.6 kept whole, not shifted: the shaper's fraction is where the
-        // face put the next glyph, and the rasteriser draws at it.
-        out[i].advanceInPixels = static_cast<float>(positions[i].x_advance) / 64.0f;
-        out[i].offsetXInPixels = static_cast<float>(positions[i].x_offset) / 64.0f;
-        out[i].offsetYInPixels = static_cast<float>(positions[i].y_offset) / 64.0f;
+        // This strip seam carries whole pixels, as Pango's rounded-glyph
+        // mode does. Truncation shortens every fractional advance and makes
+        // the next glyph drift left as a run grows.
+        out[i].advanceInPixels = static_cast<int>(std::lround(positions[i].x_advance / 64.0));
+        out[i].offsetXInPixels = static_cast<int>(std::lround(positions[i].x_offset / 64.0));
+        out[i].offsetYInPixels = static_cast<int>(std::lround(positions[i].y_offset / 64.0));
         out[i].cluster = static_cast<std::uint16_t>(std::min<unsigned int>(infos[i].cluster, 0xFFFFu));
     }
     hb_buffer_destroy(buffer);
@@ -1950,6 +2214,33 @@ bool FreeTypeRasterizer::drawShapedRunWithFace(FT_FaceRec_* face, std::span<cons
     if (!m_face || !face)
         return false;
 
+    if (!m_nativeClusters)
+        m_nativeClusters = std::make_unique<NativeClusterRasterizer>();
+    const auto native = nativeFont(face, Rendering::FontFace::Regular);
+    std::vector<NativePositionedGlyph> positioned;
+    positioned.reserve(glyphs.size());
+    double pen = m_phaseInPixels;
+    const double baseline = primaryBaselineY(stripHeightInPixels);
+    for (std::size_t index = 0; index < glyphs.size(); ++index) {
+        const auto& shaped = glyphs[index];
+        const double x = pen + shaped.offsetXInPixels;
+        const double y = baseline - shaped.offsetYInPixels;
+        positioned.push_back({ shaped.glyph, x, y });
+        if (inkOut) {
+            inkOut[index] = {};
+            NativeGlyphBounds bounds;
+            if (m_nativeClusters->glyphBounds(native, shaped.glyph, bounds) && bounds.width > 0) {
+                const int left = std::max(0, static_cast<int>(std::floor(x + bounds.left)));
+                const int right = std::min(stripWidthInPixels, static_cast<int>(std::ceil(x + bounds.left + bounds.width)));
+                if (right > left)
+                    inkOut[index] = { left, right };
+            }
+        }
+        pen += shaped.advanceInPixels;
+    }
+    if (m_nativeClusters->drawGlyphs(positioned, native, stripWidthInPixels, stripHeightInPixels, coverageOut))
+        return true;
+
     const int baselineY = primaryBaselineY(stripHeightInPixels);
     int penX = 0;
     std::size_t glyphIndex = 0;
@@ -1988,13 +2279,12 @@ bool FreeTypeRasterizer::drawShapedRunWithFace(FT_FaceRec_* face, std::span<cons
                         const int destinationX = startX + sourceX;
                         if (destinationX < 0 || destinationX >= stripWidthInPixels)
                             continue;
-                        // Written, not blended: within one run the glyphs are
-                        // laid out not to overlap, and a max() here would hide
-                        // a layout fault by making two glyphs on one cell look
-                        // like one bolder glyph.
-                        coverageOut[static_cast<std::size_t>(destinationY) * static_cast<std::size_t>(stripWidthInPixels)
-                            + static_cast<std::size_t>(destinationX)]
-                            = source[sourceX];
+                        // Native glyph strings can overlap even when their
+                        // advances occupy separate cells. Cairo accumulates
+                        // their coverage in one mask with saturating addition.
+                        auto& destination = coverageOut[static_cast<std::size_t>(destinationY) * static_cast<std::size_t>(stripWidthInPixels)
+                            + static_cast<std::size_t>(destinationX)];
+                        destination = static_cast<std::uint8_t>(std::min(255, static_cast<int>(destination) + source[sourceX]));
                     }
                 }
             }
@@ -2135,7 +2425,7 @@ bool FreeTypeRasterizer::rasterizeSizedMaster(std::uint32_t codePoint, Rendering
     const auto scaledPixelSize = static_cast<FT_UInt>(m_fontPixelSize * scale.whole());
     const auto scaledPixelHeight = static_cast<FT_Long>(std::lround(static_cast<double>(m_fontPixelSize) * 64.0 * scale.value()));
     const auto setScaledSize = [&](FT_FaceRec_* target) {
-        if (scale.isWhole())
+        if (scale.isWhole() && std::floor(m_fontPixelSize) == m_fontPixelSize)
             return FT_Set_Pixel_Sizes(target, 0, scaledPixelSize);
         FT_Size_RequestRec request {};
         request.type = FT_SIZE_REQUEST_TYPE_NOMINAL;
@@ -2155,15 +2445,15 @@ bool FreeTypeRasterizer::rasterizeSizedMaster(std::uint32_t codePoint, Rendering
     const auto restoreSize = [this, face, weight, &master] {
         if (master.widthAxisCoordinate > 0.0)
             applyWeightAxis(face, weight);
-        (void)FT_Set_Pixel_Sizes(m_face, 0, static_cast<FT_UInt>(m_fontPixelSize));
+        (void)FT_Set_Char_Size(m_face, 0, static_cast<FT_F26Dot6>(std::lround(m_fontPixelSize * 64)), 72, 72);
         if (m_boldFace)
-            (void)FT_Set_Pixel_Sizes(m_boldFace, 0, static_cast<FT_UInt>(m_fontPixelSize));
+            (void)FT_Set_Char_Size(m_boldFace, 0, static_cast<FT_F26Dot6>(std::lround(m_fontPixelSize * 64)), 72, 72);
         if (m_italicFace)
-            (void)FT_Set_Pixel_Sizes(m_italicFace, 0, static_cast<FT_UInt>(m_fontPixelSize));
+            (void)FT_Set_Char_Size(m_italicFace, 0, static_cast<FT_F26Dot6>(std::lround(m_fontPixelSize * 64)), 72, 72);
         if (m_boldItalicFace)
-            (void)FT_Set_Pixel_Sizes(m_boldItalicFace, 0, static_cast<FT_UInt>(m_fontPixelSize));
+            (void)FT_Set_Char_Size(m_boldItalicFace, 0, static_cast<FT_F26Dot6>(std::lround(m_fontPixelSize * 64)), 72, 72);
         if (m_fallbackFace)
-            (void)FT_Set_Pixel_Sizes(m_fallbackFace, 0, static_cast<FT_UInt>(m_fontPixelSize));
+            (void)FT_Set_Char_Size(m_fallbackFace, 0, static_cast<FT_F26Dot6>(std::lround(m_fontPixelSize * 64)), 72, 72);
     };
 
     for (int index = 0; index < slotWidth * slotHeight; ++index)
@@ -2187,21 +2477,24 @@ bool FreeTypeRasterizer::rasterizeSizedMaster(std::uint32_t codePoint, Rendering
 
     // The fallback face carries its own size, so it is scaled and restored on
     // the same terms rather than drawn at 1x into a slot `scale` times as tall.
-    if (m_fallbackFace && setScaledSize(m_fallbackFace) == 0
-        && renderGlyphFromFace(m_fallbackFace, codePoint, baselineY, slotWidth, slotHeight, coverageOut, master)) {
+    FT_FaceRec_* const mapped = rangeMappedIconFace(std::span(&codePoint, 1), face);
+    if (!mapped && m_fallbackFace && setScaledSize(m_fallbackFace) == 0
+        && renderGlyphFromFace(m_fallbackFace, codePoint, baselineY, slotWidth, slotHeight, coverageOut, master, GlyphBaseline::SymbolDesignCenter)) {
         restoreSize();
         return true;
     }
 
     // The system cascade at the scaled size, for the reason the faces above
     // take it: an outline drawn at its size, not a 1x raster stretched.
-    if (FT_FaceRec_* cascaded = cascadeFace(codePoint)) {
+    bool isSymbolFallback = false;
+    if (FT_FaceRec_* cascaded = mapped ? mapped : cascadeFace(codePoint, &isSymbolFallback)) {
         // The cascade may already be optically matched to the primary face.
         // Scale from that size and restore it, retaining fractional pixels.
         const FT_F26Dot6 originalHeight = FT_MulFix(cascaded->units_per_EM, cascaded->size->metrics.y_scale);
         const auto scaledHeight = static_cast<FT_F26Dot6>(std::lround(originalHeight * scale.value()));
         const bool drawn = FT_Set_Char_Size(cascaded, 0, scaledHeight, 72, 72) == 0
-            && renderGlyphFromFace(cascaded, codePoint, baselineY, slotWidth, slotHeight, coverageOut, master);
+            && renderGlyphFromFace(cascaded, codePoint, baselineY, slotWidth, slotHeight, coverageOut, master,
+                isSymbolFallback ? GlyphBaseline::SymbolDesignCenter : GlyphBaseline::Primary);
         (void)FT_Set_Char_Size(cascaded, 0, originalHeight, 72, 72);
         if (drawn) {
             restoreSize();
@@ -2222,6 +2515,24 @@ bool FreeTypeRasterizer::rasterizeSizedMaster(std::uint32_t codePoint, Rendering
     return m_unifontFallback.rasterizeSizedMaster(codePoint, face, weight, master, slotWidth, slotHeight, coverageOut);
 }
 
+bool FreeTypeRasterizer::rasterizeGlyphAtPhase(std::uint32_t codePoint, Rendering::FontFace face, std::uint32_t weight,
+    double phaseInPixels, int slotWidth, int slotHeight, std::uint8_t* coverageOut)
+{
+    const double prior = std::exchange(m_phaseInPixels, phaseInPixels);
+    const bool didRasterize = rasterizeGlyph(codePoint, face, weight, slotWidth, slotHeight, coverageOut);
+    m_phaseInPixels = prior;
+    return didRasterize;
+}
+
+bool FreeTypeRasterizer::rasterizeClusterAtPhase(const std::uint32_t* codePoints, int count, Rendering::FontFace face, std::uint32_t weight,
+    double phaseInPixels, int slotWidth, int slotHeight, std::uint8_t* coverageOut)
+{
+    const double prior = std::exchange(m_phaseInPixels, phaseInPixels);
+    const bool didRasterize = rasterizeCluster(codePoints, count, face, weight, slotWidth, slotHeight, coverageOut);
+    m_phaseInPixels = prior;
+    return didRasterize;
+}
+
 bool FreeTypeRasterizer::rasterizeGlyph(std::uint32_t codePoint, Rendering::FontFace face, std::uint32_t weight, int slotWidth, int slotHeight, std::uint8_t* coverageOut)
 {
     for (int i = 0; i < slotWidth * slotHeight; ++i)
@@ -2230,8 +2541,8 @@ bool FreeTypeRasterizer::rasterizeGlyph(std::uint32_t codePoint, Rendering::Font
     if (!m_face)
         return m_unifontFallback.rasterizeGlyph(codePoint, face, weight, slotWidth, slotHeight, coverageOut);
 
-    // Fallback tiers share the PRIMARY baseline so every face lines up with the
-    // text + underline / strike rules.
+    // Fallback text shares the primary baseline; adopted PUA symbol faces
+    // normalize their design centre separately, preserving nominal size.
     const int baselineY = primaryBaselineY(slotHeight);
     // Tier 1 — the primary face. SGR 1:n weight selects the 'wght' variation
     // coordinate (VF faces only); the axis is set on the primary face only.
@@ -2267,7 +2578,8 @@ bool FreeTypeRasterizer::rasterizeGlyph(std::uint32_t codePoint, Rendering::Font
     // Tier 2 — the glyph-fallback face (bundled Nerd Font icons, or a configured
     // fallback_font). A fixed Regular face: never weighted. Null when no fallback
     // loaded, in which case renderGlyphFromFace returns false and this is skipped.
-    if (renderGlyphFromFace(m_fallbackFace, codePoint, baselineY, slotWidth, slotHeight, coverageOut)) {
+    FT_FaceRec_* const mapped = rangeMappedIconFace(std::span(&codePoint, 1), face);
+    if (!mapped && renderGlyphFromFace(m_fallbackFace, codePoint, baselineY, slotWidth, slotHeight, coverageOut, {}, GlyphBaseline::SymbolDesignCenter)) {
         return true;
     }
 
@@ -2275,7 +2587,10 @@ bool FreeTypeRasterizer::rasterizeGlyph(std::uint32_t codePoint, Rendering::Font
     // point to, as CoreText's cascade answers on macOS: a face that draws the
     // character as text, at the cell's size. An assembly piece is fitted to the
     // cell from that outline, as the pieces the primary carries are.
-    if (renderGlyphFromFace(cascadeFace(codePoint), codePoint, baselineY, slotWidth, slotHeight, coverageOut))
+    bool isSymbolFallback = false;
+    FT_FaceRec_* cascaded = mapped ? mapped : cascadeFace(codePoint, &isSymbolFallback);
+    if (renderGlyphFromFace(cascaded, codePoint, baselineY, slotWidth, slotHeight, coverageOut, {},
+            isSymbolFallback ? GlyphBaseline::SymbolDesignCenter : GlyphBaseline::Primary))
         return true;
 
     // The fallback's joining edges are the primary cell's, not the atlas margins.

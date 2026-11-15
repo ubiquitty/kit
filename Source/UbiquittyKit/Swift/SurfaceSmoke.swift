@@ -1612,8 +1612,13 @@ enum SurfaceSmoke {
         else {
             return failed("no flags-changed event")
         }
+        let activityBeforeModifier = surface.userActivityNotesForTesting
+        let bypassBeforeModifier = surface.cursorPresentationBypassUntil
         surface.flagsChanged(with: modifierDown)
         surface.flagsChanged(with: modifierUp)
+        guard surface.userActivityNotesForTesting == activityBeforeModifier,
+            surface.cursorPresentationBypassUntil == bypassBeforeModifier
+        else { return failed("bare modifier reset cursor activity or presentation") }
         // A key event still reads its repeat flag, so the guard cannot be a
         // blanket refusal.
         guard

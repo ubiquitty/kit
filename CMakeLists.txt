@@ -329,7 +329,7 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "Linux")
 
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(GTK4 REQUIRED IMPORTED_TARGET gtk4>=4.16)
-    pkg_check_modules(PANGOCAIRO REQUIRED IMPORTED_TARGET pangocairo)
+    pkg_check_modules(PANGOCAIRO REQUIRED IMPORTED_TARGET pangocairo pangoft2)
     pkg_check_modules(FREETYPE REQUIRED IMPORTED_TARGET freetype2)
     pkg_check_modules(FONTCONFIG REQUIRED IMPORTED_TARGET fontconfig)
     pkg_check_modules(HARFBUZZ REQUIRED IMPORTED_TARGET harfbuzz)
@@ -377,13 +377,15 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "Linux")
 
     add_library(UbiquittyKitFreeType STATIC
         ${UBIQUITTY_KIT_LINUX}/FreeTypeRasterizer.cpp
+        ${UBIQUITTY_KIT_LINUX}/NativeClusterRasterizer.cpp
+        ${UBIQUITTY_KIT_LINUX}/SharedFontResources.cpp
         ${UBIQUITTY_KIT_LINUX}/FontInventory.cpp
         ${UBIQUITTY_KIT_LINUX}/FontRouting.cpp
         ${UBIQUITTY_KIT_LINUX}/BundledFontDirectory.cpp
         ${UBIQUITTY_KIT_LINUX}/ColorGlyphPainter.cpp)
     ubiquitty_kit_linux_library(UbiquittyKitFreeType)
     target_link_libraries(UbiquittyKitFreeType PUBLIC
-        PkgConfig::FREETYPE PkgConfig::FONTCONFIG PkgConfig::HARFBUZZ)
+        PkgConfig::FREETYPE PkgConfig::FONTCONFIG PkgConfig::HARFBUZZ PkgConfig::PANGOCAIRO)
 
     add_library(UbiquittyKitSoftware STATIC ${UBIQUITTY_KIT_LINUX}/Raster.cpp)
     ubiquitty_kit_linux_library(UbiquittyKitSoftware)
@@ -391,6 +393,7 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "Linux")
 
     add_library(UbiquittyKitVulkan STATIC
         ${UBIQUITTY_KIT_LINUX}/VulkanRenderer.cpp
+        ${UBIQUITTY_KIT_LINUX}/VulkanFontAtlas.cpp
         ${UBIQUITTY_KIT_LINUX}/VulkanColorGlyphAtlas.cpp
         ${UBIQUITTY_KIT_LINUX}/VulkanGlyphAtlas.cpp
         ${UBIQUITTY_KIT_LINUX}/VulkanImageTextures.cpp

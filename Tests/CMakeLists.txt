@@ -48,9 +48,10 @@ set(test_linux_raster_context_EXTRA_SOURCES ${UBIQUITTY_KIT_SOURCE_DIR}/Source/P
 # that names a path nobody set.
 find_package(PkgConfig QUIET)
 if(PkgConfig_FOUND AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    pkg_check_modules(UBQ_FONTCONFIG QUIET fontconfig freetype2 harfbuzz)
+    pkg_check_modules(UBQ_FONTCONFIG QUIET fontconfig freetype2 harfbuzz pangocairo pangoft2)
     pkg_check_modules(UBQ_GIO QUIET IMPORTED_TARGET gio-2.0)
     pkg_check_modules(UBQ_PANGOCAIRO QUIET IMPORTED_TARGET pangocairo)
+    pkg_check_modules(UBQ_PANGOFT2 QUIET IMPORTED_TARGET pangoft2)
     pkg_check_modules(UBQ_GTK_ACCESSIBILITY QUIET IMPORTED_TARGET gtk4>=4.16)
 endif()
 if(UBQ_PANGOCAIRO_FOUND)
@@ -87,6 +88,8 @@ if(UBQ_FONTCONFIG_FOUND)
     # The colour-emoji rasterizer needs the same two libraries: FreeType to read
     # a CBDT/sbix strike and fontconfig to find the font at all.
     set(test_linux_color_emoji_EXTRA_SOURCES  ${UBIQUITTY_KIT_SOURCE_DIR}/Source/Platform/Linux/FreeTypeRasterizer.cpp
+                                              ${UBIQUITTY_KIT_SOURCE_DIR}/Source/Platform/Linux/NativeClusterRasterizer.cpp
+                                              ${UBIQUITTY_KIT_SOURCE_DIR}/Source/Platform/Linux/SharedFontResources.cpp
                                               ${UBIQUITTY_KIT_SOURCE_DIR}/Source/Platform/Linux/FontInventory.cpp
                                               ${UBIQUITTY_KIT_SOURCE_DIR}/Source/Platform/Linux/BundledFontDirectory.cpp
                                               ${UBIQUITTY_KIT_SOURCE_DIR}/Source/Platform/Linux/ColorGlyphPainter.cpp
@@ -109,6 +112,16 @@ if(UBQ_FONTCONFIG_FOUND)
     set(test_linux_fallback_face_EXTRA_LIBS     ${UBQ_FONTCONFIG_LINK_LIBRARIES})
     set(test_linux_fallback_face_EXTRA_DEFINES
         UBQ_BUNDLED_FONTS_DIR="${UBIQUITTY_CORE_SOURCE_DIR}/Resources/fonts")
+    if(UBQ_PANGOCAIRO_FOUND AND UBQ_PANGOFT2_FOUND)
+        set(test_linux_pango_raster_EXTRA_SOURCES ${test_linux_fallback_face_EXTRA_SOURCES})
+        set(test_linux_pango_raster_EXTRA_INCLUDES ${UBQ_FONTCONFIG_INCLUDE_DIRS})
+        set(test_linux_pango_raster_EXTRA_LIBS ${UBQ_FONTCONFIG_LINK_LIBRARIES} PkgConfig::UBQ_PANGOCAIRO PkgConfig::UBQ_PANGOFT2)
+        set(test_linux_pango_raster_EXTRA_DEFINES ${test_linux_fallback_face_EXTRA_DEFINES})
+    endif()
+    set(test_linux_shared_fonts_EXTRA_SOURCES ${test_linux_fallback_face_EXTRA_SOURCES})
+    set(test_linux_shared_fonts_EXTRA_INCLUDES ${test_linux_fallback_face_EXTRA_INCLUDES})
+    set(test_linux_shared_fonts_EXTRA_LIBS ${test_linux_fallback_face_EXTRA_LIBS})
+    set(test_linux_shared_fonts_EXTRA_DEFINES ${test_linux_fallback_face_EXTRA_DEFINES})
     # A doubled row drawn by the software renderer over the same rasteriser,
     # from the bundled faces by absolute path for the reason above.
     set(test_linux_sized_master_EXTRA_SOURCES  ${test_linux_fallback_face_EXTRA_SOURCES})
@@ -129,7 +142,7 @@ if(UBQ_FONTCONFIG_FOUND)
     set(test_linux_color_glyph_painter_EXTRA_INCLUDES ${UBQ_FONTCONFIG_INCLUDE_DIRS})
     set(test_linux_color_glyph_painter_EXTRA_LIBS     ${UBQ_FONTCONFIG_LINK_LIBRARIES})
 else()
-    list(APPEND UBIQUITTY_UNAVAILABLE_TESTS test_linux_fontinventory test_linux_color_emoji test_linux_color_glyph_painter test_linux_fallback_face test_linux_sized_master test_linux_proportional_at_size test_linux_route_parity)
+    list(APPEND UBIQUITTY_UNAVAILABLE_TESTS test_linux_fontinventory test_linux_color_emoji test_linux_color_glyph_painter test_linux_fallback_face test_linux_sized_master test_linux_proportional_at_size test_linux_route_parity test_linux_shared_fonts)
     list(APPEND UBIQUITTY_DEFERRED_TESTS ${UBIQUITTY_UNAVAILABLE_TESTS})
     foreach(_ubq_unavailable_test IN LISTS UBIQUITTY_UNAVAILABLE_TESTS)
         message(STATUS "Ubiquitty tests: ${_ubq_unavailable_test} unavailable (a Linux host with fontconfig, freetype2, and harfbuzz is required)")
@@ -155,6 +168,9 @@ if(NOT UBQ_PANGOCAIRO_FOUND)
     ubq_leave_out_tests("(^|/)test_linux_rich_text\\.cpp$")
     message(STATUS "Linux rich text test requires PangoCairo on Linux")
 endif()
+if(NOT UBQ_FONTCONFIG_FOUND OR NOT UBQ_PANGOCAIRO_FOUND OR NOT UBQ_PANGOFT2_FOUND)
+    ubq_leave_out_tests("(^|/)test_linux_pango_raster\\.cpp$")
+endif()
 if(NOT UBQ_GIO_FOUND)
     ubq_leave_out_tests("(^|/)test_linux_pty_watch\\.cpp$")
 endif()
@@ -165,7 +181,8 @@ endif()
 
 # GIO enables POSIX thread support; its consumers cannot reuse a PCH built
 # without the dependency's compiler options.
-set(UBIQUITTY_NO_PCH_TESTS test_linux_pty_watch test_linux_accessible_terminal test_linux_rich_text)
+set(UBIQUITTY_NO_PCH_TESTS test_linux_pty_watch test_linux_accessible_terminal test_linux_rich_text test_linux_pango_raster
+    test_linux_color_emoji test_linux_fallback_face test_linux_sized_master test_linux_proportional_at_size test_linux_shared_fonts)
 
 # What every test and the precompiled header read: Source/ of the core and kit
 # checkouts in that order, and the core's Tests/.
@@ -192,7 +209,8 @@ if(TARGET test_typed_pasteboard)
     target_link_options(test_typed_pasteboard PRIVATE "$<$<LINK_LANGUAGE:Swift>:-cxx-interoperability-mode=default>")
 endif()
 
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET test_linux_rich_text)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET test_linux_rich_text test_linux_pango_raster
+    test_linux_color_emoji test_linux_fallback_face test_linux_sized_master test_linux_proportional_at_size test_linux_shared_fonts)
     # The native family-selection test must have real fonts even in a minimal
     # image. Add the shipped files as application startup does; keep the native
     # system inventory so enumeration still exercises its actual family map.

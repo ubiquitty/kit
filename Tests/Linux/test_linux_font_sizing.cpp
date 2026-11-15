@@ -22,9 +22,11 @@ TEST(linuxFontsConvertPointsAtDisplayDPIAndBackingScale)
     CHECK_EQ(fontPixelSize(12, 120, 2), 40);
 }
 
-TEST(linuxFontFractionsSurviveUntilDevicePixelRounding)
+TEST(linuxFontFractionsReachTheNativeRasterizerWithoutDevicePixelRounding)
 {
-    CHECK_EQ(fontPixelSize(12.5, 96, 2), 33);
+    CHECK_NEAR(fontPixelSize(12.5, 96, 2), 100.0 / 3.0, 1e-9);
+    CHECK_NEAR(fontPixelSize(15.5, 96, 2), 124.0 / 3.0, 1e-9);
+    CHECK_NEAR(fontPixelSize(11, 91.2, 2), 27.866666666666667, 1e-9);
     CHECK_EQ(fontPixelSize(12.75, 96, 2), 34);
     CHECK_EQ(fontPixelSize(15.5, 72, 2), 31);
     CHECK_EQ(fontPixelSize(256, 768, 8), 4096);

@@ -30,6 +30,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 
 #include <cstdint>
@@ -73,11 +74,100 @@ std::string executableDirectory()
 
 std::string VulkanRenderer::diagnoseFontRoutes(std::string_view utf8Text) const { return Ubiquitty::Linux::diagnoseFontRoutes(utf8Text, "vulkan"); }
 
-bool VulkanRenderer::init()
+void VulkanRenderer::publishProportionalMeasurer()
+{
+    if (!m_ligatureRasterizer || !m_ligatureRasterizer->hasProportionalFace()) {
+        m_proportionalMeasurer.store({}, std::memory_order_release);
+        return;
+    }
+    auto state = std::make_shared<ProportionalMeasurer>();
+    if (m_sharedRasterizerOwner.get() == m_ligatureRasterizer)
+        state->owner = m_sharedRasterizerOwner;
+    state->rasterizer = m_ligatureRasterizer;
+    state->cellAdvance = static_cast<float>(Rendering::cellDimension(m_ligatureRasterizer->cellMetrics().cellWidth));
+    m_proportionalMeasurer.store(std::move(state), std::memory_order_release);
+}
+
+void VulkanRenderer::setGlyphRasterizer(Rendering::GlyphRasterizer& rasterizer)
+{
+    if (m_sharedRasterizerOwner.get() == m_ligatureRasterizer)
+        m_ligatureRasterizer = nullptr;
+    m_sharedRasterizerOwner.reset();
+    m_sharedFontConfiguration.reset();
+    m_sharedAtlasCellBudget = 0;
+    m_injectedRasterizer = &rasterizer;
+    publishProportionalMeasurer();
+}
+
+void VulkanRenderer::setLigatureRasterizer(Rendering::GlyphRasterizer& rasterizer)
+{
+    if (m_sharedRasterizerOwner && m_sharedRasterizerOwner.get() != &rasterizer) {
+        m_sharedRasterizerOwner.reset();
+        m_sharedFontConfiguration.reset();
+    }
+    m_ligatureRasterizer = &rasterizer;
+    publishProportionalMeasurer();
+}
+
+void VulkanRenderer::setSharedGlyphRasterizer(std::shared_ptr<Rendering::GlyphRasterizer> rasterizer,
+    std::shared_ptr<const Rendering::AtlasConfiguration> configuration, int largestScreenCells)
+{
+    if (m_sharedRasterizerOwner != rasterizer || m_sharedFontConfiguration != configuration
+        || m_sharedAtlasCellBudget != largestScreenCells)
+        rebuildAtlas();
+    m_sharedRasterizerOwner = std::move(rasterizer);
+    m_sharedFontConfiguration = std::move(configuration);
+    m_sharedAtlasCellBudget = largestScreenCells;
+    m_injectedRasterizer = m_sharedRasterizerOwner.get();
+    m_ligatureRasterizer = m_sharedRasterizerOwner.get();
+    publishProportionalMeasurer();
+}
+
+int VulkanRenderer::shapeProportionalRun(std::span<const std::uint32_t> codePoints,
+    Ubiquitty::ProportionalRunStyle style, std::span<Ubiquitty::ProportionalShapedGlyph> glyphsOut) const
+{
+    const auto state = m_proportionalMeasurer.load(std::memory_order_acquire);
+    return state ? state->rasterizer->shapeProportionalRun(codePoints, static_cast<Rendering::FontFace>(style.faceBits), glyphsOut) : 0;
+}
+
+float VulkanRenderer::proportionalCellAdvanceInPixels() const
+{
+    const auto state = m_proportionalMeasurer.load(std::memory_order_acquire);
+    return state ? state->cellAdvance : 0;
+}
+
+std::shared_ptr<VulkanDevice> VulkanDevice::acquire()
+{
+    struct Registry {
+        std::mutex mutex;
+        std::weak_ptr<VulkanDevice> device;
+    };
+    static Registry registry;
+    const std::scoped_lock lock(registry.mutex);
+    if (auto existing = registry.device.lock())
+        return existing;
+    auto created = std::make_shared<VulkanDevice>();
+    if (!created->initialize())
+        return {};
+    registry.device = created;
+    return created;
+}
+
+VulkanDevice::~VulkanDevice()
+{
+    if (m_device) {
+        vkDeviceWaitIdle(m_device);
+        vkDestroyDevice(m_device, nullptr);
+    }
+    if (m_instance)
+        vkDestroyInstance(m_instance, nullptr);
+}
+
+bool VulkanDevice::initialize()
 {
     VkApplicationInfo app {};
     app.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-    app.pApplicationName = "ubiquitty-linux";
+    app.pApplicationName = "ubiquitty";
     app.apiVersion = VK_API_VERSION_1_1;
 
     VkInstanceCreateInfo ici {};
@@ -150,25 +240,48 @@ bool VulkanRenderer::init()
         return false;
     if (canExport) {
         m_getMemoryFileDescriptor = reinterpret_cast<PFN_vkGetMemoryFdKHR>(vkGetDeviceProcAddr(m_device, "vkGetMemoryFdKHR"));
-        m_canExportFrames = m_getMemoryFileDescriptor != nullptr && !std::getenv("UBIQUITTY_LINUX_NO_DMABUF");
     }
-    PAL::logLine(stderr, "ubiquitty-linux: dma-buf presentation {}", m_canExportFrames ? "on" : (canExport ? "off (UBIQUITTY_LINUX_NO_DMABUF)" : "unavailable (no external-memory extensions)"));
     vkGetDeviceQueue(m_device, m_queueFamily, 0, &m_queue);
 
+    return true;
+}
+
+bool VulkanRenderer::init()
+{
+    if (m_device)
+        return true;
+    auto shared = VulkanDevice::acquire();
+    if (!shared)
+        return false;
+    const std::scoped_lock lock(shared->mutex());
+    m_sharedDevice = shared;
+    m_instance = shared->instance();
+    m_physical = shared->physical();
+    m_device = shared->device();
+    m_queue = shared->queue();
+    m_queueFamily = shared->queueFamily();
+    m_maxTargetExtent = shared->maxTargetExtent();
+    m_getMemoryFileDescriptor = shared->getMemoryFileDescriptor();
+    m_canExportFrames = m_getMemoryFileDescriptor && !std::getenv("UBIQUITTY_LINUX_NO_DMABUF");
+    PAL::logLine(stderr, "ubiquitty-linux: dma-buf presentation {}", m_canExportFrames ? "on" : "off");
     VkCommandPoolCreateInfo pci {};
     pci.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
     pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
     pci.queueFamilyIndex = m_queueFamily;
-    if (vkCreateCommandPool(m_device, &pci, nullptr, &m_commandPool) != VK_SUCCESS)
+    if (vkCreateCommandPool(m_device, &pci, nullptr, &m_commandPool) != VK_SUCCESS) {
+        shutdown();
         return false;
+    }
 
     VkCommandBufferAllocateInfo cbai {};
     cbai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
     cbai.commandPool = m_commandPool;
     cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     cbai.commandBufferCount = 1;
-    if (vkAllocateCommandBuffers(m_device, &cbai, &m_commandBuffer) != VK_SUCCESS)
+    if (vkAllocateCommandBuffers(m_device, &cbai, &m_commandBuffer) != VK_SUCCESS) {
+        shutdown();
         return false;
+    }
 
     return true;
 }
@@ -246,7 +359,14 @@ bool VulkanRenderer::ensureExportSlots(uint32_t width, uint32_t height)
         mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
         mai.pNext = &dedicated;
         mai.allocationSize = req.size;
-        mai.memoryTypeIndex = findMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        // The default importer probe maps the exported buffer. Prefer memory
+        // that is both GPU-local and host-visible, as Venus cannot map a
+        // dma-buf exported from its device-only memory type.
+        mai.memoryTypeIndex = findMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
+        if (mai.memoryTypeIndex == UINT32_MAX)
+            mai.memoryTypeIndex = findMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
+        if (mai.memoryTypeIndex == UINT32_MAX)
+            mai.memoryTypeIndex = findMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
         if (mai.memoryTypeIndex == UINT32_MAX)
             mai.memoryTypeIndex = findMemoryType(req.memoryTypeBits, 0);
         if (mai.memoryTypeIndex == UINT32_MAX)
@@ -404,6 +524,9 @@ bool VulkanRenderer::ensureTarget(uint32_t width, uint32_t height)
 
 bool VulkanRenderer::renderClear(uint32_t width, uint32_t height, float r, float g, float b, std::vector<uint8_t>& out)
 {
+    if (!m_sharedDevice)
+        return false;
+    const std::scoped_lock queueLock(m_sharedDevice->mutex());
     if (width == 0 || height == 0)
         return false;
     if (!ensureTarget(width, height))
@@ -489,6 +612,13 @@ bool VulkanRenderer::readTarget(std::vector<uint8_t>& out)
 
 void VulkanRenderer::shutdown()
 {
+    m_liveLinkInputs.reset();
+    m_liveLinkOwner = nullptr;
+    m_proportionalMeasurer.store({}, std::memory_order_release);
+    auto shared = m_sharedDevice;
+    if (!shared)
+        return;
+    const std::scoped_lock lock(shared->mutex());
     if (m_device) {
         destroyInstanceBuffers();
         destroyImageInstanceBuffer();
@@ -502,33 +632,44 @@ void VulkanRenderer::shutdown()
         destroyGridTarget();
         destroyRetainedGridImages();
         destroyGridPipelines();
-        m_proportionalImage.destroy(m_device);
-        m_proportionalStripImage.destroy(m_device);
-        m_ligatureImage.destroy(m_device);
-        if (m_colorAtlas)
-            m_colorAtlas->destroy(m_device);
-        if (m_atlas)
-            m_atlas->destroy(m_device);
-        m_atlasCreated = false;
-        m_proportionalSheet.reset();
-        m_proportionalStripSheet.reset();
-        m_ligatureSheet.reset();
-        m_colorAtlas.reset();
-        m_atlas.reset();
+        releaseFontAtlas();
         destroyTarget();
         if (m_commandPool)
             vkDestroyCommandPool(m_device, m_commandPool, nullptr);
-        vkDestroyDevice(m_device, nullptr);
+        m_commandPool = VK_NULL_HANDLE;
+        m_commandBuffer = VK_NULL_HANDLE;
         m_device = VK_NULL_HANDLE;
     }
-    if (m_instance) {
-        vkDestroyInstance(m_instance, nullptr);
-        m_instance = VK_NULL_HANDLE;
-    }
+    m_instance = VK_NULL_HANDLE;
+    m_physical = VK_NULL_HANDLE;
+    m_queue = VK_NULL_HANDLE;
+    m_sharedDevice.reset();
+}
+
+void VulkanRenderer::releaseFontResources()
+{
+    rebuildAtlas();
+    m_proportionalMeasurer.store({}, std::memory_order_release);
+    m_ligatureRasterizer = nullptr;
+    m_injectedRasterizer = nullptr;
+    m_sharedFontConfiguration.reset();
+    m_sharedRasterizerOwner.reset();
+    m_sharedAtlasCellBudget = 0;
+}
+
+void VulkanRenderer::releaseFontAtlas()
+{
+    if (m_fontAtlas && m_fontAtlasLease)
+        m_fontAtlas->releaseViewLease(*m_fontAtlasLease);
+    m_fontAtlasLease.reset();
+    m_fontAtlas.reset();
 }
 
 void VulkanRenderer::rebuildAtlas()
 {
+    if (!m_sharedDevice)
+        return;
+    const std::scoped_lock queueLock(m_sharedDevice->mutex());
     // Tear the GPU atlas down so the next renderGrid re-creates it from the
     // currently-injected rasterizer — used after a runtime font swap. The cell
     // dims (m_cellWidth/Height) + the render-target size are re-derived then,
@@ -538,19 +679,7 @@ void VulkanRenderer::rebuildAtlas()
     if (m_device == VK_NULL_HANDLE)
         return;
     vkDeviceWaitIdle(m_device);
-    m_proportionalImage.destroy(m_device);
-    m_proportionalStripImage.destroy(m_device);
-    m_ligatureImage.destroy(m_device);
-    if (m_colorAtlas)
-        m_colorAtlas->destroy(m_device);
-    if (m_atlas)
-        m_atlas->destroy(m_device);
-    m_atlasCreated = false;
-    m_proportionalSheet.reset();
-    m_proportionalStripSheet.reset();
-    m_ligatureSheet.reset();
-    m_colorAtlas.reset();
-    m_atlas.reset();
+    releaseFontAtlas();
     m_descriptorWritten = false;
     m_isProportionalDescriptorWritten = false;
     m_isProportionalStripDescriptorWritten = false;
@@ -563,6 +692,8 @@ void VulkanRenderer::rebuildAtlas()
     // down; a partial frame would keep them under every clean row. Cleared so
     // the next frame rebuilds the target in full from the new atlas.
     m_hasRetainedTarget = false;
+    m_capturedTargetOwner = nullptr;
+    m_capturedTargetSequence = 0;
 }
 
 VkShaderModule VulkanRenderer::loadShader(const char* spvFileName) const
@@ -1147,6 +1278,9 @@ void VulkanRenderer::destroyRetainedGridImages()
     }
     m_gridImageWidth = m_gridImageHeight = 0;
     m_hasRetainedTarget = false;
+    m_capturedTargetOwner = nullptr;
+    m_capturedTargetSequence = 0;
+    m_capturedTargetConfiguration.reset();
 }
 
 bool VulkanRenderer::ensureGridTarget(uint32_t width, uint32_t height)
@@ -2092,19 +2226,39 @@ bool VulkanRenderer::ensureImageInstanceBuffer(std::size_t instanceCount)
     return true;
 }
 
-std::uint32_t VulkanRenderer::lastFrameStretchedProportionalInstanceCount() const
+std::uint32_t VulkanRenderer::lastFrameStretchedProportionalInstanceCount(CoverageFilter coverageFilter) const
 {
-    const auto stretchedIn = [](const void* mapped, std::uint32_t count) {
+    if (!m_fontAtlas)
+        return 0;
+    const auto stretchedIn = [coverageFilter](const void* mapped, std::uint32_t count, const auto& sheet) {
         std::uint32_t stretched = 0;
         const auto* instances = static_cast<const Rendering::GlyphInstance*>(mapped);
         for (std::uint32_t index = 0; mapped && index < count; ++index) {
             const Rendering::GlyphInstance& instance = instances[index];
-            stretched += instance.sizeInPixels.x > 1.5f * (instance.atlasBottomRight.x - instance.atlasTopLeft.x);
+            if (instance.sizeInPixels.x <= 1.5f * (instance.atlasBottomRight.x - instance.atlasTopLeft.x))
+                continue;
+            if (coverageFilter == CoverageFilter::All || !sheet) {
+                ++stretched;
+                continue;
+            }
+            const int width = sheet->widthInPixels();
+            const int height = sheet->heightInPixels();
+            const auto coverage = sheet->coverage();
+            const int left = std::clamp(static_cast<int>(std::floor(instance.atlasTopLeft.x)), 0, width);
+            const int right = std::clamp(static_cast<int>(std::ceil(instance.atlasBottomRight.x)), left, width);
+            const int top = std::clamp(static_cast<int>(std::floor(instance.atlasTopLeft.y)), 0, height);
+            const int bottom = std::clamp(static_cast<int>(std::ceil(instance.atlasBottomRight.y)), top, height);
+            bool hasInk = false;
+            for (int y = top; !hasInk && y < bottom; ++y) {
+                const auto row = coverage.subspan(static_cast<std::size_t>(y) * width + left, static_cast<std::size_t>(right - left));
+                hasInk = std::ranges::any_of(row, [](std::uint8_t value) { return value != 0; });
+            }
+            stretched += hasInk;
         }
         return stretched;
     };
-    return stretchedIn(m_proportionalMapped, m_lastFrameProportionalInstances)
-        + stretchedIn(m_proportionalStripMapped, m_lastFrameProportionalStripInstances);
+    return stretchedIn(m_proportionalMapped, m_lastFrameProportionalInstances, m_fontAtlas->proportionalSheet)
+        + stretchedIn(m_proportionalStripMapped, m_lastFrameProportionalStripInstances, m_fontAtlas->proportionalStripSheet);
 }
 
 std::uint32_t VulkanRenderer::lastFrameScaledGlyphInstanceCount() const
@@ -2121,19 +2275,23 @@ std::uint32_t VulkanRenderer::lastFrameScaledGlyphInstanceCount() const
     return scaled;
 }
 
-bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Terminal* term, std::vector<uint8_t>& out, int& widthOut, int& heightOut, int viewOffset, Ubiquitty::Selection::Session* selection, const CursorOverlay* cursor, uint32_t blinkTicks, ModelCaptureHandoff handoff)
+bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Terminal* term, std::vector<uint8_t>& out, int& widthOut, int& heightOut, int viewOffset, Ubiquitty::Selection::Session* selection, const CursorOverlay* cursor, uint32_t blinkTicks, ModelCaptureHandoff handoff, const Rendering::FrameCapture* capturedFrame, const Rendering::FrameCapture::ViewTierOverrides* capturedView)
 {
-    m_didDeclineOversizedGrid = false;
-    if (!term)
+    if (!m_sharedDevice)
         return false;
-    const int columns = term->columns;
-    const int rows = term->rows;
+    const std::scoped_lock queueLock(m_sharedDevice->mutex());
+    m_didDeclineOversizedGrid = false;
+    if (!term && !capturedFrame)
+        return false;
+    const int columns = capturedFrame ? capturedFrame->columns() : term->columns;
+    const int rows = capturedFrame ? capturedFrame->rows() : term->rows;
     if (columns <= 0 || rows <= 0)
         return false;
     // The offset the frame shows (Screen::resolvedViewOffset), resolved once:
     // a pane hands over the offset its view holds, and over the alternate
     // screen, which has no history, the frame is the tail.
-    viewOffset = Ubiquitty::Screen::resolvedViewOffset(term, viewOffset);
+    if (!capturedFrame)
+        viewOffset = Ubiquitty::Screen::resolvedViewOffset(term, viewOffset);
 
     VkPhysicalDeviceProperties physicalProperties {};
     vkGetPhysicalDeviceProperties(m_physical, &physicalProperties);
@@ -2165,80 +2323,29 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
     };
     // The cell is the atlas's: with no atlas yet, the check after it is cut
     // below decides.
-    if (m_atlas && !m_maxTargetExtent.containsGrid(columns, rows, m_cellWidth, m_cellHeight))
+    if (m_fontAtlas && m_fontAtlas->atlas && !m_maxTargetExtent.containsGrid(columns, rows, m_cellWidth, m_cellHeight))
         return declineOversizedGrid();
 
     // A grid grown past the one the atlas was cut for has more cells than the
     // atlas has slots, and a screen of sized text there runs out of windows;
     // the atlas is rebuilt for the larger grid, once per high-water mark.
-    if (m_atlas && !m_atlas->holdsScreen(columns * rows, maxTextureDimension))
+    if (m_fontAtlas && m_fontAtlas->atlas && !m_fontAtlas->atlas->holdsScreen(columns * rows, maxTextureDimension))
         rebuildAtlas();
     // Construct the atlas lazily so an injected rasterizer is wired in; else it
     // uses its own UnifontRasterizer. Cell dims come from the atlas (font-derived,
     // or Unifont 8×16) and drive the image size / metrics / push constants below.
-    if (!m_atlas) {
-        // The queried limit, not the spec floor: a grid clamped to 4096 on a
-        // device that allows 16384 shrinks the atlas for no reason, and one
-        // built past the real limit fails image creation.
-        // The grid this atlas serves, so its slot count is bounded by what one
-        // frame can reference rather than by a constant. A screen cannot show
-        // more distinct glyphs than it has cells.
-        const int cellsInWidestScreen = columns * rows;
-        if (m_injectedRasterizer)
-            m_atlas.emplace(*m_injectedRasterizer, maxTextureDimension, cellsInWidestScreen);
-        else
-            m_atlas.emplace(fallbackCellWidth, fallbackCellHeight, maxTextureDimension, cellsInWidestScreen);
-        m_cellWidth = m_atlas->cellWidth();
-        m_cellHeight = m_atlas->cellHeight();
+    if (!m_fontAtlas) {
+        const int cells = std::max(m_sharedAtlasCellBudget, columns * rows);
+        m_fontAtlas = VulkanFontAtlas::acquire(m_sharedDevice, m_sharedRasterizerOwner,
+            m_injectedRasterizer, m_ligatureRasterizer, m_sharedFontConfiguration, maxTextureDimension, cells);
+        if (!m_fontAtlas || !m_fontAtlas->atlas)
+            return false;
+        m_fontAtlasLease = m_fontAtlas->acquireViewLease();
+        m_cellWidth = m_fontAtlas->atlas->cellWidth();
+        m_cellHeight = m_fontAtlas->atlas->cellHeight();
     }
     if (!m_maxTargetExtent.containsGrid(columns, rows, m_cellWidth, m_cellHeight))
         return declineOversizedGrid();
-    // Beside it, over the same rasterizer, so the two sheets answer about one
-    // font.
-    if (!m_colorAtlas) {
-        // Cut through the same helper the builder sizes the destination quad
-        // with, over the same metrics it receives below — the rasterizer's own
-        // floats. m_cellWidth and m_cellHeight have been through cellDimension,
-        // which rounds to nearest, so a square derived from them reaches a third
-        // number rather than the builder's. A slot that differs from the quad it
-        // draws into resamples every colour glyph, and rounding to nearest can
-        // differ upward, which is the direction that puts the master a texel
-        // past the cell.
-        Rendering::GlyphRasterizer& colorRasterizer = m_injectedRasterizer ? *m_injectedRasterizer : m_atlas->rasterizer();
-        const auto colorMetrics = colorRasterizer.cellMetrics();
-        m_colorAtlas.emplace(colorRasterizer,
-            static_cast<int>(Rendering::colourGlyphSquareInPixels(colorMetrics.cellWidth, colorMetrics.cellHeight)));
-    }
-    // The strip sheet, over the shaping rasterizer if one was injected. Its
-    // margins come from the same policy the mono atlas sized its slots with, so
-    // a strip's slot and a glyph's slot are the same box: the builder maps a
-    // covered cell's atlas-pixel range onto the slot linearly, and a strip sized
-    // by a second rule would put the sub-slice map a fraction of a cell out on
-    // every ligature.
-    // Asked, and able to answer: a face with no shaper builds no sheet, so a
-    // caller may inject whatever it renders with and let the capability decide.
-    if (!m_ligatureSheet && m_ligatureRasterizer && m_ligatureRasterizer->hasLigatureShaping()) {
-        const Rendering::GlyphSlot stripSlot = Rendering::computeGlyphSlot(m_ligatureRasterizer->glyphOverhang());
-        m_ligatureSheet.emplace(m_cellWidth, m_cellHeight, stripSlot.marginInPixels.width,
-            stripSlot.marginInPixels.height, m_ligatureRasterizer);
-    }
-    if (!m_proportionalStripSheet && m_ligatureRasterizer && m_ligatureRasterizer->hasProportionalFace()) {
-        const Rendering::GlyphSlot stripSlot = Rendering::computeGlyphSlot(m_ligatureRasterizer->glyphOverhang());
-        m_proportionalStripSheet.emplace(m_cellWidth, m_cellHeight, stripSlot.marginInPixels.width,
-            stripSlot.marginInPixels.height, m_ligatureRasterizer);
-    }
-    if (!m_proportionalSheet) {
-        Rendering::GlyphRasterizer& proportionalRasterizer
-            = m_ligatureRasterizer && m_ligatureRasterizer->hasProportionalFace()
-            ? *m_ligatureRasterizer
-            : m_atlas->rasterizer();
-        const Rendering::GlyphSlot proportionalSlot = Rendering::computeGlyphSlot(
-            proportionalRasterizer.glyphOverhang());
-        m_proportionalSheet.emplace(m_cellWidth, m_cellHeight,
-            proportionalSlot.marginInPixels.width,
-            proportionalSlot.marginInPixels.height, &proportionalRasterizer,
-            maxTextureDimension);
-    }
 
     const uint32_t width = static_cast<uint32_t>(columns) * m_cellWidth;
     const uint32_t height = static_cast<uint32_t>(rows) * m_cellHeight;
@@ -2259,50 +2366,50 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
         Ubiquitty::PAL::logLine(stderr, "vulkan: renderGrid could not build the {}x{} grid target", width, height);
         return false;
     }
-    if (!m_atlasCreated) {
+    if (!m_fontAtlas->isCreated) {
         auto destroyAtlasResources = [&] {
-            m_proportionalImage.destroy(m_device);
-            m_proportionalStripImage.destroy(m_device);
-            m_ligatureImage.destroy(m_device);
-            m_colorAtlas->destroy(m_device);
-            m_atlas->destroy(m_device);
+            m_fontAtlas->proportionalImage.destroy(m_device);
+            m_fontAtlas->proportionalStripImage.destroy(m_device);
+            m_fontAtlas->ligatureImage.destroy(m_device);
+            m_fontAtlas->colorAtlas->destroy(m_device);
+            m_fontAtlas->atlas->destroy(m_device);
         };
-        if (!m_atlas->create(m_device, m_physical, m_queue, m_queueFamily, m_commandPool)) {
+        if (!m_fontAtlas->atlas->create(m_device, m_physical, m_queue, m_queueFamily, m_commandPool)) {
             destroyAtlasResources();
             return false;
         }
-        if (!m_colorAtlas->create(m_device, m_physical)) {
+        if (!m_fontAtlas->colorAtlas->create(m_device, m_physical)) {
             destroyAtlasResources();
             return false;
         }
-        if (m_proportionalSheet->isUsable()
-            && !m_proportionalImage.create(m_device, m_physical,
-                m_proportionalSheet->widthInPixels(),
-                m_proportionalSheet->heightInPixels())) {
+        if (m_fontAtlas->proportionalSheet->isUsable()
+            && !m_fontAtlas->proportionalImage.create(m_device, m_physical,
+                m_fontAtlas->proportionalSheet->widthInPixels(),
+                m_fontAtlas->proportionalSheet->heightInPixels())) {
             Ubiquitty::PAL::logLine(stderr,
                 "vulkan: the proportional glyph sheet's image could not be created");
             destroyAtlasResources();
             return false;
         }
-        if (m_proportionalStripSheet && m_proportionalStripSheet->isUsable()
-            && !m_proportionalStripImage.create(m_device, m_physical,
-                m_proportionalStripSheet->widthInPixels(),
-                m_proportionalStripSheet->heightInPixels())) {
+        if (m_fontAtlas->proportionalStripSheet && m_fontAtlas->proportionalStripSheet->isUsable()
+            && !m_fontAtlas->proportionalStripImage.create(m_device, m_physical,
+                m_fontAtlas->proportionalStripSheet->widthInPixels(),
+                m_fontAtlas->proportionalStripSheet->heightInPixels())) {
             Ubiquitty::PAL::logLine(stderr,
                 "vulkan: the proportional strip sheet's image could not be created");
             destroyAtlasResources();
             return false;
         }
-        if (m_ligatureSheet && m_ligatureSheet->isUsable()
-            && !m_ligatureImage.create(m_device, m_physical,
-                m_ligatureSheet->widthInPixels(),
-                m_ligatureSheet->heightInPixels())) {
+        if (m_fontAtlas->ligatureSheet && m_fontAtlas->ligatureSheet->isUsable()
+            && !m_fontAtlas->ligatureImage.create(m_device, m_physical,
+                m_fontAtlas->ligatureSheet->widthInPixels(),
+                m_fontAtlas->ligatureSheet->heightInPixels())) {
             Ubiquitty::PAL::logLine(stderr,
                 "vulkan: the ligature strip sheet's image could not be created");
             destroyAtlasResources();
             return false;
         }
-        m_atlasCreated = true;
+        m_fontAtlas->isCreated = true;
     }
 
     // The retained snapshot: Core drains the damage and refreshes only the
@@ -2322,171 +2429,264 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
     // grid, and the damage the parser queued meanwhile arrives at the next
     // drain as the dirty rows it is.
     std::vector<Ubiquitty::Cell> grid;
-    // Defaults refuse reuse; a fresh-path frame never plans.
     Rendering::RetainedFramePlan framePlan;
-    // Resolved once for the frame: the builder consumes it, and the tier it
-    // emits for a focused block is drawn after the plan's rows.
-    Rendering::CursorRenderState cursorState;
-    rasterContext.fillCursorState(term, viewOffset, cursor, cursorState);
-    bool shouldUseRetainedCells = term->grid != nullptr && !rasterContext.snapshotCompositesOverlay();
-    for (int row = 0; shouldUseRetainedCells && row < rows; ++row)
-        shouldUseRetainedCells = !Ubiquitty::Screen::rowMayNeedShaping(*term, viewOffset, row);
-    const bool drawsThroughRetainedTarget = shouldUseRetainedCells && ensureRetainedGridImages(width, height);
-    if (shouldUseRetainedCells) {
-        // Core plans the frame whole: drain, both verdicts, the scroll
-        // copies, and the baseline advance. This arm contributes one
-        // render-side fact — whether its pair survived at this size.
-        m_rowDirty.resize(static_cast<std::size_t>(rows));
-        Rendering::RetainedFrameRequest request;
-        request.rows = rows;
-        request.columns = columns;
-        request.viewOffset = viewOffset;
-        request.isTargetMatching = drawsThroughRetainedTarget && m_hasRetainedTarget;
-        request.cellHeightInPixels = static_cast<int>(m_cellHeight);
-        request.textureHeightInPixels = static_cast<int>(height);
-        framePlan = Rendering::planRetainedFrame(*term->grid, *term, m_retainedBaseline, request, m_rowDirty);
-        m_retainedCells.resize(static_cast<std::size_t>(rows) * columns);
-        m_retainedLineAttributes.resize(static_cast<std::size_t>(rows));
-        m_retainedRowMarks.resize(static_cast<std::size_t>(rows));
-        Rendering::refreshCapturedRows(*term, framePlan.refresh, m_retainedCells, m_retainedLineAttributes, m_retainedRowMarks);
-    } else {
-        rasterContext.snapshotVisibleGrid(term, viewOffset, grid);
-    }
-    // The builder consumes row geometry and proportional-run hints beside the
-    // cells. The fresh snapshot contains only cells, while the retained path
-    // stores line attributes but not row flags, so gather the missing facts
-    // from the same visible rows here.
-    std::vector<std::uint8_t> freshLineAttributes;
-    if (!shouldUseRetainedCells) {
-        freshLineAttributes.resize(static_cast<std::size_t>(rows), Ubiquitty::lineAttributeNormal);
-    }
-    std::vector<std::uint8_t> rowFlags(static_cast<std::size_t>(rows), 0u);
-    const int history = Ubiquitty::Screen::scrollbackCount(term);
-    const int firstAbsoluteRow = history - std::clamp(viewOffset, 0, history);
-    for (int row = 0; row < rows; ++row) {
-        if (!shouldUseRetainedCells) {
-            freshLineAttributes[static_cast<std::size_t>(row)]
-                = Ubiquitty::Screen::rowLineAttribute(term, firstAbsoluteRow + row);
-        }
-        rowFlags[static_cast<std::size_t>(row)]
-            = Ubiquitty::Screen::rowFlags(term, firstAbsoluteRow + row);
-    }
-    bool canReuseGridTarget = drawsThroughRetainedTarget && framePlan.shouldLoadRetainedTarget;
-    const Rendering::ScrollBlitPlan& gridBlitPlan = framePlan.blitPlan;
-
-    std::vector<Rendering::SelectionRowSpan> selectionSpans;
-    selectionRowSpans(term, viewOffset, selection, selectionSpans);
-    std::vector<Rendering::SelectionRowSpan> searchMatchSpans;
-    Rendering::collectSearchMatchRowSpans(*term, viewOffset, searchMatchSpans);
-    std::vector<Rendering::SelectionRowSpan> otherSearchMatchSpans;
-    Rendering::collectOtherSearchMatchRowSpans(*term, viewOffset, otherSearchMatchSpans);
-    std::vector<Rendering::SelectionRowSpan> triggerHighlightSpans;
-    Rendering::collectTriggerHighlightRowSpans(*term, viewOffset, triggerHighlightSpans);
-    std::vector<Rendering::SelectionRowSpan> hiliteSpans;
-    Rendering::collectHiliteRegionRowSpans(*term, viewOffset, hiliteSpans);
-
     Rendering::BuildInputs in;
-    in.cells = shouldUseRetainedCells ? m_retainedCells.data() : grid.data();
-    in.lineAttributes = shouldUseRetainedCells
-        ? m_retainedLineAttributes.data()
-        : freshLineAttributes.data();
-    in.rowFlags = rowFlags.data();
-    // Only under a Load verdict: with a Clear pass every row must be built,
-    // and the builder reads null as "no damage mask".
-    in.dirtyRows = canReuseGridTarget ? m_rowDirty.data() : nullptr;
-    // The resolver's context is the terminal the cells came from, so a cell's
-    // cluster is read back from the same model that holds its base code point.
-    in.clusterResolverContext = term;
-    in.clusterResolver = [](const Ubiquitty::Cell* cell, std::span<std::uint32_t> codePoints, void* terminal) -> int {
-        const auto* owner = static_cast<const Ubiquitty::Terminal*>(terminal);
-        return Ubiquitty::cellClusterCodePoints(owner, cell, codePoints.data(), static_cast<int>(codePoints.size()));
-    };
-    in.rows = rows;
     in.columns = columns;
-    in.palette = &term->palette;
-    in.textSizeTable = &term->textSizeTable;
-    in.ambiguousWidth = term->ambiguousWidth;
-    in.screenReverse = Ubiquitty::isReverseVideo(term);
-    const Rendering::RenderConfiguration& configuration = rasterContext.renderConfiguration();
-    in.brightenBold = configuration.shouldBrightenBold;
-    // The bitmap-tier flag the CPU raster takes from the same setting, so the
-    // shaders quantise exactly when SoftwareRenderer does.
-    in.isBitmapFace = rasterContext.embeddedBitmapScale() > 0;
-    m_isBitmapTier = in.isBitmapFace;
-    in.selectionSpans = selectionSpans.data();
-    in.selectionSpanCount = static_cast<int>(selectionSpans.size());
-    // The fill the CPU path's capture resolves: the configured selection
-    // style, over the host's OSC 17 colour when it named one. This arm has no
-    // platform selection colour to offer.
-    const Rendering::Vec4 hostSelection { term->selectionBackgroundRed / 65535.0f, term->selectionBackgroundGreen / 65535.0f,
-        term->selectionBackgroundBlue / 65535.0f, 1.0f };
-    const Rendering::SelectionFill selectionFill = Rendering::resolveSelectionFill(
-        configuration.selectionStyle, Rendering::Vec4 {}, term->selectionBackgroundSet ? &hostSelection : nullptr);
-    in.selectionColor = selectionFill.color;
-    in.isSelectionBehindText = !selectionSpans.empty() && selectionFill.isBehindText;
-    // A selection behind the text is in the pair's pixels and in no cell, so
-    // the rows it reaches and leaves are marked here, beside the drain's.
-    if (drawsThroughRetainedTarget)
-        Rendering::markBakedSelectionRows(m_bakedSelection,
-            in.isSelectionBehindText ? std::span<const Rendering::SelectionRowSpan>(selectionSpans) : std::span<const Rendering::SelectionRowSpan> {},
-            selectionFill.color, framePlan.damage, m_rowDirty);
-    in.searchMatchSpans = searchMatchSpans.data();
-    in.searchMatchSpanCount = static_cast<int>(searchMatchSpans.size());
-    in.searchMatchHighlight = focusedSearchMatchHighlightColor();
-    in.focusedMatchAgeSeconds = m_focusedMatchBounce.ageSeconds(Screen::ScrollSearch::activeMatchEpoch(*term), blinkTicks);
-    m_focusedMatchAgeSeconds = in.focusedMatchAgeSeconds;
-    in.otherSearchMatchSpans = otherSearchMatchSpans.data();
-    in.otherSearchMatchSpanCount = static_cast<int>(otherSearchMatchSpans.size());
-    in.triggerHighlightSpans = triggerHighlightSpans.data();
-    in.triggerHighlightSpanCount = static_cast<int>(triggerHighlightSpans.size());
-    in.hiliteRegionSpans = hiliteSpans.data();
-    in.hiliteRegionSpanCount = static_cast<int>(hiliteSpans.size());
-    in.backgroundOpacity = rasterContext.backgroundOpacity();
-    in.shouldEnhanceTextContrast = configuration.shouldEnhanceTextContrast;
-    // SGR 5/6 text blink through the shared cell builder + Core curve: gated on
-    // hasBlinkHint; blinkTicks==0 holds blink text fully opaque.
-    in.resolveBlink = term->grid != nullptr && term->grid->hasBlinkHint();
-    in.blinkTicks = blinkTicks;
-    // The cursor is built through the same shared fillCursorState helper the CPU
-    // path uses, so both backends land identically.
-    in.cursor = cursorState;
+    in.subpixelPhaseCount = rasterContext.glyphPhaseCount();
+    std::vector<std::uint8_t> freshLineAttributes;
+    std::vector<std::uint8_t> rowFlags;
+    std::vector<Rendering::SelectionRowSpan> selectionSpans, searchMatchSpans, otherSearchMatchSpans, triggerHighlightSpans, hiliteSpans;
+    bool drawsThroughRetainedTarget = false;
+    bool canReuseGridTarget = false;
+    const Rendering::ScrollBlitPlan& gridBlitPlan = framePlan.blitPlan;
+    m_isBitmapTier = rasterContext.embeddedBitmapScale() > 0;
+    const bool hasCapturedViewTiers = capturedView == nullptr || capturedView->selectionSpanCount > 0
+        || capturedView->searchMatchSpanCount > 0 || capturedView->otherSearchMatchSpanCount > 0
+        || capturedView->triggerHighlightSpanCount > 0 || capturedView->hiliteRegionSpanCount > 0
+        || capturedView->overlayDirtyRowCount > 0;
+    const bool hasCapturedImages = capturedFrame && !capturedFrame->imageQuads().empty();
+    if (!capturedFrame) {
+        const auto& hover = rasterContext.frameHoverLink();
+        const auto& links = rasterContext.renderConfiguration();
+        const auto& accent = rasterContext.frameLinkAccentColor();
+        const std::array<std::uint64_t, 17> presentationKey {
+            hover.isActive, hover.linkID, static_cast<std::uint64_t>(hover.rowAbsoluteFirst),
+            static_cast<std::uint64_t>(hover.rowAbsoluteLast), static_cast<std::uint64_t>(hover.columnFirst),
+            static_cast<std::uint64_t>(hover.columnLast), static_cast<std::uint64_t>(hover.spanColumnFirst),
+            static_cast<std::uint64_t>(hover.spanColumnLast), hover.textDigest, links.shouldUnderlineLinks,
+            static_cast<std::uint64_t>(links.linkUnderlineStyle), links.shouldStyleLinksPerKind, links.shouldUseSystemBlueLinkColor,
+            std::bit_cast<std::uint32_t>(accent.x), std::bit_cast<std::uint32_t>(accent.y),
+            std::bit_cast<std::uint32_t>(accent.z), std::bit_cast<std::uint32_t>(accent.w)
+        };
+        if (m_liveLinkOwner != term || m_liveLinkPresentationKey != presentationKey) {
+            if (m_liveLinkOwner != term)
+                m_liveLinkInputs.reset();
+            // Hover changes no model cells: the old and new rules still need
+            // repainting even when the grid's damage stream is empty.
+            m_hasRetainedTarget = false;
+            m_liveLinkOwner = term;
+            m_liveLinkPresentationKey = presentationKey;
+        }
+    }
+    if (capturedFrame) {
+        // A boundary capture owns its damage lineage. Only an exact successor
+        // may Load this pair: a skipped capture may own dirty rows absent from
+        // the next record. A later live read starts its own baseline afresh.
+        m_retainedBaseline = {};
+        m_focusedMatchAgeSeconds = 0.0f;
+        drawsThroughRetainedTarget = ensureRetainedGridImages(width, height);
+        framePlan.damage = capturedFrame->frameDamage();
+        m_rowDirty.resize(static_cast<std::size_t>(rows));
+        for (int row = 0; row < rows; ++row)
+            m_rowDirty[static_cast<std::size_t>(row)] = capturedFrame->isRowDirty(row);
+        framePlan.blitPlan = Rendering::scrollBlitPlan(framePlan.damage, rows,
+            static_cast<int>(m_cellHeight), 0, static_cast<int>(height));
+        const bool isExactSuccessor = !capturedFrame->isFullFrame()
+            && term && m_capturedTargetOwner == term && m_capturedTargetSequence != 0
+            && capturedFrame->baseSequence() == m_capturedTargetSequence
+            && capturedFrame->viewGeneration() == m_capturedTargetViewGeneration
+            && capturedFrame->paletteGeneration() == m_capturedTargetPaletteGeneration
+            && m_capturedTargetConfiguration && *m_capturedTargetConfiguration == rasterContext.renderConfiguration();
+        Rendering::RetainedTargetEligibility eligibility;
+        eligibility.isTargetMatching = drawsThroughRetainedTarget && m_hasRetainedTarget && isExactSuccessor
+            && !hasCapturedViewTiers && !m_doesCapturedTargetHaveViewTiers && !hasCapturedImages && !m_doesCapturedTargetHaveImages;
+        eligibility.hasBlink = framePlan.damage.hasBlink;
+        eligibility.hasStatusLine = capturedFrame->hasStatusRow();
+        eligibility.hasBackdrop = rasterContext.backgroundImageLayer().isVisible();
+        eligibility.rowDirtyCount = m_rowDirty.size();
+        eligibility.rows = rows;
+        canReuseGridTarget = Rendering::canReuseRetainedTarget(framePlan.damage, eligibility)
+            && (framePlan.damage.scrollDelta == 0 || framePlan.blitPlan.bandCount > 0);
+    } else {
+        m_capturedTargetOwner = nullptr;
+        m_capturedTargetSequence = 0;
+        // Defaults refuse reuse; a fresh-path frame never plans.
+        // Resolved once for the frame: the builder consumes it, and the tier it
+        // emits for a focused block is drawn after the plan's rows.
+        Rendering::CursorRenderState cursorState;
+        rasterContext.fillCursorState(term, viewOffset, cursor, cursorState);
+        bool shouldUseRetainedCells = !capturedFrame && term->grid != nullptr && !rasterContext.snapshotCompositesOverlay();
+        for (int row = 0; shouldUseRetainedCells && row < rows; ++row)
+            shouldUseRetainedCells = !Ubiquitty::Screen::rowMayNeedShaping(*term, viewOffset, row);
+        drawsThroughRetainedTarget = shouldUseRetainedCells && ensureRetainedGridImages(width, height);
+        if (shouldUseRetainedCells) {
+            // Core plans the frame whole: drain, both verdicts, the scroll
+            // copies, and the baseline advance. This arm contributes one
+            // render-side fact — whether its pair survived at this size.
+            m_rowDirty.resize(static_cast<std::size_t>(rows));
+            Rendering::RetainedFrameRequest request;
+            request.rows = rows;
+            request.columns = columns;
+            request.viewOffset = viewOffset;
+            request.isTargetMatching = drawsThroughRetainedTarget && m_hasRetainedTarget;
+            request.cellHeightInPixels = static_cast<int>(m_cellHeight);
+            request.textureHeightInPixels = static_cast<int>(height);
+            framePlan = Rendering::planRetainedFrame(*term->grid, *term, m_retainedBaseline, request, m_rowDirty);
+            m_retainedCells.resize(static_cast<std::size_t>(rows) * columns);
+            m_retainedLineAttributes.resize(static_cast<std::size_t>(rows));
+            m_retainedRowMarks.resize(static_cast<std::size_t>(rows));
+            Rendering::refreshCapturedRows(*term, framePlan.refresh, m_retainedCells, m_retainedLineAttributes, m_retainedRowMarks);
+        } else {
+            rasterContext.snapshotVisibleGrid(term, viewOffset, grid);
+        }
+        // The builder consumes row geometry and proportional-run hints beside the
+        // cells. The fresh snapshot contains only cells, while the retained path
+        // stores line attributes but not row flags, so gather the missing facts
+        // from the same visible rows here.
+        if (!shouldUseRetainedCells) {
+            freshLineAttributes.resize(static_cast<std::size_t>(rows), Ubiquitty::lineAttributeNormal);
+        }
+        rowFlags.assign(static_cast<std::size_t>(rows), 0u);
+        const int history = Ubiquitty::Screen::scrollbackCount(term);
+        const int firstAbsoluteRow = history - std::clamp(viewOffset, 0, history);
+        for (int row = 0; row < rows; ++row) {
+            if (!shouldUseRetainedCells) {
+                freshLineAttributes[static_cast<std::size_t>(row)]
+                    = Ubiquitty::Screen::rowLineAttribute(term, firstAbsoluteRow + row);
+            }
+            rowFlags[static_cast<std::size_t>(row)]
+                = Ubiquitty::Screen::rowFlags(term, firstAbsoluteRow + row);
+        }
+        canReuseGridTarget = drawsThroughRetainedTarget && framePlan.shouldLoadRetainedTarget;
 
-    // CellMetrics from the atlas's rasterizer — exactly as SoftwareRenderer::render
-    // does (the same instance), so the decoration + glyph geometry line up.
-    in.metrics = m_atlas->rasterizer().cellMetrics();
-    in.glyphReferenceAdvanceInPixels = in.metrics.cellWidth;
-    in.glyphReferenceLineHeightInPixels = in.metrics.cellHeight;
-    in.glyphBoxWidthInPixels = static_cast<float>(m_atlas->cellWidth());
-    // The CPU path reaches this through TerminalFrameInputs::capture, which this
-    // one does not run. Left out, the two arms disagree about every rule the
-    // configuration styles — and the oracle that compares them renders both from
-    // the same face, so it reports the disagreement as a GPU fault.
-    Rendering::TerminalSnapshotStyle style;
-    Preferences::Effective::applyRuleSettings(style, configuration, static_cast<double>(rasterContext.deviceScale()));
-    Rendering::applyRuleStyle(in.metrics, style);
-    // The rest of the rule settings the CPU capture reads from the same style.
-    in.drawsBrailleGrid = style.shouldDrawBrailleGrid;
-    in.brailleStyle = style.brailleStyle;
-    in.shadeStyle = style.shadeStyle;
-    // The point space the CPU path is given through applyPointSpace: the
-    // cursor's thin shapes are defined in points, and a pass that leaves these
-    // at zero draws them at one pixel per point — half the width the CPU raster
-    // of the same window draws at a backing scale of two.
-    in.cellHeightPoints = static_cast<double>(in.metrics.cellHeight) / static_cast<double>(rasterContext.deviceScale());
-    in.lineSpacingPoints = configuration.lineSpacingPoints;
-    in.toolkitCaret = rasterContext.toolkitCaret();
+        selectionRowSpans(term, viewOffset, selection, selectionSpans);
+        Rendering::collectSearchMatchRowSpans(*term, viewOffset, searchMatchSpans);
+        Rendering::collectOtherSearchMatchRowSpans(*term, viewOffset, otherSearchMatchSpans);
+        Rendering::collectTriggerHighlightRowSpans(*term, viewOffset, triggerHighlightSpans);
+        Rendering::collectHiliteRegionRowSpans(*term, viewOffset, hiliteSpans);
 
-    // Subpixel overflow pass: route mono glyphs with ink past the cell box through
-    // the glyph pass with margins so they render uncropped. The same margins the
-    // atlas slot was sized to (computeGlyphSlot over the rasterizer's overhang).
-    // Zero overhang (Unifont) ⇒ off (cell-baked path). The CPU path computes the
-    // identical fields over the same rasterizer.
-    const Rendering::GlyphSlot glyphSlot = Rendering::computeGlyphSlot(m_atlas->rasterizer().glyphOverhang());
-    in.subpixelGlyphs = glyphSlot.marginInPixels.width > 0 || glyphSlot.marginInPixels.height > 0;
-    in.glyphMarginInPixels.width = static_cast<float>(glyphSlot.marginInPixels.width);
-    in.glyphMarginInPixels.height = static_cast<float>(glyphSlot.marginInPixels.height);
-    in.glyphSlotWidthInPixels = static_cast<float>(m_atlas->cellWidth() + 2 * glyphSlot.marginInPixels.width);
-    in.glyphSlotHeightInPixels = static_cast<float>(m_atlas->cellHeight() + 2 * glyphSlot.marginInPixels.height);
+        in.cells = shouldUseRetainedCells ? m_retainedCells.data() : grid.data();
+        in.lineAttributes = shouldUseRetainedCells
+            ? m_retainedLineAttributes.data()
+            : freshLineAttributes.data();
+        in.rowFlags = rowFlags.data();
+        // Only under a Load verdict: with a Clear pass every row must be built,
+        // and the builder reads null as "no damage mask".
+        in.dirtyRows = canReuseGridTarget ? m_rowDirty.data() : nullptr;
+        // The resolver's context is the terminal the cells came from, so a cell's
+        // cluster is read back from the same model that holds its base code point.
+        in.clusterResolverContext = term;
+        in.clusterResolver = [](const Ubiquitty::Cell* cell, std::span<std::uint32_t> codePoints, void* terminal) -> int {
+            const auto* owner = static_cast<const Ubiquitty::Terminal*>(terminal);
+            return Ubiquitty::cellClusterCodePoints(owner, cell, codePoints.data(), static_cast<int>(codePoints.size()));
+        };
+        in.rows = rows;
+        in.columns = columns;
+        in.palette = &term->palette;
+        in.textSizeTable = &term->textSizeTable;
+        in.ambiguousWidth = term->ambiguousWidth;
+        in.screenReverse = Ubiquitty::isReverseVideo(term);
+        const Rendering::RenderConfiguration& configuration = rasterContext.renderConfiguration();
+        in.brightenBold = configuration.shouldBrightenBold;
+        // The bitmap-tier flag the CPU raster takes from the same setting, so the
+        // shaders quantise exactly when SoftwareRenderer does.
+        in.isBitmapFace = rasterContext.embeddedBitmapScale() > 0;
+        m_isBitmapTier = in.isBitmapFace;
+        in.selectionSpans = selectionSpans.data();
+        in.selectionSpanCount = static_cast<int>(selectionSpans.size());
+        // The fill the CPU path's capture resolves: the configured selection
+        // style, over the host's OSC 17 colour when it named one. This arm has no
+        // platform selection colour to offer.
+        const Rendering::Vec4 hostSelection { term->selectionBackgroundRed / 65535.0f, term->selectionBackgroundGreen / 65535.0f,
+            term->selectionBackgroundBlue / 65535.0f, 1.0f };
+        const Rendering::SelectionFill selectionFill = Rendering::resolveSelectionFill(
+            configuration.selectionStyle, Rendering::Vec4 {}, term->selectionBackgroundSet ? &hostSelection : nullptr);
+        in.selectionColor = selectionFill.color;
+        in.isSelectionBehindText = !selectionSpans.empty() && selectionFill.isBehindText;
+        // A selection behind the text is in the pair's pixels and in no cell, so
+        // the rows it reaches and leaves are marked here, beside the drain's.
+        if (drawsThroughRetainedTarget)
+            Rendering::markBakedSelectionRows(m_bakedSelection,
+                in.isSelectionBehindText ? std::span<const Rendering::SelectionRowSpan>(selectionSpans) : std::span<const Rendering::SelectionRowSpan> {},
+                selectionFill.color, framePlan.damage, m_rowDirty);
+        in.searchMatchSpans = searchMatchSpans.data();
+        in.searchMatchSpanCount = static_cast<int>(searchMatchSpans.size());
+        in.searchMatchHighlight = focusedSearchMatchHighlightColor();
+        in.focusedMatchAgeSeconds = m_focusedMatchBounce.ageSeconds(Screen::ScrollSearch::activeMatchEpoch(*term), blinkTicks);
+        m_focusedMatchAgeSeconds = in.focusedMatchAgeSeconds;
+        in.otherSearchMatchSpans = otherSearchMatchSpans.data();
+        in.otherSearchMatchSpanCount = static_cast<int>(otherSearchMatchSpans.size());
+        in.triggerHighlightSpans = triggerHighlightSpans.data();
+        in.triggerHighlightSpanCount = static_cast<int>(triggerHighlightSpans.size());
+        in.hiliteRegionSpans = hiliteSpans.data();
+        in.hiliteRegionSpanCount = static_cast<int>(hiliteSpans.size());
+        in.backgroundOpacity = rasterContext.backgroundOpacity();
+        in.shouldEnhanceTextContrast = configuration.shouldEnhanceTextContrast;
+        // SGR 5/6 text blink through the shared cell builder + Core curve: gated on
+        // hasBlinkHint; blinkTicks==0 holds blink text fully opaque.
+        in.resolveBlink = term->grid != nullptr && term->grid->hasBlinkHint();
+        in.blinkTicks = blinkTicks;
+        // The cursor is built through the same shared fillCursorState helper the CPU
+        // path uses, so both backends land identically.
+        in.cursor = cursorState;
+
+        // CellMetrics from the atlas's rasterizer — exactly as SoftwareRenderer::render
+        // does (the same instance), so the decoration + glyph geometry line up.
+        in.metrics = m_fontAtlas->atlas->rasterizer().cellMetrics();
+        const auto glyphGeometry = glyphSlotGeometryForRasterizer(m_fontAtlas->atlas->rasterizer());
+        in.glyphReferenceAdvanceInPixels = glyphGeometry.referenceAdvanceInPixels;
+        in.glyphReferenceLineHeightInPixels = glyphGeometry.referenceLineHeightInPixels;
+        in.glyphBoxWidthInPixels = static_cast<float>(glyphGeometry.glyphWidthInPixels);
+        // The CPU path reaches this through TerminalFrameInputs::capture, which this
+        // one does not run. Left out, the two arms disagree about every rule the
+        // configuration styles — and the oracle that compares them renders both from
+        // the same face, so it reports the disagreement as a GPU fault.
+        Rendering::TerminalSnapshotStyle style;
+        Preferences::Effective::applyRuleSettings(style, configuration, static_cast<double>(rasterContext.deviceScale()));
+        Rendering::applyRuleStyle(in.metrics, style);
+        // The rest of the rule settings the CPU capture reads from the same style.
+        in.drawsBrailleGrid = style.shouldDrawBrailleGrid;
+        in.brailleStyle = style.brailleStyle;
+        in.shadeStyle = style.shadeStyle;
+        // The point space the CPU path is given through applyPointSpace: the
+        // cursor's thin shapes are defined in points, and a pass that leaves these
+        // at zero draws them at one pixel per point — half the width the CPU raster
+        // of the same window draws at a backing scale of two.
+        in.cellHeightPoints = static_cast<double>(in.metrics.cellHeight) / static_cast<double>(rasterContext.deviceScale());
+        in.lineSpacingPoints = configuration.lineSpacingPoints;
+        in.toolkitCaret = rasterContext.toolkitCaret();
+        if (configuration.shouldUnderlineLinks) {
+            if (!m_liveLinkInputs)
+                m_liveLinkInputs = std::make_unique<Rendering::TerminalFrameInputs>();
+            Rendering::FrameSource linkSource;
+            linkSource.cells = in.cells;
+            linkSource.lineAttributes = in.lineAttributes;
+            linkSource.rowFlags = in.rowFlags;
+            linkSource.rows = rows;
+            linkSource.columns = columns;
+            linkSource.scrollbackCount = Screen::scrollbackCount(term);
+            linkSource.palette = &term->palette;
+            linkSource.paletteGeneration = term->paletteEpoch;
+            linkSource.hasPaletteGeneration = true;
+            Rendering::TerminalSnapshotOptions linkOptions;
+            linkOptions.drawCursor = false;
+            linkOptions.viewOffset = viewOffset;
+            linkOptions.dirtyRows = in.dirtyRows;
+            rasterContext.applyFrameLinkOptions(linkOptions, *term, viewOffset);
+            if (m_liveLinkInputs->capture(linkSource, linkOptions, in.metrics, {})) {
+                const auto& resolved = m_liveLinkInputs->inputs();
+                in.linkCells = resolved.linkCells;
+                in.linkColor = resolved.linkColor;
+                in.linkHoverColor = resolved.linkHoverColor;
+                in.linkUnderlineStyle = resolved.linkUnderlineStyle;
+                in.linkUnderlineStyleFile = resolved.linkUnderlineStyleFile;
+                in.linkUnderlineStyleMailto = resolved.linkUnderlineStyleMailto;
+            }
+        } else {
+            m_liveLinkInputs.reset();
+        }
+
+        // Subpixel overflow pass: route mono glyphs with ink past the cell box through
+        // the glyph pass with margins so they render uncropped. The same margins the
+        // atlas slot was sized to (computeGlyphSlot over the rasterizer's overhang).
+        // Zero overhang (Unifont) ⇒ off (cell-baked path). The CPU path computes the
+        // identical fields over the same rasterizer.
+        in.subpixelGlyphs = glyphGeometry.glyphMarginInPixels.width > 0 || glyphGeometry.glyphMarginInPixels.height > 0;
+        in.glyphMarginInPixels.width = static_cast<float>(glyphGeometry.glyphMarginInPixels.width);
+        in.glyphMarginInPixels.height = static_cast<float>(glyphGeometry.glyphMarginInPixels.height);
+        in.glyphSlotWidthInPixels = static_cast<float>(glyphGeometry.slotWidthInPixels);
+        in.glyphSlotHeightInPixels = static_cast<float>(glyphGeometry.slotHeightInPixels);
+    }
 
     // One cell over the grid: the cursor tier repeats the cursor's cell at the
     // tail of every stream (InstanceCounts::cursorTier), and every capacity
@@ -2504,16 +2704,16 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
     // One colour glyph per cell at most: an emoji spans two columns, so a screen
     // of them fills half the cells, and sizing to the cell count is the bound
     // that cannot be exceeded rather than the one that is usually right.
-    const std::size_t colorCapacity = m_colorAtlas->hasColorSource() ? cellCapacity : 0;
+    const std::size_t colorCapacity = m_fontAtlas->colorAtlas->hasColorSource() ? cellCapacity : 0;
     // One strip slice per covered cell at most, so the cell count bounds it for
     // the same reason the colour stream's does.
-    const bool canShapeLigatures = m_ligatureSheet && m_ligatureSheet->isUsable();
+    const bool canShapeLigatures = m_fontAtlas->ligatureSheet && m_fontAtlas->ligatureSheet->isUsable();
     const std::size_t ligatureCapacity = canShapeLigatures ? cellCapacity : 0;
-    const bool canShapeProportional = m_proportionalSheet
-        && m_proportionalSheet->isUsable();
-    const bool canShapeProportionalStrips = m_proportionalStripSheet
-        && m_proportionalStripSheet->isUsable()
-        && m_proportionalStripSheet->hasProportionalFace();
+    const bool canShapeProportional = m_fontAtlas->proportionalSheet
+        && m_fontAtlas->proportionalSheet->isUsable();
+    const bool canShapeProportionalStrips = m_fontAtlas->proportionalStripSheet
+        && m_fontAtlas->proportionalStripSheet->isUsable()
+        && m_fontAtlas->proportionalStripSheet->hasProportionalFace();
     const std::size_t proportionalCapacity = canShapeProportional
         ? cellCapacity
         : 0;
@@ -2536,15 +2736,15 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
         return false;
     }
 
-    m_atlas->setColorAtlas(&*m_colorAtlas);
-    m_atlas->setProportionalSheet(canShapeProportional
-            ? &*m_proportionalSheet
+    m_fontAtlas->atlas->setColorAtlas(&*m_fontAtlas->colorAtlas);
+    m_fontAtlas->atlas->setProportionalSheet(canShapeProportional
+            ? &*m_fontAtlas->proportionalSheet
             : nullptr);
-    m_atlas->setProportionalStripSheet(canShapeProportionalStrips
-            ? &*m_proportionalStripSheet
+    m_fontAtlas->atlas->setProportionalStripSheet(canShapeProportionalStrips
+            ? &*m_fontAtlas->proportionalStripSheet
             : nullptr);
-    m_atlas->setLigatureSheet(canShapeLigatures ? &*m_ligatureSheet : nullptr);
-    const Rendering::GlyphBackend backend = m_atlas->glyphBackend();
+    m_fontAtlas->atlas->setLigatureSheet(canShapeLigatures ? &*m_fontAtlas->ligatureSheet : nullptr);
+    const Rendering::GlyphBackend backend = m_fontAtlas->atlas->glyphBackend();
 
     auto buildFrame = [&] {
         Rendering::InstanceBuffers buffers;
@@ -2589,13 +2789,17 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
         buffers.letterCapacity = m_letters.size();
         buffers.letterRows = m_letterRows.data();
         buffers.letterRowCapacity = m_letterRows.size();
-        return Rendering::buildCellInstances(in, backend, buffers);
+        const auto capturedScope = canReuseGridTarget ? Rendering::BuildScope::Damaged : Rendering::BuildScope::Whole;
+        if (capturedFrame && capturedView)
+            return capturedFrame->build(backend, buffers, *capturedView, capturedScope);
+        return capturedFrame ? capturedFrame->build(backend, buffers, capturedScope)
+                             : Rendering::buildCellInstances(in, backend, buffers);
     };
     m_rowInkCrossings.assign(static_cast<std::size_t>(rows) + 1, 0);
     // The letters persist across frames, so a row a damage-first build keeps
     // keeps its layout; a grid of another shape starts them over.
     {
-        const std::size_t letterCount = static_cast<std::size_t>(rows) * static_cast<std::size_t>(in.columns);
+        const std::size_t letterCount = static_cast<std::size_t>(rows) * static_cast<std::size_t>(columns);
         if (m_letters.size() != letterCount || m_letterRows.size() != static_cast<std::size_t>(rows)) {
             m_letters.assign(letterCount, Rendering::LetterExtent {});
             m_letterRows.assign(static_cast<std::size_t>(rows), 0u);
@@ -2651,24 +2855,32 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
     if (m_imageQuads.size() < quadCapacity)
         m_imageQuads.resize(quadCapacity);
     const std::span<Image::ImageQuad> quads { m_imageQuads.data(), quadCapacity };
-    const int imageCount = Image::maxTerminalImageCount; // the Terminal's image table is a fixed-size array
-    const std::span<const Image::TerminalImage> storedImages { term->images.stored.data(), static_cast<std::size_t>(imageCount) };
+    const std::span<const Image::TerminalImage> storedImages = capturedFrame ? capturedFrame->images()
+                                                                             : std::span<const Image::TerminalImage> { term->images.stored.data(), Image::maxTerminalImageCount };
+    const int imageCount = static_cast<int>(storedImages.size());
     const FloatSize imageCell { static_cast<float>(m_cellWidth), static_cast<float>(m_cellHeight) };
-    int quadCount = Ubiquitty::Image::resolveImagePlacements(storedImages,
-        { term->images.placements.data(), Image::maxTerminalImagePlacementCount },
-        { columns, rows }, imageCell,
-        /*origin=*/ {}, viewOffset, quads, /*fitOptions=*/ {},
-        term->screens.isUsingAlternateScreen);
-    if (static_cast<std::size_t>(quadCount) < quads.size()) {
-        const Kitty::PlaceholderGrid placeholderGrid {
-            .cells = { in.cells, static_cast<std::size_t>(rows) * static_cast<std::size_t>(columns) },
-            .size = { columns, rows },
-            .readCluster = in.clusterResolver,
-            .readClusterContext = in.clusterResolverContext,
-            .publishedCellPixels = { term->cellPixelWidth, term->cellPixelHeight },
-        };
-        quadCount += Kitty::resolvePlaceholders(placeholderGrid, storedImages, imageCell, /*origin=*/ {},
-            quads.subspan(static_cast<std::size_t>(quadCount)));
+    int quadCount = 0;
+    if (capturedFrame) {
+        const auto capturedQuads = capturedFrame->imageQuads();
+        quadCount = static_cast<int>(std::min(capturedQuads.size(), quads.size()));
+        std::copy_n(capturedQuads.begin(), quadCount, quads.begin());
+    } else {
+        quadCount = Ubiquitty::Image::resolveImagePlacements(storedImages,
+            { term->images.placements.data(), Image::maxTerminalImagePlacementCount },
+            { columns, rows }, imageCell,
+            /*origin=*/ {}, viewOffset, quads, /*fitOptions=*/ {},
+            term->screens.isUsingAlternateScreen);
+        if (static_cast<std::size_t>(quadCount) < quads.size()) {
+            const Kitty::PlaceholderGrid placeholderGrid {
+                .cells = { in.cells, static_cast<std::size_t>(rows) * static_cast<std::size_t>(columns) },
+                .size = { columns, rows },
+                .readCluster = in.clusterResolver,
+                .readClusterContext = in.clusterResolverContext,
+                .publishedCellPixels = { term->cellPixelWidth, term->cellPixelHeight },
+            };
+            quadCount += Kitty::resolvePlaceholders(placeholderGrid, storedImages, imageCell, /*origin=*/ {},
+                quads.subspan(static_cast<std::size_t>(quadCount)));
+        }
     }
 
     std::vector<ImageInstance> imageInstances;
@@ -2702,7 +2914,7 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
             if (std::ranges::find(listed, quad.imageID) == listed.end() && filteredCount < filteredImageIDs.size())
                 filteredImageIDs[filteredCount++] = quad.imageID;
         }
-        if (!m_imageTextures.sync(m_device, m_physical, m_queue, m_commandPool, term->images.stored.data(), imageCount,
+        if (!m_imageTextures.sync(m_device, m_physical, m_queue, m_commandPool, storedImages.data(), imageCount,
                 VulkanImageTextures::QueueState::Idle, { filteredImageIDs.data(), filteredCount }))
             return false;
 
@@ -2717,7 +2929,7 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
             int srcImageWidth = 0;
             int srcImageHeight = 0;
             for (int ii = 0; ii < imageCount; ++ii) {
-                const Ubiquitty::Image::TerminalImage& candidate = term->images.stored[static_cast<std::size_t>(ii)];
+                const Ubiquitty::Image::TerminalImage& candidate = storedImages[static_cast<std::size_t>(ii)];
                 if (candidate.used && candidate.imageID == q.imageID) {
                     srcImageWidth = static_cast<int>(candidate.width);
                     srcImageHeight = static_cast<int>(candidate.height);
@@ -2849,11 +3061,11 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
         // proportional strip, ligature strip and proportional sheet resources
         // below.
         VkDescriptorImageInfo imageInfo[5] {};
-        imageInfo[0].sampler = m_atlas->sampler();
-        imageInfo[0].imageView = m_atlas->view();
+        imageInfo[0].sampler = m_fontAtlas->atlas->sampler();
+        imageInfo[0].imageView = m_fontAtlas->atlas->view();
         imageInfo[0].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        imageInfo[1].sampler = m_colorAtlas->sampler();
-        imageInfo[1].imageView = m_colorAtlas->view();
+        imageInfo[1].sampler = m_fontAtlas->colorAtlas->sampler();
+        imageInfo[1].imageView = m_fontAtlas->colorAtlas->view();
         imageInfo[1].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         imageInfo[2] = imageInfo[0];
         imageInfo[3] = imageInfo[0];
@@ -2881,11 +3093,11 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
     // taps the glyphs of a run drawn glyph by glyph for skip-ink.
     if (canShapeProportional && !m_isProportionalDescriptorWritten) {
         VkDescriptorImageInfo proportionalInfo[5] {};
-        proportionalInfo[0].sampler = m_proportionalImage.sampler();
-        proportionalInfo[0].imageView = m_proportionalImage.view();
+        proportionalInfo[0].sampler = m_fontAtlas->proportionalImage.sampler();
+        proportionalInfo[0].imageView = m_fontAtlas->proportionalImage.view();
         proportionalInfo[0].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        proportionalInfo[1].sampler = m_colorAtlas->sampler();
-        proportionalInfo[1].imageView = m_colorAtlas->view();
+        proportionalInfo[1].sampler = m_fontAtlas->colorAtlas->sampler();
+        proportionalInfo[1].imageView = m_fontAtlas->colorAtlas->view();
         proportionalInfo[1].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         proportionalInfo[2] = proportionalInfo[0];
         proportionalInfo[3] = proportionalInfo[0];
@@ -2904,11 +3116,11 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
     }
     if (canShapeProportionalStrips && !m_isProportionalStripDescriptorWritten) {
         VkDescriptorImageInfo proportionalStripInfo[5] {};
-        proportionalStripInfo[0].sampler = m_proportionalStripImage.sampler();
-        proportionalStripInfo[0].imageView = m_proportionalStripImage.view();
+        proportionalStripInfo[0].sampler = m_fontAtlas->proportionalStripImage.sampler();
+        proportionalStripInfo[0].imageView = m_fontAtlas->proportionalStripImage.view();
         proportionalStripInfo[0].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        proportionalStripInfo[1].sampler = m_colorAtlas->sampler();
-        proportionalStripInfo[1].imageView = m_colorAtlas->view();
+        proportionalStripInfo[1].sampler = m_fontAtlas->colorAtlas->sampler();
+        proportionalStripInfo[1].imageView = m_fontAtlas->colorAtlas->view();
         proportionalStripInfo[1].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         proportionalStripInfo[2] = proportionalStripInfo[0];
         proportionalStripInfo[3] = proportionalStripInfo[0];
@@ -2936,11 +3148,11 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
     // strips for skip-ink.
     if (canShapeLigatures && !m_isLigatureDescriptorWritten) {
         VkDescriptorImageInfo ligatureInfo[5] {};
-        ligatureInfo[0].sampler = m_ligatureImage.sampler();
-        ligatureInfo[0].imageView = m_ligatureImage.view();
+        ligatureInfo[0].sampler = m_fontAtlas->ligatureImage.sampler();
+        ligatureInfo[0].imageView = m_fontAtlas->ligatureImage.view();
         ligatureInfo[0].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        ligatureInfo[1].sampler = m_colorAtlas->sampler();
-        ligatureInfo[1].imageView = m_colorAtlas->view();
+        ligatureInfo[1].sampler = m_fontAtlas->colorAtlas->sampler();
+        ligatureInfo[1].imageView = m_fontAtlas->colorAtlas->view();
         ligatureInfo[1].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         ligatureInfo[2] = ligatureInfo[0];
         ligatureInfo[3] = ligatureInfo[0];
@@ -3004,24 +3216,25 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
     // Every sheet owns its staging bytes until this frame completes. Record
     // their copies before the draw so one submission orders all uploads and
     // rendering, without a host queue wait between individual sheets.
-    if (!m_atlas->recordUpload(m_device, m_commandBuffer)
-        || !m_colorAtlas->recordUpload(m_device, m_commandBuffer))
+    const bool didUploadFontMasks = m_fontAtlas->hasPendingUploads();
+    if (!m_fontAtlas->atlas->recordUpload(m_device, m_commandBuffer)
+        || !m_fontAtlas->colorAtlas->recordUpload(m_device, m_commandBuffer))
         return false;
     if (canShapeProportional) {
-        const Rendering::AtlasRowBand dirty = m_proportionalSheet->dirtyRows();
-        if ((!m_proportionalImage.isReadable() || dirty.rowCount > 0)
-            && !m_proportionalImage.recordUpload(m_device, m_commandBuffer,
-                m_proportionalSheet->coverage(), dirty.firstRow, dirty.rowCount))
+        const Rendering::AtlasRowBand dirty = m_fontAtlas->proportionalSheet->dirtyRows();
+        if ((!m_fontAtlas->proportionalImage.isReadable() || dirty.rowCount > 0)
+            && !m_fontAtlas->proportionalImage.recordUpload(m_device, m_commandBuffer,
+                m_fontAtlas->proportionalSheet->coverage(), dirty.firstRow, dirty.rowCount))
             return false;
     }
     if (canShapeProportionalStrips
-        && (m_proportionalStripSheet->isDirty() || !m_proportionalStripImage.isReadable())
-        && !m_proportionalStripImage.recordUpload(m_device, m_commandBuffer,
-            m_proportionalStripSheet->coverage(), 0, m_proportionalStripSheet->heightInPixels()))
+        && (m_fontAtlas->proportionalStripSheet->isDirty() || !m_fontAtlas->proportionalStripImage.isReadable())
+        && !m_fontAtlas->proportionalStripImage.recordUpload(m_device, m_commandBuffer,
+            m_fontAtlas->proportionalStripSheet->coverage(), 0, m_fontAtlas->proportionalStripSheet->heightInPixels()))
         return false;
-    if (canShapeLigatures && (m_ligatureSheet->isDirty() || !m_ligatureImage.isReadable())
-        && !m_ligatureImage.recordUpload(m_device, m_commandBuffer,
-            m_ligatureSheet->coverage(), 0, m_ligatureSheet->heightInPixels()))
+    if (canShapeLigatures && (m_fontAtlas->ligatureSheet->isDirty() || !m_fontAtlas->ligatureImage.isReadable())
+        && !m_fontAtlas->ligatureImage.recordUpload(m_device, m_commandBuffer,
+            m_fontAtlas->ligatureSheet->coverage(), 0, m_fontAtlas->ligatureSheet->heightInPixels()))
         return false;
 
     // A retained frame draws its grid passes into the pair, never into
@@ -3554,23 +3767,36 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
     if (vkQueueWaitIdle(m_queue) != VK_SUCCESS)
         return false;
     m_lastFrameWaitSeconds = static_cast<double>(static_cast<std::uint32_t>(PAL::monotonicMicros() - waitStartMicros)) / 1e6;
-    m_atlas->didUpload();
-    m_colorAtlas->didUpload();
-    m_proportionalImage.didUpload();
-    m_proportionalStripImage.didUpload();
-    m_ligatureImage.didUpload();
+    if (m_fontAtlasLease)
+        m_fontAtlas->retainViewLease(*m_fontAtlasLease);
+    if (didUploadFontMasks)
+        ++m_fontAtlas->uploadBatches;
+    m_fontAtlas->atlas->didUpload();
+    m_fontAtlas->colorAtlas->didUpload();
+    m_fontAtlas->proportionalImage.didUpload();
+    m_fontAtlas->proportionalStripImage.didUpload();
+    m_fontAtlas->ligatureImage.didUpload();
     if (canShapeProportional)
-        m_proportionalSheet->didUpload();
+        m_fontAtlas->proportionalSheet->didUpload();
     if (canShapeProportionalStrips)
-        m_proportionalStripSheet->clearDirty();
+        m_fontAtlas->proportionalStripSheet->clearDirty();
     if (canShapeLigatures)
-        m_ligatureSheet->clearDirty();
+        m_fontAtlas->ligatureSheet->clearDirty();
     // The pair now holds the pixels the CPU baseline describes; only a frame
     // that reached its submit may say so. A frame with a picture under its
     // text inked the target and left the pair its ground alone, so its pair
     // describes nothing a later frame may load.
     if (drawsThroughRetainedTarget && !hasImagesUnderText)
         m_hasRetainedTarget = true;
+    if (capturedFrame && m_hasRetainedTarget) {
+        m_capturedTargetOwner = term;
+        m_capturedTargetSequence = capturedFrame->sequence();
+        m_capturedTargetViewGeneration = capturedFrame->viewGeneration();
+        m_capturedTargetPaletteGeneration = capturedFrame->paletteGeneration();
+        m_capturedTargetConfiguration = rasterContext.renderConfiguration();
+        m_doesCapturedTargetHaveViewTiers = hasCapturedViewTiers;
+        m_doesCapturedTargetHaveImages = hasCapturedImages;
+    }
     if (canReuseGridTarget)
         ++m_partialFrameCount;
 
