@@ -93,12 +93,16 @@ extension TerminalSurface {
         let insets = renderer.gridInsets(for: self)
         guard let picture = renderer.presentedGeometry(for: self) else { return nil }
         guard picture.columns > 0, picture.rows > 0 else { return nil }
-        guard let position = Ubiquitty.Rendering.pointToCellIfInside(
-            Ubiquitty.DoublePoint(x: Double(point.x), y: Double(point.y)),
-            Ubiquitty.DoublePoint(x: Double(insets.left), y: Double(insets.top)),
-            Ubiquitty.DoubleSize(width: Double(cell.width), height: Double(cell.height)),
-            Ubiquitty.GridSize(columns: picture.columns, rows: picture.rows)
-        ).value else { return nil }
+        guard
+            let position = Ubiquitty.Rendering
+                .pointToCellIfInside(
+                    Ubiquitty.DoublePoint(x: Double(point.x), y: Double(point.y)),
+                    Ubiquitty.DoublePoint(x: Double(insets.left), y: Double(insets.top)),
+                    Ubiquitty.DoubleSize(width: Double(cell.width), height: Double(cell.height)),
+                    Ubiquitty.GridSize(columns: picture.columns, rows: picture.rows)
+                )
+                .value
+        else { return nil }
         let column = renderer.letterColumn(for: self, row: position.row, xInCells: Double((point.x - insets.left) / cell.width))
         return (Int(position.row), Int(column ?? position.column))
     }
