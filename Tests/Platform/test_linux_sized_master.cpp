@@ -190,10 +190,9 @@ TEST(testTheMasterStandsAtTheAnchorsSubpixelPen)
     }
 }
 
-// A letter is centred by its own ink, and takes the anchor's pen the same way:
-// the fraction of Core's shift is moved into the outline, so the letter, like
-// the box-drawing piece, moves an eighth of a pixel with each phase and not a
-// whole pixel at the phase where the shift rounds over.
+// Native letters take the renderer's declared phase grid, just as the Vulkan
+// atlas does: Cairo masks have quarter-pixel origins. The placement tolerance
+// holds for every phase the shipping provider accepts.
 TEST(testALetterCentredByItsInkStandsAtTheAnchorsSubpixelPen)
 {
     Linux::FreeTypeRasterizer rasterizer { fontPixelSize, "JetBrains Mono", std::string(), bundled("SymbolsNerdFontMono-Regular.ttf"),
@@ -209,13 +208,15 @@ TEST(testALetterCentredByItsInkStandsAtTheAnchorsSubpixelPen)
     SizedTile tile { 3, 1, 1 };
     double first = 0.0;
     double worst = 0.0;
-    for (std::uint32_t phase = 0; phase < subpixelPhaseCount; ++phase) {
-        REQUIRE(rasteriseSizedWindow(rasterizer, 'I', FontFace::Regular, 0, tile, phase, canvas, master, window));
+    const int phaseCount = rasterizer.glyphPhaseCount();
+    REQUIRE(phaseCount > 1 && phaseCount <= subpixelPhaseCount);
+    for (std::uint32_t phase = 0; phase < static_cast<std::uint32_t>(phaseCount); ++phase) {
+        REQUIRE(rasteriseSizedWindow(rasterizer, 'I', FontFace::Regular, 0, tile, phase, canvas, master, window, phaseCount));
         const double centre = inkCentre(window, canvas.width, canvas.height);
         REQUIRE(centre > 0.0);
         if (phase == 0)
             first = centre;
-        worst = std::max(worst, std::fabs(centre - first - static_cast<double>(phase) / subpixelPhaseCount));
+        worst = std::max(worst, std::fabs(centre - first - static_cast<double>(phase) / phaseCount));
     }
     const std::string where = "a letter strayed " + std::to_string(worst) + " pixels from the pen's phase";
     CHECK_MSG(worst < 0.1, where.c_str());

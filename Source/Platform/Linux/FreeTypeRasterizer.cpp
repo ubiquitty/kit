@@ -1317,16 +1317,20 @@ bool FreeTypeRasterizer::renderGlyphAtCurrentCoordinates(FT_FaceRec_* face, std:
         FT_Set_Transform(face, nullptr, nullptr);
     if (!isLoaded)
         return false;
-    if (!Rendering::tilesOnTextPen(codePoint) && !isUnhinted && face->glyph->format == FT_GLYPH_FORMAT_OUTLINE) {
+    const bool isPrimaryFace = face == m_face || face == m_boldFace || face == m_italicFace || face == m_boldItalicFace;
+    // Cascaded text clusters retain their FreeType attachment path below.
+    // Their unmarked base must use that same mask and baseline; primary text
+    // and adopted symbol faces use native Cairo coverage.
+    const bool usesNativeMask = isPrimaryFace || glyphBaseline == GlyphBaseline::SymbolDesignCenter;
+    if (usesNativeMask && !Rendering::tilesOnTextPen(codePoint) && !isUnhinted && face->glyph->format == FT_GLYPH_FORMAT_OUTLINE) {
         if (!m_nativeClusters)
             m_nativeClusters = std::make_unique<NativeClusterRasterizer>();
         auto font = nativeFont(face, Rendering::FontFace::Regular);
         font.emSize *= master.scale.value();
         font.horizontalScale = master.horizontalScale;
-        const bool isPrimary = face == m_face || face == m_boldFace || face == m_italicFace || face == m_boldItalicFace;
         const auto across = master.horizontalMagnification();
         double penX = across.scaled(std::max(0, (across.unscaled(slotWidth) - roundToInt(m_cellAdvanceInPixels)) / 2));
-        if (!isPrimary) {
+        if (!isPrimaryFace) {
             // Keep Core's existing ink-centred fallback placement. The phase
             // moves the pen, not this anchor, so coverage cannot recenter at a
             // different quarter-pixel phase.
@@ -1343,7 +1347,7 @@ bool FreeTypeRasterizer::renderGlyphAtCurrentCoordinates(FT_FaceRec_* face, std:
         }
         penX += master.shiftX + m_phaseInPixels;
         NativeGlyphBounds bounds;
-        if (!isPrimary && m_nativeClusters->glyphBounds(font, glyphIndex, bounds)) {
+        if (!isPrimaryFace && m_nativeClusters->glyphBounds(font, glyphIndex, bounds)) {
             const double top = baseline + bounds.top;
             baseline += Rendering::fallbackInkTopInSlot(codePoint, top, bounds.height, slotHeight) - top;
         }
@@ -1422,7 +1426,6 @@ bool FreeTypeRasterizer::renderGlyphAtCurrentCoordinates(FT_FaceRec_* face, std:
     // bitmap_top). Core places it horizontally; the bounds checks clamp a wide
     // glyph's overflow instead of spilling into neighbours.
     int destTop = fit.isApplicable ? slotHeight - slot->bitmap_top : baselineY - slot->bitmap_top - (outline ? 0 : roundToInt(symbolRaise));
-    const bool isPrimaryFace = face == m_face || face == m_boldFace || face == m_italicFace || face == m_boldItalicFace;
     if (!fit.isApplicable && !isPrimaryFace)
         destTop = roundToInt(Rendering::fallbackInkTopInSlot(codePoint, destTop, bh, slotHeight));
     // An unhinted load keeps the advance's fraction, which the hinted one
