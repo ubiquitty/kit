@@ -462,6 +462,8 @@ private:
     // Grid renderer state.
     VkRenderPass m_renderPass = VK_NULL_HANDLE;
     VkDescriptorSetLayout m_descriptorSetLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_gridInputSetLayout = VK_NULL_HANDLE;
+    VkDescriptorSet m_gridInputSets[3] = { VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE };
     VkPipelineLayout m_pipelineLayout = VK_NULL_HANDLE;
     VkPipeline m_cellPipeline = VK_NULL_HANDLE;
     VkPipeline m_glyphPipeline = VK_NULL_HANDLE; // subpixel overflow glyph pass

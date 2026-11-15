@@ -28,11 +28,15 @@
 // exercised, and a run with none says that in the same place. A vacuous pass
 // therefore never reads as a working colour path.
 
+#include "Fixtures/ColorEmojiCOLRv0.h"
 #include "Platform/Linux/FreeTypeRasterizer.h"
 
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -42,6 +46,42 @@ constexpr int fontPixelSize = 32;
 constexpr int slotInPixels = 32;
 constexpr std::uint32_t grinningFace = 0x1F600;
 constexpr std::uint32_t latinA = 'a';
+
+/// An owned bundle with a known COLRv0 face, independent of installed fonts.
+class ColorFontFixture {
+public:
+    ColorFontFixture()
+    {
+        char path[] = "/tmp/ubiquitty-colrv0-XXXXXX";
+        if (const auto* directory = ::mkdtemp(path)) {
+            m_directory = directory;
+            std::ofstream file(fontPath(), std::ios::binary);
+            file.write(reinterpret_cast<const char*>(UbiquittyTest::colorEmojiCOLRv0.data()),
+                static_cast<std::streamsize>(UbiquittyTest::colorEmojiCOLRv0.size()));
+            file.close();
+            m_isReady = static_cast<bool>(file);
+        }
+    }
+
+    ~ColorFontFixture()
+    {
+        if (!m_directory.empty()) {
+            std::error_code error;
+            std::filesystem::remove_all(m_directory, error);
+        }
+    }
+
+    ColorFontFixture(const ColorFontFixture&) = delete;
+    ColorFontFixture& operator=(const ColorFontFixture&) = delete;
+
+    [[nodiscard]] bool isReady() const { return m_isReady; }
+    [[nodiscard]] std::string fontPath() const { return (m_directory / "NotoColorEmoji-COLRv1.ttf").string(); }
+    [[nodiscard]] std::string fallbackPath() const { return (m_directory / "absent-symbols.ttf").string(); }
+
+private:
+    std::filesystem::path m_directory;
+    bool m_isReady { false };
+};
 
 Ubiquitty::Linux::FreeTypeRasterizer makeRasterizer()
 {
@@ -397,6 +437,49 @@ TEST(aColourRasterRejectsAnEmptyOrNegativeSlot)
     CHECK(!rasterizer.rasterizeColorCluster(cluster, 1, 0, pixels.data()));
     CHECK(!rasterizer.rasterizeColorCluster(nullptr, 1, slotInPixels, pixels.data()));
     CHECK(!rasterizer.rasterizeColorCluster(cluster, 1, slotInPixels, nullptr));
+}
+
+TEST(aCOLRv0FaceKeepsStraightColoursAndAlphaAcrossSlotSizesAndReload)
+{
+    using Ubiquitty::Linux::ColorGlyphFormat;
+    using Ubiquitty::Linux::FreeTypeRasterizer;
+    ColorFontFixture fixture;
+    REQUIRE(fixture.isReady());
+    REQUIRE(FreeTypeRasterizer::probeColorFace(fixture.fontPath(), 0, fontPixelSize) == ColorGlyphFormat::COLRv0);
+    FreeTypeRasterizer rasterizer { fontPixelSize, "monospace", {}, fixture.fallbackPath() };
+    REQUIRE(rasterizer.hasColorGlyphs());
+    CHECK(rasterizer.colorFacePath() == fixture.fontPath());
+    CHECK(rasterizer.colorGlyphFormat() == ColorGlyphFormat::COLRv0);
+    for (const int side : { 8, 16, 32, 64 }) {
+        std::vector<std::uint8_t> pixels(static_cast<std::size_t>(side) * side * 4, 0x5a);
+        REQUIRE(rasterizer.rasterizeColorCluster(&grinningFace, 1, side, pixels.data()));
+        // The authored face is two solid rectangles. Its transparent blue
+        // must retain saturation after the premultiplied raster is reduced.
+        for (int row = 0; row < side; ++row) {
+            for (int column = 0; column < side; ++column) {
+                const std::size_t offset = (static_cast<std::size_t>(row) * side + column) * 4;
+                const bool isRed = column < side / 2;
+                CHECK_EQ(pixels[offset], isRed ? 255 : 0);
+                CHECK_EQ(pixels[offset + 1], 0);
+                CHECK_EQ(pixels[offset + 2], isRed ? 0 : 255);
+                CHECK_EQ(pixels[offset + 3], isRed ? 255 : 128);
+            }
+        }
+        FreeTypeRasterizer reopened { fontPixelSize, "monospace", {}, fixture.fallbackPath() };
+        std::vector<std::uint8_t> reloaded(pixels.size());
+        REQUIRE(reopened.rasterizeColorCluster(&grinningFace, 1, side, reloaded.data()));
+        CHECK(reloaded == pixels);
+    }
+}
+
+TEST(aColourProbeRejectsMissingFilesAndOrdinaryTextFaces)
+{
+    using Ubiquitty::Linux::ColorGlyphFormat;
+    using Ubiquitty::Linux::FreeTypeRasterizer;
+    ColorFontFixture fixture;
+    REQUIRE(fixture.isReady());
+    CHECK(FreeTypeRasterizer::probeColorFace(fixture.fallbackPath(), 0, fontPixelSize) == ColorGlyphFormat::None);
+    CHECK(FreeTypeRasterizer::probeColorFace(std::string(UBQ_BUNDLED_FONTS_DIR) + "/JetBrainsMono[wght].ttf", 0, fontPixelSize) == ColorGlyphFormat::None);
 }
 
 UBIQUITTY_TEST_MAIN()

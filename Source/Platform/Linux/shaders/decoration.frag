@@ -27,6 +27,7 @@ layout(binding = 0) uniform sampler2D uAtlas;
 layout(binding = 2) uniform sampler2D uProportionalStripSheet;
 layout(binding = 3) uniform sampler2D uLigatureStripSheet;
 layout(binding = 4) uniform sampler2D uProportionalSheet; // the dedicated glyph sheet, for a run drawn glyph by glyph
+layout(input_attachment_index = 0, set = 1, binding = 0) uniform subpassInput uBackground;
 
 layout(location = 0) out vec4 outColor;
 
@@ -147,5 +148,14 @@ void main()
     // so a native face keeps its coverage whole here as it does there.
     if (inBitmapTier > 0.5)
         alpha = floor(alpha * 51.0 + 0.5) / 51.0;
-    outColor = vec4(inColor.rgb, alpha);
+    // Resolve one coverage byte before the over-mix, as the CPU does. The
+    // hardware blend may round each product separately on an eight-bit
+    // target; reading the target keeps the sum's rounding authoritative.
+    int coverage = clamp(int(alpha * 255.0 + 0.5), 0, 255);
+    if (coverage == 0)
+        discard;
+    ivec4 background = ivec4(round(subpassLoad(uBackground) * 255.0));
+    ivec3 foreground = ivec3(round(inColor.rgb * 255.0));
+    ivec3 mixed = (background.rgb * (255 - coverage) + foreground * coverage + ivec3(127)) / 255;
+    outColor = vec4(vec3(mixed) / 255.0, float(background.a) / 255.0);
 }

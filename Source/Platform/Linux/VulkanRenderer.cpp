@@ -744,29 +744,38 @@ bool VulkanRenderer::ensureGridPipelines()
 
     VkAttachmentReference colorRef {};
     colorRef.attachment = 0;
-    colorRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    colorRef.layout = VK_IMAGE_LAYOUT_GENERAL;
 
     VkSubpassDescription subpass {};
     subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
     subpass.colorAttachmentCount = 1;
     subpass.pColorAttachments = &colorRef;
+    subpass.inputAttachmentCount = 1;
+    subpass.pInputAttachments = &colorRef;
 
     // External -> subpass: wait for the prior atlas upload (it transitioned the
     // atlas to SHADER_READ); subpass -> external: make the store visible to the
     // transfer read that copies the image to the staging buffer.
-    VkSubpassDependency deps[2] {};
+    VkSubpassDependency deps[3] {};
     deps[0].srcSubpass = VK_SUBPASS_EXTERNAL;
     deps[0].dstSubpass = 0;
     deps[0].srcStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT;
-    deps[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    deps[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
     deps[0].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    deps[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    deps[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_INPUT_ATTACHMENT_READ_BIT;
     deps[1].srcSubpass = 0;
     deps[1].dstSubpass = VK_SUBPASS_EXTERNAL;
     deps[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
     deps[1].dstStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT;
     deps[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
     deps[1].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    deps[2].srcSubpass = 0;
+    deps[2].dstSubpass = 0;
+    deps[2].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    deps[2].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    deps[2].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    deps[2].dstAccessMask = VK_ACCESS_INPUT_ATTACHMENT_READ_BIT;
+    deps[2].dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
 
     VkRenderPassCreateInfo rpInfo {};
     rpInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
@@ -774,7 +783,7 @@ bool VulkanRenderer::ensureGridPipelines()
     rpInfo.pAttachments = &color;
     rpInfo.subpassCount = 1;
     rpInfo.pSubpasses = &subpass;
-    rpInfo.dependencyCount = 2;
+    rpInfo.dependencyCount = 3;
     rpInfo.pDependencies = deps;
     if (vkCreateRenderPass(m_device, &rpInfo, nullptr, &m_renderPass) != VK_SUCCESS) {
         Ubiquitty::PAL::logLine(stderr, "vulkan: vkCreateRenderPass failed building the grid pipelines");
@@ -826,6 +835,19 @@ bool VulkanRenderer::ensureGridPipelines()
         return false;
     }
 
+    // Rule blending reads the current target, including the glyphs beneath
+    // it. Separate sets keep the composited target and both retained images
+    // immutable while commands for the whole frame are recorded.
+    VkDescriptorSetLayoutBinding inputBinding {};
+    inputBinding.binding = 0;
+    inputBinding.descriptorType = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
+    inputBinding.descriptorCount = 1;
+    inputBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    dslInfo.bindingCount = 1;
+    dslInfo.pBindings = &inputBinding;
+    if (vkCreateDescriptorSetLayout(m_device, &dslInfo, nullptr, &m_gridInputSetLayout) != VK_SUCCESS)
+        return false;
+
     // Push constants: { vec2 viewportSize; vec2 cellSize; } (16 bytes), shared
     // by both vertex shaders.
     VkPushConstantRange pushRange {};
@@ -834,8 +856,9 @@ bool VulkanRenderer::ensureGridPipelines()
     pushRange.size = sizeof(float) * 8;
     VkPipelineLayoutCreateInfo plInfo {};
     plInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    plInfo.setLayoutCount = 1;
-    plInfo.pSetLayouts = &m_descriptorSetLayout;
+    const VkDescriptorSetLayout gridLayouts[] = { m_descriptorSetLayout, m_gridInputSetLayout };
+    plInfo.setLayoutCount = 2;
+    plInfo.pSetLayouts = gridLayouts;
     plInfo.pushConstantRangeCount = 1;
     plInfo.pPushConstantRanges = &pushRange;
     if (vkCreatePipelineLayout(m_device, &plInfo, nullptr, &m_pipelineLayout) != VK_SUCCESS) {
@@ -843,23 +866,20 @@ bool VulkanRenderer::ensureGridPipelines()
         return false;
     }
 
-    VkDescriptorPoolSize poolSize {};
-    poolSize.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    // Two descriptors of the one type, in the one set. `maxSets` stays 1: the
-    // count here is descriptors, not sets, and sizing it to the sets rather than
-    // to their contents is what makes vkAllocateDescriptorSets fail with
-    // OUT_OF_POOL_MEMORY on a layout that grew.
-    //
-    // Four sets of five, because proportional glyphs, proportional fallback
+    // Four sets of five samplers, because proportional glyphs, proportional fallback
     // strips, and ligature strips each draw through the mono pipeline over a
     // sheet of their own. Vulkan spells
-    // "same pipeline, other texture" as another descriptor set.
-    poolSize.descriptorCount = 20;
+    // "same pipeline, other texture" as another descriptor set. Three input
+    // sets separately name the composed target and both retained targets.
+    const VkDescriptorPoolSize poolSizes[] = {
+        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 20 },
+        { VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 3 }
+    };
     VkDescriptorPoolCreateInfo dpInfo {};
     dpInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    dpInfo.maxSets = 4;
-    dpInfo.poolSizeCount = 1;
-    dpInfo.pPoolSizes = &poolSize;
+    dpInfo.maxSets = 7;
+    dpInfo.poolSizeCount = 2;
+    dpInfo.pPoolSizes = poolSizes;
     if (vkCreateDescriptorPool(m_device, &dpInfo, nullptr, &m_descriptorPool) != VK_SUCCESS) {
         Ubiquitty::PAL::logLine(stderr, "vulkan: vkCreateDescriptorPool failed building the grid pipelines");
         return false;
@@ -882,6 +902,11 @@ bool VulkanRenderer::ensureGridPipelines()
     m_proportionalDescriptorSet = allocatedSets[1];
     m_proportionalStripDescriptorSet = allocatedSets[2];
     m_ligatureDescriptorSet = allocatedSets[3];
+    const VkDescriptorSetLayout inputLayouts[] = { m_gridInputSetLayout, m_gridInputSetLayout, m_gridInputSetLayout };
+    dsAlloc.descriptorSetCount = 3;
+    dsAlloc.pSetLayouts = inputLayouts;
+    if (vkAllocateDescriptorSets(m_device, &dsAlloc, m_gridInputSets) != VK_SUCCESS)
+        return false;
 
     VkShaderModule cellVert = loadShader("cell.vert.spv");
     VkShaderModule cellFrag = loadShader("cell.frag.spv");
@@ -1058,7 +1083,7 @@ bool VulkanRenderer::ensureGridPipelines()
     if (ok)
         ok = buildPipeline(glyphVert, glyphFrag, sizeof(Rendering::GlyphInstance), glyphAttributes, glyphAttributeCount, PipelineBlend::InkOver, &m_glyphOverTargetPipeline, &overTargetSpecialization);
     if (ok)
-        ok = buildPipeline(decoVert, decoFrag, sizeof(Rendering::DecorationInstance), decoAttributes, static_cast<uint32_t>(sizeof(decoAttributes) / sizeof(decoAttributes[0])), PipelineBlend::OverKeepingAlpha, &m_decorationPipeline);
+        ok = buildPipeline(decoVert, decoFrag, sizeof(Rendering::DecorationInstance), decoAttributes, static_cast<uint32_t>(sizeof(decoAttributes) / sizeof(decoAttributes[0])), PipelineBlend::Opaque, &m_decorationPipeline);
     // The colour pass consumes GlyphInstance and its attributes unchanged — the
     // stream the builder fills is the same shape as the mono one, and only what
     // the shaders do with it differs.
@@ -1152,6 +1177,8 @@ void VulkanRenderer::destroyGridPipelines()
         m_proportionalDescriptorSet = VK_NULL_HANDLE;
         m_proportionalStripDescriptorSet = VK_NULL_HANDLE;
         m_ligatureDescriptorSet = VK_NULL_HANDLE;
+        for (auto& input : m_gridInputSets)
+            input = VK_NULL_HANDLE;
         m_isProportionalDescriptorWritten = false;
         m_isProportionalStripDescriptorWritten = false;
         m_isLigatureDescriptorWritten = false;
@@ -1164,6 +1191,10 @@ void VulkanRenderer::destroyGridPipelines()
     if (m_descriptorSetLayout) {
         vkDestroyDescriptorSetLayout(m_device, m_descriptorSetLayout, nullptr);
         m_descriptorSetLayout = VK_NULL_HANDLE;
+    }
+    if (m_gridInputSetLayout) {
+        vkDestroyDescriptorSetLayout(m_device, m_gridInputSetLayout, nullptr);
+        m_gridInputSetLayout = VK_NULL_HANDLE;
     }
     if (m_gridLoadRenderPass) {
         vkDestroyRenderPass(m_device, m_gridLoadRenderPass, nullptr);
@@ -1208,7 +1239,7 @@ bool VulkanRenderer::ensureRetainedGridImages(uint32_t width, uint32_t height)
         ic.tiling = VK_IMAGE_TILING_OPTIMAL;
         // Color target for the grid passes, transfer source for the band and
         // full-image copies, transfer destination for the bands it receives.
-        ic.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        ic.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
         ic.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
         ic.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         if (vkCreateImage(m_device, &ic, nullptr, &m_gridImages[i]) != VK_SUCCESS)
@@ -3290,6 +3321,22 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
         m_gridFrontIndex = backIndex;
     }
 
+    const VkImageView inputViews[] = { m_colorView,
+        m_gridImageViews[0] ? m_gridImageViews[0] : m_colorView,
+        m_gridImageViews[1] ? m_gridImageViews[1] : m_colorView };
+    for (std::size_t index = 0; index < std::size(m_gridInputSets); ++index) {
+        VkDescriptorImageInfo input {};
+        input.imageView = inputViews[index];
+        input.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        VkWriteDescriptorSet write {};
+        write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write.dstSet = m_gridInputSets[index];
+        write.descriptorCount = 1;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
+        write.pImageInfo = &input;
+        vkUpdateDescriptorSets(m_device, 1, &write, 0, nullptr);
+    }
+
     VkClearValue clear {};
     clear.color = { { 0.0f, 0.0f, 0.0f, 1.0f } }; // opaque black; the cell pass repaints every background
     VkRenderPassBeginInfo rpBegin {};
@@ -3316,6 +3363,9 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
         m_isBitmapTier ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f };
     vkCmdPushConstants(m_commandBuffer, m_pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(push), push);
     vkCmdBindDescriptorSets(m_commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelineLayout, 0, 1, &m_descriptorSet, 0, nullptr);
+
+    const VkDescriptorSet gridInput = m_gridInputSets[drawsThroughRetainedTarget ? 1 + m_gridFrontIndex : 0];
+    vkCmdBindDescriptorSets(m_commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelineLayout, 1, 1, &gridInput, 0, nullptr);
 
     const VkDeviceSize offset = 0;
     // Which half of the grid a draw of its streams paints. A frame with a
@@ -3435,7 +3485,41 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
         if (decorations.count > 0) {
             vkCmdBindPipeline(m_commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_decorationPipeline);
             vkCmdBindVertexBuffers(m_commandBuffer, 0, 1, &m_decorationBuffer, &offset);
-            vkCmdDraw(m_commandBuffer, 6, decorations.count, 0, decorations.first);
+            const auto synchronizeRules = [&] {
+                VkMemoryBarrier barrier {};
+                barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+                barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+                barrier.dstAccessMask = VK_ACCESS_INPUT_ATTACHMENT_READ_BIT;
+                vkCmdPipelineBarrier(m_commandBuffer, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_DEPENDENCY_BY_REGION_BIT, 1, &barrier, 0, nullptr, 0, nullptr);
+            };
+            // Adjacent rules share a draw. Only overlapping bounds split a
+            // batch, making every read observe earlier rule writes without
+            // turning a row of underlines into one draw per cell.
+            const auto* rules = static_cast<const Rendering::DecorationInstance*>(m_decorationMapped);
+            uint32_t first = decorations.first;
+            auto minimum = rules[first].topLeftInPixels;
+            auto maximum = rules[first].bottomRightInPixels;
+            synchronizeRules();
+            const uint32_t end = decorations.first + decorations.count;
+            for (uint32_t index = first + 1; index < end; ++index) {
+                const auto& rule = rules[index];
+                const bool doesOverlap = rule.topLeftInPixels.x < maximum.x && rule.bottomRightInPixels.x > minimum.x
+                    && rule.topLeftInPixels.y < maximum.y && rule.bottomRightInPixels.y > minimum.y;
+                if (doesOverlap) {
+                    vkCmdDraw(m_commandBuffer, 6, index - first, 0, first);
+                    synchronizeRules();
+                    first = index;
+                    minimum = rule.topLeftInPixels;
+                    maximum = rule.bottomRightInPixels;
+                } else {
+                    minimum.x = std::min(minimum.x, rule.topLeftInPixels.x);
+                    minimum.y = std::min(minimum.y, rule.topLeftInPixels.y);
+                    maximum.x = std::max(maximum.x, rule.bottomRightInPixels.x);
+                    maximum.y = std::max(maximum.y, rule.bottomRightInPixels.y);
+                }
+            }
+            vkCmdDraw(m_commandBuffer, 6, end - first, 0, first);
         }
     };
     const auto drawCursorTier = [&]() {
@@ -3634,6 +3718,7 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
         vkCmdSetScissor(m_commandBuffer, 0, 1, &scissor);
         vkCmdPushConstants(m_commandBuffer, m_pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(push), push);
         vkCmdBindDescriptorSets(m_commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelineLayout, 0, 1, &m_descriptorSet, 0, nullptr);
+        vkCmdBindDescriptorSets(m_commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelineLayout, 1, 1, &m_gridInputSets[0], 0, nullptr);
         drawGridStreams(GridPaint::Ink, headOf(cellDraw, cellTier), {}, headOf(glyphDraw, glyphTier), headOf(wideDraw, wideTier), headOf(proportionalDraw, proportionalTier),
             headOf(proportionalStripDraw, proportionalStripTier), headOf(colorDraw, colorTier),
             headOf(ligatureDraw, ligatureTier), headOf(decorationDraw, decorationTier));
@@ -3659,6 +3744,7 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
         vkCmdSetScissor(m_commandBuffer, 0, 1, &scissor);
         vkCmdPushConstants(m_commandBuffer, m_pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(push), push);
         vkCmdBindDescriptorSets(m_commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelineLayout, 0, 1, &m_descriptorSet, 0, nullptr);
+        vkCmdBindDescriptorSets(m_commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelineLayout, 1, 1, &m_gridInputSets[0], 0, nullptr);
         drawCursorTier();
         vkCmdEndRenderPass(m_commandBuffer);
     }
