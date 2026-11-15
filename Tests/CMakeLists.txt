@@ -209,8 +209,7 @@ if(TARGET test_typed_pasteboard)
     target_link_options(test_typed_pasteboard PRIVATE "$<$<LINK_LANGUAGE:Swift>:-cxx-interoperability-mode=default>")
 endif()
 
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET test_linux_rich_text test_linux_pango_raster
-    test_linux_color_emoji test_linux_fallback_face test_linux_sized_master test_linux_proportional_at_size test_linux_shared_fonts)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET test_linux_rich_text)
     # The native family-selection test must have real fonts even in a minimal
     # image. Add the shipped files as application startup does; keep the native
     # system inventory so enumeration still exercises its actual family map.

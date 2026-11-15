@@ -308,7 +308,7 @@ TEST(aBitmapTierRunAtAScaleIsTheProportionalFaceAtSize)
 // rasterizer draws for a plain run at that pixel size.
 TEST(aFreeTypeTierRunAtAScaleIsTheProportionalFaceAtSize)
 {
-    constexpr int pixelSize = 14;
+    constexpr double pixelSize = 14;
     Linux::FreeTypeRasterizer base { pixelSize, "JetBrains Mono", std::string(), bundled("SymbolsNerdFontMono-Regular.ttf"), bundled("JetBrainsMono[wght].ttf") };
     REQUIRE(base.ready() && base.hasProportionalFace());
     const Plane small = renderRun(base, U"o", 2, 1);

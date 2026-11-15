@@ -55,7 +55,7 @@ TEST(eachNativeConstructionInputIsolatedByTheCanonicalCoreIdentity)
     using namespace Ubiquitty::Linux;
     auto first = SharedFontResources::acquire(request());
     REQUIRE(first);
-    for (auto member : { &SharedFontRequest::pixelSize, &SharedFontRequest::deviceScale,
+    for (auto member : { &SharedFontRequest::deviceScale,
              &SharedFontRequest::lineSpacing, &SharedFontRequest::tracking,
              &SharedFontRequest::uprightWeight, &SharedFontRequest::boldWeight, &SharedFontRequest::bitmapScale }) {
         auto changed = request();
@@ -63,7 +63,7 @@ TEST(eachNativeConstructionInputIsolatedByTheCanonicalCoreIdentity)
         auto other = SharedFontResources::acquire(std::move(changed));
         CHECK(other && other != first);
     }
-    for (auto member : { &SharedFontRequest::pointSize, &SharedFontRequest::pixelsPerPoint, &SharedFontRequest::widthPercent }) {
+    for (auto member : { &SharedFontRequest::pixelSize, &SharedFontRequest::pointSize, &SharedFontRequest::pixelsPerPoint, &SharedFontRequest::widthPercent }) {
         auto changed = request();
         changed.*member = std::nextafter(changed.*member, std::numeric_limits<double>::infinity());
         CHECK(SharedFontResources::acquire(std::move(changed)) != first);

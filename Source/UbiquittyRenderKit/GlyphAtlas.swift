@@ -1372,7 +1372,14 @@ extension GlyphAtlas: GlyphSource {
             )
             rasterizer.rasterise(
                 line: line,
-                at: monoPen(codePoint, glyphs[0], in: drawFont, primary: font, face: face, phase: Ubiquitty.Rendering.variantPhase(variant)),
+                at: monoPen(
+                    codePoint,
+                    glyphs[0],
+                    in: drawFont,
+                    primary: font,
+                    face: face,
+                    phase: Ubiquitty.Rendering.variantPhase(variant)
+                ),
                 style: rasterStyle(for: variant)
             )
         } else if !Ubiquitty.Rendering.tilingReach(codePoint).isTilingPiece && !stemFromDonor {
@@ -1380,7 +1387,14 @@ extension GlyphAtlas: GlyphSource {
             rasterizer.enqueue(
                 glyph: glyphs[0],
                 in: drawFont,
-                at: monoPen(codePoint, glyphs[0], in: drawFont, primary: font, face: face, phase: Ubiquitty.Rendering.variantPhase(variant)),
+                at: monoPen(
+                    codePoint,
+                    glyphs[0],
+                    in: drawFont,
+                    primary: font,
+                    face: face,
+                    phase: Ubiquitty.Rendering.variantPhase(variant)
+                ),
                 style: rasterStyle(for: variant)
             ) { [weak self] plane in
                 guard let self else { return }
@@ -1419,7 +1433,14 @@ extension GlyphAtlas: GlyphSource {
                 // the pixel oracle read that as bolder coverage on every column
                 // whose phase is not zero. The slot is a pixel wider than the
                 // glyph box for exactly this shift.
-                at: monoPen(codePoint, glyphs[0], in: drawFont, primary: font, face: face, phase: Ubiquitty.Rendering.variantPhase(variant)),
+                at: monoPen(
+                    codePoint,
+                    glyphs[0],
+                    in: drawFont,
+                    primary: font,
+                    face: face,
+                    phase: Ubiquitty.Rendering.variantPhase(variant)
+                ),
                 style: rasterStyle(for: variant)
             )
         }
@@ -1520,7 +1541,14 @@ extension GlyphAtlas: WideGlyphSource {
     ///   - primary: The primary face for the requested style.
     ///   - phase: The subpixel phase the slot was keyed at.
     /// - Returns: The pen, in pixels from the slot's bottom-left.
-    private func monoPen(_ codePoint: UInt32, _ glyph: CGGlyph, in font: CTFont, primary: CTFont, face: Ubiquitty.Rendering.FontFace, phase: UInt32) -> CGPoint {
+    private func monoPen(
+        _ codePoint: UInt32,
+        _ glyph: CGGlyph,
+        in font: CTFont,
+        primary: CTFont,
+        face: Ubiquitty.Rendering.FontFace,
+        phase: UInt32
+    ) -> CGPoint {
         let subpixel = CGFloat(phase) / CGFloat(subpixelPhaseCount)
         let pen = CGPoint(
             x: CGFloat(geometry.glyphMarginInPixels.width) + subpixel,
@@ -1550,7 +1578,12 @@ extension GlyphAtlas: WideGlyphSource {
         return symbolBaselineRaise(codePoint, font: font, face: face, cluster: points.span)
     }
 
-    private func symbolBaselineRaise(_ codePoint: UInt32, font: CTFont, face: Ubiquitty.Rendering.FontFace, cluster: Span<UInt32>) -> CGFloat {
+    private func symbolBaselineRaise(
+        _ codePoint: UInt32,
+        font: CTFont,
+        face: Ubiquitty.Rendering.FontFace,
+        cluster: Span<UInt32>
+    ) -> CGFloat {
         guard Ubiquitty.Rendering.Font.isPrivateUse(codePoint),
             !Ubiquitty.Rendering.tilesOnTextPen(codePoint),
             font !== faces[face]
@@ -1558,10 +1591,14 @@ extension GlyphAtlas: WideGlyphSource {
         guard router?.usesSymbolFallback(for: cluster, face: face, font: font) == true else { return 0 }
         let regular = faces[Ubiquitty.Rendering.FontFace.Regular]
         let scale = CTFontGetSize(font) / CTFontGetSize(regular)
-        return CGFloat(Ubiquitty.Rendering.symbolFallbackBaselineRaise(
-            Double(CTFontGetAscent(regular) * scale), Double(CTFontGetDescent(regular) * scale),
-            Double(CTFontGetAscent(font)), Double(CTFontGetDescent(font))
-        ))
+        return CGFloat(
+            Ubiquitty.Rendering.symbolFallbackBaselineRaise(
+                Double(CTFontGetAscent(regular) * scale),
+                Double(CTFontGetDescent(regular) * scale),
+                Double(CTFontGetAscent(font)),
+                Double(CTFontGetDescent(font))
+            )
+        )
     }
 
     func rasteriseWideGlyph(_ codePoint: UInt32, face: Ubiquitty.Rendering.FontFace, variant: UInt32, slot: Int32) -> Bool {
@@ -2233,7 +2270,9 @@ extension GlyphAtlas: SizedGlyphSource {
                             font: font,
                             widened: nil,
                             room: Ubiquitty.Rendering.WidthAxisRoom(),
-                            pen: .placed(wide.centredPen(of: glyph, in: font, raisedBy: wideRaise(for: font, face: face, codePoint: codePoint)))
+                            pen: .placed(
+                                wide.centredPen(of: glyph, in: font, raisedBy: wideRaise(for: font, face: face, codePoint: codePoint))
+                            )
                         ),
                         tile: tile,
                         phase: 0,
