@@ -47,6 +47,7 @@ class HostTestDriver(unittest.TestCase):
             PATH=str(tools) + os.pathsep + os.environ["PATH"],
             UBQ_CORE_ROOT=str(ROOT / "Libraries/ubiquitty-core"),
             UBQ_BUILD_ROOT=str(self.build),
+            NO_CTEST="0", CTEST_BUILD_DIR=str(self.build / "ctest"),
             DRIVER_CMAKE_CALLS=str(self.calls))
         self.driver = scripts / "run-tests.sh"
 
