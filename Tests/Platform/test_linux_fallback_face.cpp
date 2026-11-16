@@ -1224,7 +1224,6 @@ TEST(markedClustersKeepNativeProportionsAndOverhangWhenTheirAdvanceFits)
     const std::array cases {
         ClusterCase { { 0x6f22, 0x301 }, 2 },
         ClusterCase { { 0x8a9e, 0x20dd }, 2 },
-        ClusterCase { { 0x1f469, 0x200d, 0x1f469, 0x200d, 0x1f467, 0x200d, 0x1f467 }, 2 },
         ClusterCase { { 'Z', 0x335, 0x34c, 0x35d, 0x30e, 0x321, 0x320, 0x32b }, 1 },
         ClusterCase { { 0x250, 0x35d, 0x301 }, 1 },
     };
@@ -1263,6 +1262,54 @@ TEST(markedClustersKeepNativeProportionsAndOverhangWhenTheirAdvanceFits)
         }
     }
     CHECK_MSG(hasMarkedOverhang, "fitting leaves zero-advance mark overhang visible outside the cell");
+}
+
+TEST(aColorFamilyPreservesTheNativeMonoRouteAndDrawsItsComposedColorGlyph)
+{
+    CHECK(registerBundledFonts());
+    constexpr std::array<std::uint32_t, 7> family { 0x1f469, 0x200d, 0x1f469, 0x200d, 0x1f467, 0x200d, 0x1f467 };
+    CHECK(!Ubiquitty::Rendering::clusterHorizontalFitEligible(family));
+    for (int size : { 15, 28, 32 }) {
+        Ubiquitty::Linux::FreeTypeRasterizer raster {
+            static_cast<double>(size), "JetBrains Mono", {}, bundled("SymbolsNerdFontMono-Regular.ttf"), bundled("JetBrainsMono[wght].ttf")
+        };
+        CHECK(raster.colorGlyphFormat() == Ubiquitty::Linux::ColorGlyphFormat::COLRv1);
+        const auto metrics = raster.cellMetrics();
+        const int cellWidth = static_cast<int>(metrics.cellWidth);
+        const int width = 2 * cellWidth + 64;
+        const int height = static_cast<int>(metrics.cellHeight) + 128;
+        for (auto style : { Ubiquitty::Rendering::FontFace::Regular, Ubiquitty::Rendering::FontFace::Italic }) {
+            for (double phase : { 0.0, 0.25, 0.75 }) {
+                const Ubiquitty::Rendering::ClusterRasterBounds bounds { 32 + phase, static_cast<double>(2 * cellWidth) };
+                std::vector<std::uint8_t> natural(static_cast<std::size_t>(width) * height), allocated(natural.size());
+                const bool hasNaturalMask = raster.rasterizeClusterAtPhase(family.data(), static_cast<int>(family.size()), style,
+                    0, phase, width, height, natural.data());
+                const bool hasAllocatedMask = raster.rasterizeClusterInCell(family.data(), static_cast<int>(family.size()), style,
+                    0, phase, bounds, width, height, allocated.data());
+                // The text cascade excludes color-only faces. A host's mono
+                // fallback may draw the family, but fitting must preserve
+                // either native result and leave color drawing to its route.
+                CHECK(hasNaturalMask == hasAllocatedMask);
+                CHECK(natural == allocated);
+                CHECK(hasNaturalMask == std::ranges::any_of(natural, [](auto value) { return value != 0; }));
+                CHECK(hasAllocatedMask == std::ranges::any_of(allocated, [](auto value) { return value != 0; }));
+            }
+        }
+
+        const int slot = 2 * cellWidth;
+        std::vector<std::uint8_t> composed(static_cast<std::size_t>(slot) * slot * 4), lead(composed.size());
+        CHECK(raster.rasterizeColorCluster(family.data(), static_cast<int>(family.size()), slot, composed.data()));
+        CHECK(raster.rasterizeColorCluster(family.data(), 1, slot, lead.data()));
+        bool hasComposedInk = false;
+        bool hasLeadInk = false;
+        for (std::size_t offset = 3; offset < composed.size(); offset += 4) {
+            hasComposedInk = hasComposedInk || composed[offset] != 0;
+            hasLeadInk = hasLeadInk || lead[offset] != 0;
+        }
+        CHECK(hasComposedInk);
+        CHECK(hasLeadInk);
+        CHECK_MSG(composed != lead, "the exact family sequence draws its composed color glyph, not the first woman alone");
+    }
 }
 
 TEST(otherScriptsKeepTheirNaturalMasksEvenWhenTheCellAllocationOverflows)
