@@ -156,9 +156,10 @@ enum RasterDriver {
             func hasOutsideInk(_ pixels: [UInt8], left: CGFloat, width: CGFloat) -> Bool {
                 let first = Int(left.rounded(.down))
                 let end = Int((left + width).rounded(.up))
-                return pixels.enumerated().contains { index, coverage in
-                    coverage != 0 && (index % 160 < first || index % 160 >= end)
-                }
+                return pixels.enumerated()
+                    .contains { index, coverage in
+                        coverage != 0 && (index % 160 < first || index % 160 >= end)
+                    }
             }
             let nativeCellAdvance = CGFloat(CTLineGetTypographicBounds(shapedLine("M"), nil, nil, nil))
             for text in ["क्‍ष", "का", "कि", "कााा"] {
@@ -168,7 +169,8 @@ enum RasterDriver {
                 let line = shapedLine(text)
                 check(
                     "the Indic fixture advances beyond one native cell",
-                    CTLineGetTypographicBounds(line, nil, nil, nil) > Double(nativeCellAdvance), text
+                    CTLineGetTypographicBounds(line, nil, nil, nil) > Double(nativeCellAdvance),
+                    text
                 )
                 for cellWidth in [nativeCellAdvance / 2, nativeCellAdvance] {
                     for phase in [CGFloat(0), CGFloat(0.375)] {
@@ -177,7 +179,9 @@ enum RasterDriver {
                         bounds.left = Double(pen.x)
                         bounds.width = Double(cellWidth)
                         let inked = clusterRaster.rasterise(
-                            line: line, at: pen, fittingIn: fitMode == .fitAdvanceOverflow ? bounds : nil
+                            line: line,
+                            at: pen,
+                            fittingIn: fitMode == .fitAdvanceOverflow ? bounds : nil
                         )
                         check("a fitted marked group retains ink", inked, "\(text), width=\(cellWidth)")
                         check(
@@ -186,7 +190,11 @@ enum RasterDriver {
                             "\(text), width=\(cellWidth), phase=\(phase)"
                         )
                         clusterRaster.rasterise(
-                            line: line, at: pen, boostCappedTo: 1.1, sizedBy: glyph(0x4D), in: font,
+                            line: line,
+                            at: pen,
+                            boostCappedTo: 1.1,
+                            sizedBy: glyph(0x4D),
+                            in: font,
                             fittingIn: fitMode == .fitAdvanceOverflow ? bounds : nil
                         )
                         check("a fitted grown group retains ink", clusterRaster.coverage.contains { $0 != 0 })
@@ -225,7 +233,12 @@ enum RasterDriver {
                 clusterRaster.rasterise(line: line, at: pen, boostCappedTo: 1.1, sizedBy: glyph(0x4D), in: font)
                 let grown = clusterRaster.coverage
                 clusterRaster.rasterise(
-                    line: line, at: pen, boostCappedTo: 1.1, sizedBy: glyph(0x4D), in: font, fittingIn: allocation
+                    line: line,
+                    at: pen,
+                    boostCappedTo: 1.1,
+                    sizedBy: glyph(0x4D),
+                    in: font,
+                    fittingIn: allocation
                 )
                 check("natural optical growth is preserved", clusterRaster.coverage == grown, text)
             }
@@ -249,7 +262,12 @@ enum RasterDriver {
                 clusterRaster.rasterise(line: line, at: pen, boostCappedTo: 1.1, sizedBy: glyph(0x4D), in: font)
                 let grown = clusterRaster.coverage
                 clusterRaster.rasterise(
-                    line: line, at: pen, boostCappedTo: 1.1, sizedBy: glyph(0x4D), in: font, fittingIn: allocation
+                    line: line,
+                    at: pen,
+                    boostCappedTo: 1.1,
+                    sizedBy: glyph(0x4D),
+                    in: font,
+                    fittingIn: allocation
                 )
                 check("other-script overflow retains native optical growth", clusterRaster.coverage == grown, text)
             }
@@ -264,12 +282,15 @@ enum RasterDriver {
                 bounds.width = CTLineGetTypographicBounds(line, nil, nil, nil) / 2
                 check("the related-script fixture advances beyond its cells", bounds.width > 0, text)
                 clusterRaster.rasterise(
-                    line: line, at: pen, fittingIn: fitMode == .fitAdvanceOverflow ? bounds : nil
+                    line: line,
+                    at: pen,
+                    fittingIn: fitMode == .fitAdvanceOverflow ? bounds : nil
                 )
                 check("a related-script fitted cluster retains ink", clusterRaster.coverage.contains { $0 != 0 }, text)
                 check(
                     "a related-script cluster stays inside its cells",
-                    !hasOutsideInk(clusterRaster.coverage, left: pen.x, width: CGFloat(bounds.width)), text
+                    !hasOutsideInk(clusterRaster.coverage, left: pen.x, width: CGFloat(bounds.width)),
+                    text
                 )
             }
             let fittingLine = shapedLine("e\u{0301}")
@@ -299,14 +320,23 @@ enum RasterDriver {
                 clusterRaster.rasterise(line: line, at: pen)
                 let nativeItalicCoverage = clusterRaster.coverage
                 clusterRaster.rasterise(
-                    line: line, at: pen, boostCappedTo: 1.1, sizedBy: italicGlyph, in: italic
+                    line: line,
+                    at: pen,
+                    boostCappedTo: 1.1,
+                    sizedBy: italicGlyph,
+                    in: italic
                 )
                 let nativeWideItalicCoverage = clusterRaster.coverage
                 let bounds = fitMode == .fitAdvanceOverflow ? roomyBounds : nil
                 clusterRaster.rasterise(line: line, at: pen, fittingIn: bounds)
                 check("invisible suffixes preserve native italic coverage", clusterRaster.coverage == nativeItalicCoverage, text)
                 clusterRaster.rasterise(
-                    line: line, at: pen, boostCappedTo: 1.1, sizedBy: italicGlyph, in: italic, fittingIn: bounds
+                    line: line,
+                    at: pen,
+                    boostCappedTo: 1.1,
+                    sizedBy: italicGlyph,
+                    in: italic,
+                    fittingIn: bounds
                 )
                 check("invisible suffixes preserve native wide italic coverage", clusterRaster.coverage == nativeWideItalicCoverage, text)
             }

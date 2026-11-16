@@ -2595,7 +2595,8 @@ extension GlyphAtlas: ClusterGlyphSource {
                 y: CGFloat(baselinePenInPixels)
                     + symbolBaselineRaise(shaped.base, font: faceCarrying(shaped.base, face: face), face: face, cluster: codePoints.span)
             )
-            let advance = geometry.referenceAdvanceInPixels > 0
+            let advance =
+                geometry.referenceAdvanceInPixels > 0
                 ? Double(geometry.referenceAdvanceInPixels) : Double(geometry.glyphWidthInPixels)
             var cellBounds = Ubiquitty.Rendering.ClusterRasterBounds()
             cellBounds.left = Double(pen.x)
