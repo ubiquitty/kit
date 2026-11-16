@@ -9,6 +9,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <string>
 #include <vector>
 
@@ -54,13 +55,13 @@ struct NativeReference {
         FcConfigDestroy(configuration);
     }
 
-    std::vector<std::uint8_t> draw(const std::string& text, FontFace style, double pixelSize, int width, int height, int baseline, double penX, const char* markFamily = nullptr, double markSize = 0, MarkStyle markStyle = MarkStyle::MatchBase, double pointSize = 0, double resolution = 96.0, double targetLeft = 0, double targetWidth = 0)
+    std::vector<std::uint8_t> draw(const std::string& text, FontFace style, double pixelSize, int width, int height, int baseline, double penX, const char* markFamily = nullptr, double markSize = 0, MarkStyle markStyle = MarkStyle::MatchBase, double pointSize = 0, double resolution = 96.0, double targetLeft = 0, double targetWidth = 0, const char* family = "JetBrains Mono")
     {
         auto* context = pango_font_map_create_context(map);
         pango_cairo_context_set_resolution(context, resolution);
         pango_context_set_round_glyph_positions(context, TRUE);
         auto* description = pango_font_description_new();
-        pango_font_description_set_family(description, "JetBrains Mono");
+        pango_font_description_set_family(description, family);
         if (pointSize > 0)
             pango_font_description_set_size(description, static_cast<int>(std::lround(pointSize * PANGO_SCALE)));
         else
@@ -436,27 +437,40 @@ TEST(repeatedFilledSquaresKeepNativeMasksAndIntegerCellPitch)
 TEST(markedNativeClustersFitAsOneShapeInsideTheirAllocatedColumns)
 {
     NativeReference reference;
-    constexpr std::array<std::uint32_t, 8> points { 'Z', 0x335, 0x34c, 0x35d, 0x30e, 0x321, 0x320, 0x32b };
-    const std::string text = "Z̵̡̠̫͌̎͝";
+    FcStrList* directories = FcConfigGetFontDirs(reference.previous);
+    while (const FcChar8* directory = FcStrListNext(directories))
+        (void)FcConfigAppFontAddDir(reference.configuration, directory);
+    FcStrListDone(directories);
+    pango_fc_font_map_config_changed(PANGO_FC_FONT_MAP(reference.map));
+    constexpr std::array<std::uint32_t, 4> points { 0x915, 0x94d, 0x937, 0x93f };
+    const std::string text = "क्षि";
     for (int size : { 15, 28, 32 }) {
         Ubiquitty::Preferences::FontRoutePreferences preferences;
         preferences.shouldMatchFallbackSize = false;
-        auto raster = rasterizer(size, std::move(preferences));
+        Ubiquitty::Linux::FreeTypeRasterizer raster {
+            static_cast<double>(size), "Noto Sans Devanagari", {}, std::string(UBQ_BUNDLED_FONTS_DIR) + "/SymbolsNerdFontMono-Regular.ttf",
+            {}, 1, 0, 0, 0, 0, 0, {}, {}, Ubiquitty::Linux::Ligatures::Enabled, std::move(preferences)
+        };
+        if (raster.glyphIndexForCodePoint(points.front()) == 0) {
+            std::printf("    SKIP native Indic affine comparison: no scalable Devanagari primary face\n");
+            return;
+        }
+        CHECK(Ubiquitty::Rendering::clusterHorizontalFitEligible(points));
         const auto metrics = raster.cellMetrics();
         const int cellWidth = static_cast<int>(metrics.cellWidth);
         const int height = static_cast<int>(std::lround(metrics.cellHeight)) + 128;
         const int baseline = static_cast<int>(std::lround(metrics.baselineFromTop)) + 64;
         for (int columns : { 1, 2 }) {
             const int width = columns * cellWidth + 16;
-            for (auto style : { FontFace::Regular, FontFace::Italic }) {
+            for (auto style : { FontFace::Regular, FontFace::Bold }) {
                 for (double phase : { 0.0, 0.25, 0.75 }) {
-                    const Ubiquitty::Rendering::ClusterRasterBounds bounds { 8 + phase, columns * cellWidth / 2.0 };
+                    const Ubiquitty::Rendering::ClusterRasterBounds bounds { 8 + phase, columns * cellWidth / 4.0 };
                     std::vector<std::uint8_t> actual(static_cast<std::size_t>(width) * height);
                     CHECK(raster.rasterizeClusterInCell(points.data(), static_cast<int>(points.size()), style, 0, phase,
                         bounds, width, height, actual.data()));
                     const double pen = (width - cellWidth) / 2 + phase;
-                    const auto expected = reference.draw(text, style, size, width, height, baseline, pen, "Noto Sans", size,
-                        MarkStyle::Upright, 0, 96, bounds.left, bounds.width);
+                    const auto expected = reference.draw(text, style, size, width, height, baseline, pen, nullptr, 0,
+                        MarkStyle::MatchBase, 0, 96, bounds.left, bounds.width, "Noto Sans Devanagari");
                     CHECK_MSG(actual == expected, "all routed glyphs retain their native relative positions under one horizontal fit");
                     CHECK(std::ranges::any_of(actual, [](auto coverage) { return coverage != 0; }));
                     bool isContained = true;
@@ -466,8 +480,7 @@ TEST(markedNativeClustersFitAsOneShapeInsideTheirAllocatedColumns)
                                 isContained = isContained && actual[static_cast<std::size_t>(row) * width + column] == 0;
                         }
                     }
-                    if (columns == 1)
-                        CHECK(isContained);
+                    CHECK(isContained);
                 }
             }
         }

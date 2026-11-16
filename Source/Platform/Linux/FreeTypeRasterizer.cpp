@@ -2611,12 +2611,8 @@ bool FreeTypeRasterizer::rasterizeClusterInCell(const std::uint32_t* codePoints,
     if (!std::isfinite(bounds.left) || !std::isfinite(bounds.width) || bounds.left < 0 || bounds.left >= slotWidth
         || bounds.width <= 0 || bounds.width > slotWidth)
         return false;
-    if (codePoints && count > 0) {
-        const auto points = std::span(codePoints, static_cast<std::size_t>(count));
-        const auto base = points[Unicode::clusterBaseIndex(points)];
-        if (Unicode::Width::forCodePoint(base, Unicode::Width::AmbiguousWidth::Narrow) != 1 || Unicode::isExtendedPictographic(base))
-            return rasterizeClusterAtPhase(codePoints, count, face, weight, phaseInPixels, slotWidth, slotHeight, coverageOut);
-    }
+    if (!Rendering::clusterHorizontalFitEligible(codePoints, count))
+        return rasterizeClusterAtPhase(codePoints, count, face, weight, phaseInPixels, slotWidth, slotHeight, coverageOut);
     const double prior = std::exchange(m_phaseInPixels, phaseInPixels);
     const bool didRasterize = rasterizeClusterWithBounds(codePoints, count, face, weight, slotWidth, slotHeight, coverageOut, &bounds);
     m_phaseInPixels = prior;

@@ -73,18 +73,11 @@ final class GlyphRasterizer {
     }
 
     static func clusterFitMode(for codePoints: Span<UInt32>) -> ClusterFitMode {
-        var visibleCount = 0
-        for index in 0..<codePoints.count {
-            let codePoint = codePoints[index]
-            if Ubiquitty.Unicode.Width.isInvisibleFormat(codePoint) { continue }
-            if Ubiquitty.Unicode.isExtendedPictographic(codePoint)
-                || Ubiquitty.Unicode.Width.forCodePoint(codePoint, .Narrow) == 2
-            {
-                return .preserveNativeAdvance
-            }
-            visibleCount += 1
+        guard let count = Int32(exactly: codePoints.count) else { return .preserveNativeAdvance }
+        return codePoints.withUnsafeBufferPointer { buffer in
+            Ubiquitty.Rendering.clusterHorizontalFitEligible(buffer.baseAddress, count)
+                ? .fitAdvanceOverflow : .preserveNativeAdvance
         }
-        return visibleCount > 1 ? .fitAdvanceOverflow : .preserveNativeAdvance
     }
 
     private struct PendingGlyph {

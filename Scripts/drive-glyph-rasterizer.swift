@@ -201,7 +201,7 @@ enum RasterDriver {
                 ("漢\u{0301}", 2, .preserveNativeAdvance),
                 ("語\u{20DD}", 2, .preserveNativeAdvance),
                 ("👩‍👩‍👧‍👧", 2, .preserveNativeAdvance),
-                ("Z\u{0335}\u{034C}\u{035D}\u{030E}\u{0321}\u{0320}\u{032B}", 1, .fitAdvanceOverflow),
+                ("Z\u{0335}\u{034C}\u{035D}\u{030E}\u{0321}\u{0320}\u{032B}", 1, .preserveNativeAdvance),
             ]
             for (text, columns, expectedMode) in preservedClusters {
                 let points = text.unicodeScalars.map(\.value)
@@ -215,7 +215,7 @@ enum RasterDriver {
                 clusterRaster.rasterise(line: line, at: pen)
                 let natural = clusterRaster.coverage
                 check("the natural cluster retains ink", natural.contains { $0 != 0 }, text)
-                if expectedMode == .fitAdvanceOverflow {
+                if columns == 1 {
                     check("the marked Latin advance fits its cell", CTLineGetTypographicBounds(line, nil, nil, nil) <= bounds.width)
                     check("the fitting advance carries native ink overhang", hasOutsideInk(natural, left: pen.x, width: nativeCellAdvance))
                 }
@@ -228,6 +228,49 @@ enum RasterDriver {
                     line: line, at: pen, boostCappedTo: 1.1, sizedBy: glyph(0x4D), in: font, fittingIn: allocation
                 )
                 check("natural optical growth is preserved", clusterRaster.coverage == grown, text)
+            }
+            for text in ["a\u{0301}", "α\u{0301}", "س\u{064E}\u{0651}", "ש\u{05B8}\u{05C1}"] {
+                let points = text.unicodeScalars.map(\.value)
+                let fitMode = points.withUnsafeBufferPointer { GlyphRasterizer.clusterFitMode(for: $0.span) }
+                check("other scripts preserve native advance", fitMode == .preserveNativeAdvance, text)
+                let line = shapedLine(text)
+                let pen = CGPoint(x: 20, y: 20)
+                var bounds = Ubiquitty.Rendering.ClusterRasterBounds()
+                bounds.left = Double(pen.x)
+                let advance = CTLineGetTypographicBounds(line, nil, nil, nil)
+                bounds.width = advance / 2
+                check("the preserve fixture exceeds its allocation", advance > bounds.width && bounds.width > 0, text)
+                clusterRaster.rasterise(line: line, at: pen)
+                let natural = clusterRaster.coverage
+                check("the preserve fixture retains ink", natural.contains { $0 != 0 }, text)
+                let allocation = fitMode == .fitAdvanceOverflow ? bounds : nil
+                clusterRaster.rasterise(line: line, at: pen, fittingIn: allocation)
+                check("other-script overflow retains native coverage", clusterRaster.coverage == natural, text)
+                clusterRaster.rasterise(line: line, at: pen, boostCappedTo: 1.1, sizedBy: glyph(0x4D), in: font)
+                let grown = clusterRaster.coverage
+                clusterRaster.rasterise(
+                    line: line, at: pen, boostCappedTo: 1.1, sizedBy: glyph(0x4D), in: font, fittingIn: allocation
+                )
+                check("other-script overflow retains native optical growth", clusterRaster.coverage == grown, text)
+            }
+            for text in ["กิ", "កិ"] {
+                let points = text.unicodeScalars.map(\.value)
+                let fitMode = points.withUnsafeBufferPointer { GlyphRasterizer.clusterFitMode(for: $0.span) }
+                check("related syllabic scripts fit advance overflow", fitMode == .fitAdvanceOverflow, text)
+                let line = shapedLine(text)
+                let pen = CGPoint(x: 20.375, y: 20)
+                var bounds = Ubiquitty.Rendering.ClusterRasterBounds()
+                bounds.left = Double(pen.x)
+                bounds.width = CTLineGetTypographicBounds(line, nil, nil, nil) / 2
+                check("the related-script fixture advances beyond its cells", bounds.width > 0, text)
+                clusterRaster.rasterise(
+                    line: line, at: pen, fittingIn: fitMode == .fitAdvanceOverflow ? bounds : nil
+                )
+                check("a related-script fitted cluster retains ink", clusterRaster.coverage.contains { $0 != 0 }, text)
+                check(
+                    "a related-script cluster stays inside its cells",
+                    !hasOutsideInk(clusterRaster.coverage, left: pen.x, width: CGFloat(bounds.width)), text
+                )
             }
             let fittingLine = shapedLine("e\u{0301}")
             let pen = CGPoint(x: 20, y: 20)

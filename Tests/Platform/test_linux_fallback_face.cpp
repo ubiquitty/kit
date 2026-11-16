@@ -1197,7 +1197,10 @@ TEST(cascadedMarkedClustersKeepTheirVerticalPlacementWhileFittingColumns)
                 }
             }
             CHECK(hasInk);
-            CHECK(isContained);
+            if (Ubiquitty::Rendering::clusterHorizontalFitEligible(points))
+                CHECK(isContained);
+            else
+                CHECK(fitted == natural);
         }
     };
     constexpr std::array<std::uint32_t, 3> bundledMarks { 0x250, 0x35d, 0x301 };
@@ -1260,6 +1263,38 @@ TEST(markedClustersKeepNativeProportionsAndOverhangWhenTheirAdvanceFits)
         }
     }
     CHECK_MSG(hasMarkedOverhang, "fitting leaves zero-advance mark overhang visible outside the cell");
+}
+
+TEST(otherScriptsKeepTheirNaturalMasksEvenWhenTheCellAllocationOverflows)
+{
+    CHECK(registerBundledFonts());
+    Ubiquitty::Linux::FreeTypeRasterizer raster {
+        32, "JetBrains Mono", {}, bundled("SymbolsNerdFontMono-Regular.ttf"), bundled("JetBrainsMono[wght].ttf")
+    };
+    const std::array<std::array<std::uint32_t, 2>, 5> clusters { {
+        { 'Z', 0x301 },
+        { 0x3b1, 0x301 },
+        { 0x436, 0x301 },
+        { 0x628, 0x64e },
+        { 0x5d0, 0x5b0 },
+    } };
+    const auto metrics = raster.cellMetrics();
+    const int width = static_cast<int>(metrics.cellWidth) + 64;
+    const int height = static_cast<int>(metrics.cellHeight) + 128;
+    for (const auto& cluster : clusters) {
+        CHECK(!Ubiquitty::Rendering::clusterHorizontalFitEligible(cluster));
+        for (auto style : { Ubiquitty::Rendering::FontFace::Regular, Ubiquitty::Rendering::FontFace::Italic }) {
+            for (double phase : { 0.0, 0.25, 0.75 }) {
+                std::vector<std::uint8_t> natural(static_cast<std::size_t>(width) * height), allocated(natural.size());
+                CHECK(raster.rasterizeClusterAtPhase(cluster.data(), static_cast<int>(cluster.size()), style,
+                    0, phase, width, height, natural.data()));
+                CHECK(raster.rasterizeClusterInCell(cluster.data(), static_cast<int>(cluster.size()), style,
+                    0, phase, { 32 + phase, 1 }, width, height, allocated.data()));
+                CHECK_MSG(natural == allocated, "non-syllabic-script clusters preserve natural masks even in an undersized allocation");
+                CHECK(std::ranges::any_of(allocated, [](auto value) { return value != 0; }));
+            }
+        }
+    }
 }
 
 UBIQUITTY_TEST_MAIN()
