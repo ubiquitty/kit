@@ -193,3 +193,9 @@ if wanted test_swift_driver_target; then
     RAN=$((RAN + 1))
     python3 "$ROOT/Tests/Tools/test_swift_driver_target.py" || exit 1
 fi
+
+if wanted test_host_test_driver; then
+    echo "=== test_host_test_driver ==="
+    RAN=$((RAN + 1))
+    python3 "$ROOT/Tests/Tools/test_host_test_driver.py" || exit 1
+fi

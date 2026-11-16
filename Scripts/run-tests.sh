@@ -115,6 +115,7 @@ trap 'ubq_end_run 1' HUP
 ubq_configure_ctest_tree() {
     cmake -S "$ROOT" -B "$1" -G Ninja \
         -DUBIQUITTY_CORE_SOURCE_DIR="$UBQ_CORE_ROOT" \
+        -DUBIQUITTY_QUIC_PREFIX="${UBIQUITTY_QUIC_PREFIX:-$UBQ_BUILD_ROOT/quic-deps}" \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DUBIQUITTY_BUILD_TESTS=ON \
         -DCMAKE_BUILD_TYPE=Debug
 }
@@ -128,8 +129,11 @@ SKIP_CTEST_COVERED="${SKIP_CTEST_COVERED:-$USE_CTEST}"
 CTEST_FAILED=0
 if [ "$USE_CTEST" = "1" ]; then
     echo "=== ctest (CMake-covered tests) ==="
-    if ubq_configure_ctest_tree "$CTEST_BUILD_DIR" >/dev/null &&
-        "$LIBRARY_SCRIPTS/run-ctest.sh" "$CTEST_BUILD_DIR" -j"${CTEST_JOBS:-8}" --output-on-failure; then
+    if ! ubq_configure_ctest_tree "$CTEST_BUILD_DIR" >/dev/null; then
+        echo "run-tests.sh: ctest configure failed; no test tree was generated" >&2
+        exit 1
+    fi
+    if "$LIBRARY_SCRIPTS/run-ctest.sh" "$CTEST_BUILD_DIR" -j"${CTEST_JOBS:-8}" --output-on-failure; then
         :
     else
         CTEST_FAILED=1
