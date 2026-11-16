@@ -1149,4 +1149,66 @@ TEST(explicitPrivateUseRangesKeepTheirChosenFaceBaselineBeforeTheSymbolTier)
     FT_Done_FreeType(library);
 }
 
+TEST(cascadedMarkedClustersKeepTheirVerticalPlacementWhileFittingColumns)
+{
+    CHECK(registerBundledFonts());
+    Ubiquitty::Linux::FreeTypeRasterizer raster {
+        32, "JetBrains Mono", {}, bundled("SymbolsNerdFontMono-Regular.ttf"), bundled("JetBrainsMono[wght].ttf")
+    };
+    const auto metrics = raster.cellMetrics();
+    const int cellWidth = static_cast<int>(metrics.cellWidth);
+    const int width = 3 * cellWidth + 32;
+    const int height = static_cast<int>(metrics.cellHeight) + 128;
+    const auto checkCluster = [&](std::span<const std::uint32_t> points) {
+        std::vector<std::uint8_t> natural(static_cast<std::size_t>(width) * height), roomy(natural.size());
+        CHECK(raster.rasterizeCluster(points.data(), static_cast<int>(points.size()), Ubiquitty::Rendering::FontFace::Regular,
+            0, width, height, natural.data()));
+        CHECK(raster.rasterizeClusterInCell(points.data(), static_cast<int>(points.size()), Ubiquitty::Rendering::FontFace::Regular,
+            0, 0, { 0, static_cast<double>(width) }, width, height, roomy.data()));
+        CHECK_MSG(natural == roomy, "an already fitting fallback retains its native masks and mark placement");
+        const auto inkRows = [&](const auto& coverage) {
+            int first = height, last = -1;
+            for (int row = 0; row < height; ++row) {
+                if (std::ranges::any_of(std::span(coverage).subspan(static_cast<std::size_t>(row) * width, width), [](auto value) { return value != 0; })) {
+                    first = std::min(first, row);
+                    last = row;
+                }
+            }
+            return std::pair { first, last };
+        };
+        const auto naturalRows = inkRows(natural);
+        CHECK(naturalRows.second >= naturalRows.first);
+        for (int columns : { 1, 2 }) {
+            const Ubiquitty::Rendering::ClusterRasterBounds bounds { 8, static_cast<double>(columns * cellWidth) };
+            std::vector<std::uint8_t> fitted(natural.size());
+            CHECK(raster.rasterizeClusterInCell(points.data(), static_cast<int>(points.size()), Ubiquitty::Rendering::FontFace::Regular,
+                0, 0, bounds, width, height, fitted.data()));
+            const auto fittedRows = inkRows(fitted);
+            CHECK(std::abs(naturalRows.first - fittedRows.first) <= 1);
+            CHECK(std::abs(naturalRows.second - fittedRows.second) <= 1);
+            bool hasInk = false;
+            bool isContained = true;
+            for (int row = 0; row < height; ++row) {
+                for (int column = 0; column < width; ++column) {
+                    const auto value = fitted[static_cast<std::size_t>(row) * width + column];
+                    hasInk = hasInk || value != 0;
+                    if (column < bounds.left || column >= bounds.left + bounds.width)
+                        isContained = isContained && value == 0;
+                }
+            }
+            CHECK(hasInk);
+            CHECK(isContained);
+        }
+    };
+    constexpr std::array<std::uint32_t, 3> bundledMarks { 0x250, 0x35d, 0x301 };
+    CHECK_EQ(raster.glyphIndexForCodePoint(bundledMarks.front()), 0u);
+    checkCluster(bundledMarks);
+    if (hostHasScalableTextFaceFor(0x915)) {
+        constexpr std::array<std::uint32_t, 4> conjunct { 0x915, 0x94d, 0x937, 0x93f };
+        checkCluster(conjunct);
+        std::printf("    exercised the installed Devanagari fallback\n");
+    } else
+        std::printf("    SKIP Devanagari fallback: no scalable system face carries U+0915\n");
+}
+
 UBIQUITTY_TEST_MAIN()

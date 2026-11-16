@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdio>
+#include <utility>
 #include <vector>
 
 #include <fontconfig/fontconfig.h>
@@ -22,6 +23,24 @@
 #include <pango/pangofc-fontmap.h>
 
 namespace Ubiquitty::Linux {
+
+namespace {
+
+// A cached scaled font owns an identity CTM. Install its font facts separately
+// so Cairo derives a scaled font for the complete cluster's drawing transform.
+void setNativeFontForTransform(cairo_t* painter, cairo_scaled_font_t* font)
+{
+    cairo_matrix_t matrix;
+    cairo_scaled_font_get_font_matrix(font, &matrix);
+    cairo_set_font_face(painter, cairo_scaled_font_get_font_face(font));
+    cairo_set_font_matrix(painter, &matrix);
+    cairo_font_options_t* options = cairo_font_options_create();
+    cairo_scaled_font_get_font_options(font, options);
+    cairo_set_font_options(painter, options);
+    cairo_font_options_destroy(options);
+}
+
+} // namespace
 
 struct NativeClusterRasterizer::Impl {
     FcConfig* source { FcConfigReference(FcConfigGetCurrent()) };
@@ -235,7 +254,8 @@ bool NativeClusterRasterizer::glyphBounds(const NativeClusterFont& font, std::ui
 }
 
 bool NativeClusterRasterizer::drawGlyphs(std::span<const NativePositionedGlyph> glyphs, const NativeClusterFont& font,
-    int width, int height, std::span<std::uint8_t> coverage)
+    int width, int height, std::span<std::uint8_t> coverage,
+    const Rendering::ClusterRasterBounds* bounds, double advanceLeft, double advanceRight)
 {
     if (glyphs.empty() || width <= 0 || height <= 0 || coverage.size() != static_cast<std::size_t>(width) * height)
         return false;
@@ -256,11 +276,25 @@ bool NativeClusterRasterizer::drawGlyphs(std::span<const NativePositionedGlyph> 
     cairo_paint(painter.get());
     cairo_set_operator(painter.get(), CAIRO_OPERATOR_OVER);
     cairo_set_source_rgba(painter.get(), 1, 1, 1, 1);
-    cairo_set_scaled_font(painter.get(), scaled);
     std::vector<cairo_glyph_t> native;
     native.reserve(glyphs.size());
     for (const auto& glyph : glyphs)
         native.push_back({ glyph.glyph, glyph.x, glyph.y });
+    if (bounds) {
+        cairo_text_extents_t ink;
+        cairo_scaled_font_glyph_extents(scaled, native.data(), static_cast<int>(native.size()), &ink);
+        const double inkLeft = native.front().x + ink.x_bearing;
+        const auto fit = Rendering::fitClusterHorizontal(std::min({ advanceLeft, advanceRight, inkLeft }),
+            std::max({ advanceLeft, advanceRight, inkLeft + ink.width }), *bounds);
+        cairo_rectangle(painter.get(), bounds->left, 0, bounds->width, height);
+        cairo_clip(painter.get());
+        cairo_translate(painter.get(), fit.translationX, 0);
+        cairo_scale(painter.get(), fit.scaleX, 1);
+    }
+    if (bounds)
+        setNativeFontForTransform(painter.get(), scaled);
+    else
+        cairo_set_scaled_font(painter.get(), scaled);
     cairo_show_glyphs(painter.get(), native.data(), static_cast<int>(native.size()));
     if (cairo_status(painter.get()) != CAIRO_STATUS_SUCCESS)
         return false;
@@ -273,7 +307,7 @@ bool NativeClusterRasterizer::drawGlyphs(std::span<const NativePositionedGlyph> 
 
 bool NativeClusterRasterizer::draw(std::span<const std::uint32_t> codePoints, const NativeClusterFont& base,
     ResolveRun resolve, void* callbackContext, std::string_view features, double penX, double baseline,
-    int width, int height, std::span<std::uint8_t> coverage)
+    int width, int height, std::span<std::uint8_t> coverage, const Rendering::ClusterRasterBounds* bounds)
 {
     if (codePoints.empty() || codePoints.size() > clusterPoolMaximumCodePoints || !base.face || base.file.empty()
         || !resolve || width <= 0 || height <= 0 || coverage.size() != static_cast<std::size_t>(width) * height
@@ -378,7 +412,14 @@ bool NativeClusterRasterizer::draw(std::span<const std::uint32_t> codePoints, co
     // sizes in 1/1024 units, so using its rounded pixel description for the
     // mask would discard the original point/DPI matrix. Draw the resolved
     // native glyph IDs with the exact Core-selected em instead.
+    struct PositionedRun {
+        cairo_scaled_font_t* font;
+        std::vector<cairo_glyph_t> glyphs;
+    };
+    std::vector<PositionedRun> positionedRuns;
     double x = penX;
+    double inkLeft = penX;
+    double inkRight = penX;
     for (auto* node = line->runs; node; node = node->next) {
         const auto* run = static_cast<const PangoLayoutRun*>(node->data);
         const NativeClusterFont* font = &base;
@@ -392,7 +433,6 @@ bool NativeClusterRasterizer::draw(std::span<const std::uint32_t> codePoints, co
         auto* scaled = m_impl->scaledFontFor(*font);
         if (!scaled)
             return false;
-        cairo_set_scaled_font(painter.get(), scaled);
         std::vector<cairo_glyph_t> glyphs;
         glyphs.reserve(static_cast<std::size_t>(run->glyphs->num_glyphs));
         for (int index = 0; index < run->glyphs->num_glyphs; ++index) {
@@ -405,7 +445,30 @@ bool NativeClusterRasterizer::draw(std::span<const std::uint32_t> codePoints, co
             }
             x += glyph.geometry.width / static_cast<double>(PANGO_SCALE);
         }
-        cairo_show_glyphs(painter.get(), glyphs.data(), static_cast<int>(glyphs.size()));
+        if (bounds && !glyphs.empty()) {
+            cairo_text_extents_t ink;
+            cairo_scaled_font_glyph_extents(scaled, glyphs.data(), static_cast<int>(glyphs.size()), &ink);
+            const double runLeft = glyphs.front().x + ink.x_bearing;
+            inkLeft = std::min(inkLeft, runLeft);
+            inkRight = std::max(inkRight, runLeft + ink.width);
+        }
+        if (bounds)
+            positionedRuns.push_back({ scaled, std::move(glyphs) });
+        else {
+            cairo_set_scaled_font(painter.get(), scaled);
+            cairo_show_glyphs(painter.get(), glyphs.data(), static_cast<int>(glyphs.size()));
+        }
+    }
+    if (bounds) {
+        const auto fit = Rendering::fitClusterHorizontal(std::min(inkLeft, x), std::max(inkRight, x), *bounds);
+        cairo_rectangle(painter.get(), bounds->left, 0, bounds->width, height);
+        cairo_clip(painter.get());
+        cairo_translate(painter.get(), fit.translationX, 0);
+        cairo_scale(painter.get(), fit.scaleX, 1);
+    }
+    for (const auto& run : positionedRuns) {
+        setNativeFontForTransform(painter.get(), run.font);
+        cairo_show_glyphs(painter.get(), run.glyphs.data(), static_cast<int>(run.glyphs.size()));
     }
     if (cairo_status(painter.get()) != CAIRO_STATUS_SUCCESS)
         return false;

@@ -202,14 +202,17 @@ bool VulkanGlyphAtlas::stageMonoCoverage(int slot, std::span<const std::uint8_t>
     return true;
 }
 
-void VulkanGlyphAtlas::rasterizeClusterInto(int slot, std::span<const std::uint32_t> codePoints, Rendering::FontFace face, std::uint32_t weight, std::uint32_t variant)
+void VulkanGlyphAtlas::rasterizeClusterInto(int slot, std::span<const std::uint32_t> codePoints, Rendering::FontFace face,
+    std::uint32_t weight, std::uint32_t variant, ClusterCanvas canvas)
 {
-    // The mono overflow canvas, as rasterizeInto fills it for one glyph: a
-    // cluster composites into the same box its base alone would take.
-    const int width = m_monoSlotWidthInPixels;
+    const bool isWide = canvas == ClusterCanvas::Wide;
+    const int width = isWide ? 2 * m_cellWidth : m_monoSlotWidthInPixels;
     const int height = m_slotHeightInPixels;
     const Rendering::AtlasSlotRegion region { (slot % m_columns) * m_slotWidthInPixels, (slot / m_columns) * m_slotHeightInPixels, width, height };
-    const bool inked = m_rasterizer.rasterizeClusterAtPhase(codePoints.data(), static_cast<int>(codePoints.size()), face, weight, static_cast<double>(Rendering::variantPhase(variant)) / std::max(1, m_rasterizer.glyphPhaseCount()), width, height, m_slotScratch.data());
+    const double phase = isWide ? 0 : static_cast<double>(Rendering::variantPhase(variant)) / std::max(1, m_rasterizer.glyphPhaseCount());
+    const Rendering::ClusterRasterBounds bounds { isWide ? 0 : m_monoMarginXInPixels + phase, static_cast<double>(isWide ? 2 * m_cellWidth : m_cellWidth) };
+    const bool inked = m_rasterizer.rasterizeClusterInCell(codePoints.data(), static_cast<int>(codePoints.size()), face, weight,
+        phase, bounds, width, height, m_slotScratch.data());
     const std::span<const std::uint8_t> plane = inked ? std::span<const std::uint8_t>(m_slotScratch).first(static_cast<std::size_t>(width) * static_cast<std::size_t>(height)) : std::span<const std::uint8_t> {};
     Rendering::writeAtlasCoverage(m_coverage, m_atlasWidth, region, plane);
     recordInkBox(slot, plane, width, height);
@@ -335,21 +338,22 @@ Rendering::AtlasGlyph VulkanGlyphAtlas::faultGlyph(std::uint32_t key, std::uint3
 
 Rendering::AtlasGlyph VulkanGlyphAtlas::faultCluster(std::uint32_t key, std::span<const std::uint32_t> codePoints, Rendering::FontFace face, std::uint32_t weight, std::uint32_t variant)
 {
+    const bool isWide = Rendering::isSharedAtlasWideClusterKey(key);
     bool isFresh = false;
     const int slot = m_cache.slotForKeyVerified(key, codePoints.data(), static_cast<int>(codePoints.size()), &isFresh);
     if (slot < 0)
         return {}; // the sheet is full this frame: background only
     if (isFresh) {
-        rasterizeClusterInto(slot, codePoints, face, weight, variant);
+        rasterizeClusterInto(slot, codePoints, face, weight, variant, isWide ? ClusterCanvas::Wide : ClusterCanvas::Mono);
         markSlotDirty(slot);
     }
-    // The cell box inside the mono slot, past the margin, in atlas pixels: the
-    // same units faultGlyph answers in, which the shaders texelFetch directly.
-    const int left = (slot % m_columns) * m_slotWidthInPixels + m_monoMarginXInPixels;
+    // The claimed cell box inside the slot, past the mono margin when present,
+    // in the atlas pixels the shaders texelFetch directly.
+    const int left = (slot % m_columns) * m_slotWidthInPixels + (isWide ? 0 : m_monoMarginXInPixels);
     const int top = (slot / m_columns) * m_slotHeightInPixels + m_monoMarginYInPixels;
     Rendering::AtlasGlyph out;
     out.minUV = { static_cast<float>(left), static_cast<float>(top) };
-    out.maxUV = { static_cast<float>(left + m_cellWidth), static_cast<float>(top + m_cellHeight) };
+    out.maxUV = { static_cast<float>(left + (isWide ? 2 * m_cellWidth : m_cellWidth)), static_cast<float>(top + m_cellHeight) };
     out.present = true;
     return out;
 }
@@ -444,6 +448,11 @@ Rendering::GlyphBackend VulkanGlyphAtlas::glyphBackend()
 
     backend.wideGlyph = [](void* context, std::uint32_t codePoint, Rendering::FontFace face) {
         return static_cast<VulkanGlyphAtlas*>(context)->wideGlyph(codePoint, face);
+    };
+    backend.wideClusterGlyph = [](void* context, std::span<const std::uint32_t> codePoints, Rendering::FontFace face,
+                                   std::uint32_t, std::uint32_t) {
+        const auto key = Rendering::sharedAtlasWideClusterKey(codePoints.data(), static_cast<int>(codePoints.size()), 0, face);
+        return static_cast<VulkanGlyphAtlas*>(context)->faultCluster(key, codePoints, face, 0);
     };
     backend.sizedGlyph = [](void* context, std::uint32_t codePoint, Rendering::FontFace face, std::uint32_t weight, std::uint32_t phase, Rendering::GlyphPass, Rendering::SizedTile tile) {
         return static_cast<VulkanGlyphAtlas*>(context)->sizedGlyph(codePoint, face, weight, phase, tile);

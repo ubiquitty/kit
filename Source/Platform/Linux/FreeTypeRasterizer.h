@@ -136,6 +136,9 @@ public:
         int slotWidth, int slotHeight, std::uint8_t* coverageOut) override;
     bool rasterizeClusterAtPhase(const std::uint32_t*, int count, Rendering::FontFace, std::uint32_t weight, double phaseInPixels,
         int slotWidth, int slotHeight, std::uint8_t* coverageOut) override;
+    /// Fits a complete shaped cluster into its allocated terminal columns.
+    bool rasterizeClusterInCell(const std::uint32_t*, int count, Rendering::FontFace, std::uint32_t weight, double phaseInPixels,
+        Rendering::ClusterRasterBounds, int slotWidth, int slotHeight, std::uint8_t* coverageOut) override;
 
     FreeTypeRasterizer(const FreeTypeRasterizer&) = delete;
     FreeTypeRasterizer& operator=(const FreeTypeRasterizer&) = delete;
@@ -825,8 +828,13 @@ private:
     ///   - slotWidth: The coverage plane's width in device pixels.
     ///   - slotHeight: The coverage plane's height in device pixels.
     ///   - coverageOut: Caller-owned storage for `slotWidth * slotHeight` bytes.
+    ///   - bounds: Optional cell interval for one transform of the whole cluster.
     /// - Returns: True when native positioning filled the coverage plane.
-    bool rasterizeNativeCluster(std::span<const std::uint32_t> codePoints, Rendering::FontFace style, int slotWidth, int slotHeight, std::uint8_t* coverageOut);
+    bool rasterizeNativeCluster(std::span<const std::uint32_t> codePoints, Rendering::FontFace style, int slotWidth, int slotHeight,
+        std::uint8_t* coverageOut, const Rendering::ClusterRasterBounds* bounds);
+    /// Shapes the whole cluster, optionally fitting all glyphs to one cell interval.
+    bool rasterizeClusterWithBounds(const std::uint32_t*, int count, Rendering::FontFace, std::uint32_t weight,
+        int slotWidth, int slotHeight, std::uint8_t* coverageOut, const Rendering::ClusterRasterBounds*);
     /// Returns the face Core's fallback policy routes a code point to once the
     /// primary and glyph-fallback faces have missed it.
     ///

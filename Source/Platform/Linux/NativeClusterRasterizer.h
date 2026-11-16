@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "Core/Rendering/ClusterRasterGeometry.h"
 #include "Core/Rendering/GlyphKey.h"
 
 #include <cstdint>
@@ -71,9 +72,13 @@ public:
     ///   - width: The coverage plane's width in device pixels.
     ///   - height: The coverage plane's height in device pixels.
     ///   - coverage: Caller-owned storage for exactly `width * height` R8 bytes.
+    ///   - bounds: Optional allocated cell interval; the whole group fits it.
+    ///   - advanceLeft: The untransformed start of the group's advance.
+    ///   - advanceRight: The untransformed end of the group's advance.
     /// - Returns: True when the native draw filled the coverage plane.
     bool drawGlyphs(std::span<const NativePositionedGlyph> glyphs, const NativeClusterFont& font,
-        int width, int height, std::span<std::uint8_t> coverage);
+        int width, int height, std::span<std::uint8_t> coverage,
+        const Rendering::ClusterRasterBounds* bounds = nullptr, double advanceLeft = 0, double advanceRight = 0);
 
     /// Draws at the shared terminal pen, preserving Core's existing slot bound.
     /// The callback receives complete native fallback runs, never reordered text.
@@ -91,10 +96,11 @@ public:
     ///   - width: The coverage plane's width in device pixels.
     ///   - height: The coverage plane's height in device pixels.
     ///   - coverage: Caller-owned storage for exactly `width * height` R8 bytes.
+    ///   - bounds: Optional allocated cell interval; all routed runs fit together.
     /// - Returns: True when native positioning and drawing filled the plane.
     bool draw(std::span<const std::uint32_t> codePoints, const NativeClusterFont& base,
         ResolveRun resolve, void* context, std::string_view features, double penX, double baseline,
-        int width, int height, std::span<std::uint8_t> coverage);
+        int width, int height, std::span<std::uint8_t> coverage, const Rendering::ClusterRasterBounds* bounds = nullptr);
 
 private:
     struct Impl;

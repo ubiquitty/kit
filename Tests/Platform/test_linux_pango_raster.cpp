@@ -54,7 +54,7 @@ struct NativeReference {
         FcConfigDestroy(configuration);
     }
 
-    std::vector<std::uint8_t> draw(const std::string& text, FontFace style, double pixelSize, int width, int height, int baseline, double penX, const char* markFamily = nullptr, double markSize = 0, MarkStyle markStyle = MarkStyle::MatchBase, double pointSize = 0, double resolution = 96.0)
+    std::vector<std::uint8_t> draw(const std::string& text, FontFace style, double pixelSize, int width, int height, int baseline, double penX, const char* markFamily = nullptr, double markSize = 0, MarkStyle markStyle = MarkStyle::MatchBase, double pointSize = 0, double resolution = 96.0, double targetLeft = 0, double targetWidth = 0)
     {
         auto* context = pango_font_map_create_context(map);
         pango_cairo_context_set_resolution(context, resolution);
@@ -92,6 +92,21 @@ struct NativeReference {
         auto* surface = cairo_image_surface_create(CAIRO_FORMAT_A8, width, height);
         auto* painter = cairo_create(surface);
         cairo_set_source_rgba(painter, 1, 1, 1, 1);
+        if (targetWidth > 0) {
+            PangoRectangle ink, logical;
+            pango_layout_line_get_extents(pango_layout_get_line_readonly(layout, 0), &ink, &logical);
+            const double sourceLeft = penX + std::min(0.0, ink.x / static_cast<double>(PANGO_SCALE));
+            const double sourceRight = penX + std::max(logical.width / static_cast<double>(PANGO_SCALE), (ink.x + ink.width) / static_cast<double>(PANGO_SCALE));
+            const double scale = std::min(1.0, targetWidth / (sourceRight - sourceLeft));
+            const double translation = scale < 1         ? targetLeft - sourceLeft * scale
+                : sourceLeft < targetLeft                ? targetLeft - sourceLeft
+                : sourceRight > targetLeft + targetWidth ? targetLeft + targetWidth - sourceRight
+                                                         : 0;
+            cairo_rectangle(painter, targetLeft, 0, targetWidth, height);
+            cairo_clip(painter);
+            cairo_translate(painter, translation, 0);
+            cairo_scale(painter, scale, 1);
+        }
         cairo_move_to(painter, penX, baseline);
         pango_cairo_show_layout_line(painter, pango_layout_get_line_readonly(layout, 0));
         cairo_surface_flush(surface);
@@ -413,6 +428,75 @@ TEST(repeatedFilledSquaresKeepNativeMasksAndIntegerCellPitch)
             CHECK(decorated.rasterizeGlyphAtPhase(0x2588, FontFace::Regular, 0, phase, advance, cellHeight, fullBlock.data()));
             CHECK(std::ranges::all_of(fullBlock, [](std::uint8_t coverage) { return coverage == 255; }));
         }
+    }
+}
+
+TEST(markedNativeClustersFitAsOneShapeInsideTheirAllocatedColumns)
+{
+    NativeReference reference;
+    constexpr std::array<std::uint32_t, 8> points { 'Z', 0x335, 0x34c, 0x35d, 0x30e, 0x321, 0x320, 0x32b };
+    const std::string text = "Z̵̡̠̫͌̎͝";
+    for (int size : { 15, 28, 32 }) {
+        Ubiquitty::Preferences::FontRoutePreferences preferences;
+        preferences.shouldMatchFallbackSize = false;
+        auto raster = rasterizer(size, std::move(preferences));
+        const auto metrics = raster.cellMetrics();
+        const int cellWidth = static_cast<int>(metrics.cellWidth);
+        const int height = static_cast<int>(std::lround(metrics.cellHeight)) + 128;
+        const int baseline = static_cast<int>(std::lround(metrics.baselineFromTop)) + 64;
+        for (int columns : { 1, 2 }) {
+            const int width = columns * cellWidth + 16;
+            for (auto style : { FontFace::Regular, FontFace::Italic }) {
+                for (double phase : { 0.0, 0.25, 0.75 }) {
+                    const Ubiquitty::Rendering::ClusterRasterBounds bounds { 8 + phase, static_cast<double>(columns * cellWidth) };
+                    std::vector<std::uint8_t> actual(static_cast<std::size_t>(width) * height);
+                    CHECK(raster.rasterizeClusterInCell(points.data(), static_cast<int>(points.size()), style, 0, phase,
+                        bounds, width, height, actual.data()));
+                    const double pen = (width - cellWidth) / 2 + phase;
+                    const auto expected = reference.draw(text, style, size, width, height, baseline, pen, "Noto Sans", size,
+                        MarkStyle::Upright, 0, 96, bounds.left, bounds.width);
+                    CHECK_MSG(actual == expected, "all routed glyphs retain their native relative positions under one horizontal fit");
+                    CHECK(std::ranges::any_of(actual, [](auto coverage) { return coverage != 0; }));
+                    if (columns == 1 && style == FontFace::Regular && phase == 0) {
+                        std::vector<std::uint8_t> natural(actual.size());
+                        CHECK(raster.rasterizeCluster(points.data(), static_cast<int>(points.size()), style, 0,
+                            width, height, natural.data()));
+                        bool hasOverhangingInk = false;
+                        for (int row = 0; row < height; ++row) {
+                            for (int column = 0; column < width; ++column) {
+                                if (column < bounds.left || column >= bounds.left + bounds.width)
+                                    hasOverhangingInk = hasOverhangingInk || natural[static_cast<std::size_t>(row) * width + column] != 0;
+                            }
+                        }
+                        CHECK_MSG(hasOverhangingInk, "zero-advance marks exercise ink overflow even when the base advance fits");
+                    }
+                    bool isContained = true;
+                    for (int row = 0; row < height; ++row) {
+                        for (int column = 0; column < width; ++column) {
+                            if (column + 1 <= bounds.left || column >= bounds.left + bounds.width)
+                                isContained = isContained && actual[static_cast<std::size_t>(row) * width + column] == 0;
+                        }
+                    }
+                    CHECK(isContained);
+                }
+            }
+        }
+    }
+}
+
+TEST(aNativeClusterAlreadyInsideItsAllocationKeepsItsCoverage)
+{
+    auto raster = rasterizer(28);
+    const auto metrics = raster.cellMetrics();
+    const int width = static_cast<int>(metrics.cellWidth) + 64;
+    const int height = static_cast<int>(metrics.cellHeight) + 64;
+    constexpr std::array<std::uint32_t, 2> points { 'a', 0x301 };
+    for (double phase : { 0.0, 0.25, 0.75 }) {
+        std::vector<std::uint8_t> natural(static_cast<std::size_t>(width) * height), bounded(natural.size());
+        CHECK(raster.rasterizeClusterAtPhase(points.data(), 2, FontFace::Regular, 0, phase, width, height, natural.data()));
+        CHECK(raster.rasterizeClusterInCell(points.data(), 2, FontFace::Regular, 0, phase,
+            { 0, static_cast<double>(width) }, width, height, bounded.data()));
+        CHECK(natural == bounded);
     }
 }
 

@@ -129,11 +129,6 @@ public:
 
     /// The seam this atlas supplies, as a table.
     ///
-    /// `wideClusterGlyph` stays null as well: a two-cell base carrying combining
-    /// marks takes Core's default, which draws the wide base and drops the marks.
-    /// That default lands on `wideGlyph`, which this table does supply — the
-    /// sentence above describes a degraded glyph rather than an absent one only
-    /// because of that, and it stops being true the moment the wide entry goes.
     /// `colorGlyph` stays null; `shapeLigatureRuns` is published when a strip
     /// sheet is attached and reports itself usable, and a host whose font has no
     /// shaper leaves it absent and renders rows unligatured.
@@ -352,8 +347,14 @@ private:
     ///   - widthInPixels: The plane's width.
     ///   - heightInPixels: The plane's height.
     void recordInkBox(int slot, std::span<const std::uint8_t> plane, int widthInPixels, int heightInPixels);
-    // The cluster counterpart of rasterizeInto, into the mono overflow canvas.
-    void rasterizeClusterInto(int slot, std::span<const std::uint32_t> codePoints, Rendering::FontFace, std::uint32_t weight, std::uint32_t variant = 0);
+    /// The allocation a marked cluster owns inside its shared atlas slot.
+    enum class ClusterCanvas : std::uint8_t {
+        Mono,
+        Wide,
+    };
+    // The cluster counterpart of rasterizeInto, into its one- or two-cell canvas.
+    void rasterizeClusterInto(int slot, std::span<const std::uint32_t> codePoints, Rendering::FontFace, std::uint32_t weight,
+        std::uint32_t variant = 0, ClusterCanvas = ClusterCanvas::Mono);
     /// The canvas a sized window fills inside its slot.
     enum class SizedWindowCanvas : std::uint8_t {
         /// The mono overflow canvas: the cell with a margin at each side.

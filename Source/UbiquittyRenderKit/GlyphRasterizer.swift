@@ -67,6 +67,22 @@ final class GlyphRasterizer {
 
     private let context: CGContext
 
+    enum ClusterFitMode {
+        case preserveNativeAdvance
+        case fitAllocatedCells
+    }
+
+    static func clusterFitMode(for codePoints: Span<UInt32>) -> ClusterFitMode {
+        var visibleCount = 0
+        for index in 0..<codePoints.count {
+            if !Ubiquitty.Unicode.Width.isInvisibleFormat(codePoints[index]) {
+                visibleCount += 1
+                if visibleCount == 2 { return .fitAllocatedCells }
+            }
+        }
+        return .preserveNativeAdvance
+    }
+
     private struct PendingGlyph {
         let glyph: CGGlyph
         let font: CTFont
@@ -756,6 +772,7 @@ final class GlyphRasterizer {
     ///   - boostCap: The multiplier before the plane caps it, at most.
     ///   - baseGlyph: The cluster's base, which sizes the growth.
     ///   - font: The face carrying the base.
+    ///   - cellBounds: The allocated horizontal cell interval, or `nil` for natural width.
     /// - Returns: Whether any pixel came back non-zero.
     @discardableResult
     func rasterise(
@@ -764,21 +781,60 @@ final class GlyphRasterizer {
         boostCappedTo boostCap: CGFloat,
         sizedBy baseGlyph: CGGlyph,
         in font: CTFont,
+        fittingIn cellBounds: Ubiquitty.Rendering.ClusterRasterBounds? = nil,
         style: Style = .heaviest
     ) -> Bool {
         clearPlane()
         context.saveGState()
-        applyBoost(sizedBy: baseGlyph, in: font, at: origin, cappedTo: boostCap, landing: .onPenGrid)
+        let growth = boostTransform(sizedBy: baseGlyph, in: font, at: origin, cappedTo: boostCap, landing: .onPenGrid)
+        if let cellBounds {
+            applyClusterFit(line, at: origin, transformedBy: growth, within: cellBounds)
+        }
+        context.concatenate(growth)
         draw(line, at: origin, style: style)
         context.restoreGState()
         return captureCoverage()
     }
 
     @discardableResult
-    func rasterise(line: CTLine, at origin: CGPoint, style: Style = .heaviest) -> Bool {
+    func rasterise(
+        line: CTLine,
+        at origin: CGPoint,
+        fittingIn cellBounds: Ubiquitty.Rendering.ClusterRasterBounds? = nil,
+        style: Style = .heaviest
+    ) -> Bool {
         clearPlane()
+        context.saveGState()
+        if let cellBounds {
+            applyClusterFit(line, at: origin, transformedBy: .identity, within: cellBounds)
+        }
         draw(line, at: origin, style: style)
+        context.restoreGState()
         return captureCoverage()
+    }
+
+    /// Fits the complete positioned line after optical growth, retaining its vertical transform.
+    private func applyClusterFit(
+        _ line: CTLine,
+        at origin: CGPoint,
+        transformedBy growth: CGAffineTransform,
+        within cellBounds: Ubiquitty.Rendering.ClusterRasterBounds
+    ) {
+        guard cellBounds.width > 0, cellBounds.left.isFinite, cellBounds.width.isFinite else { return }
+        let advance = CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
+        let start = origin.applying(growth).x
+        let end = CGPoint(x: origin.x + advance, y: origin.y).applying(growth).x
+        var left = min(start, end)
+        var right = max(start, end)
+        let ink = CTLineGetBoundsWithOptions(line, .useGlyphPathBounds)
+        if !ink.isNull, !ink.isInfinite {
+            let positioned = ink.offsetBy(dx: origin.x, dy: origin.y).applying(growth)
+            left = min(left, positioned.minX)
+            right = max(right, positioned.maxX)
+        }
+        let fit = Ubiquitty.Rendering.fitClusterHorizontal(Double(left), Double(right), cellBounds)
+        context.clip(to: CGRect(x: CGFloat(cellBounds.left), y: 0, width: CGFloat(cellBounds.width), height: CGFloat(height)))
+        context.concatenate(CGAffineTransform(a: CGFloat(fit.scaleX), b: 0, c: 0, d: 1, tx: CGFloat(fit.translationX), ty: 0))
     }
 
     /// The line form of ``draw(_:in:at:style:)``: CTLineDraw pens at the

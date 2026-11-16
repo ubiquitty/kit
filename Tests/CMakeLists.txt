@@ -149,6 +149,13 @@ else()
     endforeach()
 endif()
 
+if(TARGET UbiquittyKitVulkan)
+    set(test_linux_cluster_atlas_EXTRA_LIBS UbiquittyKitVulkan)
+else()
+    list(APPEND UBIQUITTY_UNAVAILABLE_TESTS test_linux_cluster_atlas)
+    list(APPEND UBIQUITTY_DEFERRED_TESTS test_linux_cluster_atlas)
+endif()
+
 # Both this directory and every directory under it. `*/test_*.cpp` requires a
 # subdirectory, so a test written beside this file would be picked up by no one.
 file(GLOB_RECURSE _ubq_kit_tests RELATIVE ${UBIQUITTY_KIT_SOURCE_DIR}/Tests
@@ -181,7 +188,7 @@ endif()
 
 # GIO enables POSIX thread support; its consumers cannot reuse a PCH built
 # without the dependency's compiler options.
-set(UBIQUITTY_NO_PCH_TESTS test_linux_pty_watch test_linux_accessible_terminal test_linux_rich_text test_linux_pango_raster
+set(UBIQUITTY_NO_PCH_TESTS test_linux_pty_watch test_linux_accessible_terminal test_linux_rich_text test_linux_pango_raster test_linux_cluster_atlas
     test_linux_color_emoji test_linux_fallback_face test_linux_sized_master test_linux_proportional_at_size test_linux_shared_fonts)
 
 # What every test and the precompiled header read: Source/ of the core and kit

@@ -141,6 +141,102 @@ enum RasterDriver {
             check("oversized tile fixture allocates", false)
         }
 
+        if let clusterRaster = GlyphRasterizer(width: 160, height: 80) {
+            func shapedLine(_ text: String, in textFont: CTFont? = nil) -> CTLine {
+                CTLineCreateWithAttributedString(
+                    NSAttributedString(
+                        string: text,
+                        attributes: [
+                            NSAttributedString.Key(kCTFontAttributeName as String): textFont ?? font,
+                            NSAttributedString.Key(kCTForegroundColorFromContextAttributeName as String): true,
+                        ]
+                    )
+                )
+            }
+            func hasOutsideInk(_ pixels: [UInt8], left: CGFloat, width: CGFloat) -> Bool {
+                let first = Int(left.rounded(.down))
+                let end = Int((left + width).rounded(.up))
+                return pixels.enumerated().contains { index, coverage in
+                    coverage != 0 && (index % 160 < first || index % 160 >= end)
+                }
+            }
+            for text in ["क्‍ष", "का", "M\u{0301}\u{20DD}", "MM\u{0301}"] {
+                let points = text.unicodeScalars.map(\.value)
+                let fitMode = points.withUnsafeBufferPointer { GlyphRasterizer.clusterFitMode(for: $0.span) }
+                check("visible marked groups fit their cells", fitMode == .fitAllocatedCells, text)
+                let line = shapedLine(text)
+                for cellWidth in [CGFloat(8), CGFloat(16)] {
+                    for phase in [CGFloat(0), CGFloat(0.375)] {
+                        let pen = CGPoint(x: 20 + phase, y: 20)
+                        var bounds = Ubiquitty.Rendering.ClusterRasterBounds()
+                        bounds.left = Double(pen.x)
+                        bounds.width = Double(cellWidth)
+                        let inked = clusterRaster.rasterise(
+                            line: line, at: pen, fittingIn: fitMode == .fitAllocatedCells ? bounds : nil
+                        )
+                        check("a fitted marked group retains ink", inked, "\(text), width=\(cellWidth)")
+                        check(
+                            "a marked group stays inside its allocated cells",
+                            !hasOutsideInk(clusterRaster.coverage, left: pen.x, width: cellWidth),
+                            "\(text), width=\(cellWidth), phase=\(phase)"
+                        )
+                        clusterRaster.rasterise(
+                            line: line, at: pen, boostCappedTo: 1.1, sizedBy: glyph(0x4D), in: font,
+                            fittingIn: fitMode == .fitAllocatedCells ? bounds : nil
+                        )
+                        check("a fitted grown group retains ink", clusterRaster.coverage.contains { $0 != 0 })
+                        check(
+                            "optical growth keeps a marked group inside its cells",
+                            !hasOutsideInk(clusterRaster.coverage, left: pen.x, width: cellWidth)
+                        )
+                    }
+                }
+            }
+            let fittingLine = shapedLine("e\u{0301}")
+            let pen = CGPoint(x: 20, y: 20)
+            clusterRaster.rasterise(line: fittingLine, at: pen)
+            let natural = clusterRaster.coverage
+            var roomyBounds = Ubiquitty.Rendering.ClusterRasterBounds()
+            roomyBounds.left = Double(pen.x)
+            roomyBounds.width = 100
+            clusterRaster.rasterise(line: fittingLine, at: pen, fittingIn: roomyBounds)
+            check("an already fitting cluster retains its natural coverage", clusterRaster.coverage == natural)
+            let italic = faces[Ubiquitty.Rendering.FontFace.Italic]
+            var italicCharacter: UInt16 = 0x66
+            var italicGlyph: CGGlyph = 0
+            CTFontGetGlyphsForCharacters(italic, &italicCharacter, &italicGlyph, 1)
+            clusterRaster.rasterise(glyph: italicGlyph, in: italic, at: pen)
+            let naturalItalic = clusterRaster.coverage
+            roomyBounds.width = 8
+            clusterRaster.rasterise(line: fittingLine, at: pen, fittingIn: roomyBounds)
+            clusterRaster.rasterise(glyph: italicGlyph, in: italic, at: pen)
+            check("cluster fitting leaves ordinary italic glyphs unchanged", clusterRaster.coverage == naturalItalic)
+            let bareItalicLine = shapedLine("f", in: italic)
+            clusterRaster.rasterise(line: bareItalicLine, at: pen)
+            let bareItalicLineCoverage = clusterRaster.coverage
+            clusterRaster.rasterise(
+                line: bareItalicLine, at: pen, boostCappedTo: 1.1, sizedBy: italicGlyph, in: italic
+            )
+            let bareWideItalicCoverage = clusterRaster.coverage
+            for text in ["f\u{FE0E}", "f\u{200D}", "f\u{FE0E}\u{200D}"] {
+                let points = text.unicodeScalars.map(\.value)
+                let fitMode = points.withUnsafeBufferPointer { GlyphRasterizer.clusterFitMode(for: $0.span) }
+                check("invisible suffixes preserve native advance", fitMode == .preserveNativeAdvance, text)
+                let line = shapedLine(text, in: italic)
+                let bounds = fitMode == .fitAllocatedCells ? roomyBounds : nil
+                clusterRaster.rasterise(line: line, at: pen, fittingIn: bounds)
+                check("invisible suffixes preserve italic coverage", clusterRaster.coverage == bareItalicLineCoverage, text)
+                clusterRaster.rasterise(
+                    line: line, at: pen, boostCappedTo: 1.1, sizedBy: italicGlyph, in: italic, fittingIn: bounds
+                )
+                check("invisible suffixes preserve wide italic coverage", clusterRaster.coverage == bareWideItalicCoverage, text)
+            }
+            clusterRaster.rasterise(line: shapedLine(" "), at: pen, fittingIn: roomyBounds)
+            check("a fitted blank clears its predecessor", clusterRaster.coverage.allSatisfy { $0 == 0 })
+        } else {
+            check("the cluster fitting plane allocates", false)
+        }
+
         let variableURL = URL(fileURLWithPath: CommandLine.arguments[1]).appendingPathComponent("MonaspaceNeonVar.ttf")
         var registrationError: Unmanaged<CFError>?
         if CTFontManagerRegisterFontsForURL(variableURL as CFURL, .process, &registrationError) {

@@ -1544,7 +1544,7 @@ FT_FaceRec_* FreeTypeRasterizer::rangeMappedIconFace(std::span<const std::uint32
 }
 
 bool FreeTypeRasterizer::rasterizeNativeCluster(std::span<const std::uint32_t> codePoints, Rendering::FontFace style,
-    int slotWidth, int slotHeight, std::uint8_t* coverageOut)
+    int slotWidth, int slotHeight, std::uint8_t* coverageOut, const Rendering::ClusterRasterBounds* bounds)
 {
     const auto base = codePoints[Unicode::clusterBaseIndex(codePoints)];
     FT_FaceRec_* primary = monoFace(style);
@@ -1586,10 +1586,16 @@ bool FreeTypeRasterizer::rasterizeNativeCluster(std::span<const std::uint32_t> c
     if (!m_nativeClusters)
         m_nativeClusters = std::make_unique<NativeClusterRasterizer>();
     return m_nativeClusters->draw(codePoints, baseFont, resolve, this, features, penX, primaryBaselineY(slotHeight),
-        slotWidth, slotHeight, { coverageOut, static_cast<std::size_t>(slotWidth) * slotHeight });
+        slotWidth, slotHeight, { coverageOut, static_cast<std::size_t>(slotWidth) * slotHeight }, bounds);
 }
 
 bool FreeTypeRasterizer::rasterizeCluster(const std::uint32_t* codePoints, int count, Rendering::FontFace face, std::uint32_t weight, int slotWidth, int slotHeight, std::uint8_t* coverageOut)
+{
+    return rasterizeClusterWithBounds(codePoints, count, face, weight, slotWidth, slotHeight, coverageOut, nullptr);
+}
+
+bool FreeTypeRasterizer::rasterizeClusterWithBounds(const std::uint32_t* codePoints, int count, Rendering::FontFace face,
+    std::uint32_t weight, int slotWidth, int slotHeight, std::uint8_t* coverageOut, const Rendering::ClusterRasterBounds* bounds)
 {
     const auto overprint = [&] { return GlyphRasterizer::rasterizeCluster(codePoints, count, face, weight, slotWidth, slotHeight, coverageOut); };
     if (count < 2 || !codePoints || !m_face || slotWidth <= 0 || slotHeight <= 0)
@@ -1614,7 +1620,7 @@ bool FreeTypeRasterizer::rasterizeCluster(const std::uint32_t* codePoints, int c
     applyWeightAxis(face, weight);
     FT_FaceRec_* const primary = monoFace(face);
     const bool isPrimaryCluster = coversCluster(primary);
-    if (rasterizeNativeCluster(routed, face, slotWidth, slotHeight, coverageOut))
+    if (rasterizeNativeCluster(routed, face, slotWidth, slotHeight, coverageOut, bounds))
         return true;
     FT_FaceRec_* const mapped = isPrimaryCluster ? nullptr : rangeMappedIconFace(routed, face);
     bool isSymbolFallback = !isPrimaryCluster && !mapped && coversCluster(m_fallbackFace);
@@ -1666,7 +1672,7 @@ bool FreeTypeRasterizer::rasterizeCluster(const std::uint32_t* codePoints, int c
             x += positions[index].x_advance / shapeUnits;
         }
         if (m_nativeClusters->drawGlyphs(nativeGlyphs, nativeFont(primary, face), slotWidth, slotHeight,
-                { coverageOut, static_cast<std::size_t>(slotWidth) * slotHeight }))
+                { coverageOut, static_cast<std::size_t>(slotWidth) * slotHeight }, bounds, pen, x))
             return true;
     }
 
@@ -1682,6 +1688,17 @@ bool FreeTypeRasterizer::rasterizeCluster(const std::uint32_t* codePoints, int c
     int stackBottom = 0;
     const int markGap = std::max(1, static_cast<int>(std::lround(m_fontPixelSize / 16.0)));
     hb_unicode_funcs_t* const unicode = hb_unicode_funcs_get_default();
+    struct ClusterGlyphMask {
+        int left;
+        int top;
+        int width;
+        int height;
+        std::vector<std::uint8_t> pixels;
+    };
+    std::vector<ClusterGlyphMask> masks;
+    double advanceLeft = penX;
+    double inkLeft = std::numeric_limits<double>::infinity();
+    double inkRight = -std::numeric_limits<double>::infinity();
     bool didDraw = false;
     for (unsigned int index = 0; index < glyphCount; ++index) {
         const double glyphX = penX + positions[index].x_offset / shapeUnits;
@@ -1710,6 +1727,7 @@ bool FreeTypeRasterizer::rasterizeCluster(const std::uint32_t* codePoints, int c
         const int inkHeight = static_cast<int>(bitmap.rows);
         if (index == 0 && !isPrimaryCluster) {
             penX = (slotWidth - inkWidth) / 2 - slot->bitmap_left - positions[0].x_offset / 64.0;
+            advanceLeft = penX;
             baseInkLeft = (slotWidth - inkWidth) / 2;
             baseInkWidth = inkWidth;
         }
@@ -1746,7 +1764,24 @@ bool FreeTypeRasterizer::rasterizeCluster(const std::uint32_t* codePoints, int c
             stackTop = index == 0 ? top : std::min(stackTop, top);
             stackBottom = index == 0 ? top + inkHeight : std::max(stackBottom, top + inkHeight);
         }
-        for (int row = 0; row < inkHeight; ++row) {
+        if (bounds && inkWidth > 0 && inkHeight > 0) {
+            const int firstRow = std::clamp(-top, 0, inkHeight);
+            const int lastRow = std::clamp(slotHeight - top, firstRow, inkHeight);
+            ClusterGlyphMask mask { left, top + firstRow, inkWidth, lastRow - firstRow, {} };
+            mask.pixels.resize(static_cast<std::size_t>(inkWidth) * mask.height);
+            for (int row = firstRow; row < lastRow; ++row) {
+                const unsigned char* source = bitmap.buffer + static_cast<long>(row) * bitmap.pitch;
+                for (int column = 0; column < inkWidth; ++column) {
+                    mask.pixels[static_cast<std::size_t>(row - firstRow) * inkWidth + column] = bitmap.pixel_mode == FT_PIXEL_MODE_MONO
+                        ? ((source[column / 8] & (0x80 >> (column % 8))) ? 255 : 0)
+                        : source[column];
+                }
+            }
+            masks.push_back(std::move(mask));
+            inkLeft = std::min(inkLeft, static_cast<double>(left));
+            inkRight = std::max(inkRight, static_cast<double>(left) + inkWidth);
+        }
+        for (int row = 0; !bounds && row < inkHeight; ++row) {
             const int y = top + row;
             if (y < 0 || y >= slotHeight)
                 continue;
@@ -1766,6 +1801,34 @@ bool FreeTypeRasterizer::rasterizeCluster(const std::uint32_t* codePoints, int c
         }
         didDraw = didDraw || (inkWidth > 0 && inkHeight > 0);
         penX += isPrimaryCluster ? std::round(positions[index].x_advance / shapeUnits) : positions[index].x_advance / shapeUnits;
+    }
+    if (bounds && didDraw) {
+        const auto fit = Rendering::fitClusterHorizontal(std::min({ advanceLeft, penX, inkLeft }),
+            std::max({ advanceLeft, penX, inkRight }), *bounds);
+        for (const auto& mask : masks) {
+            const double maskLeft = mask.left * fit.scaleX + fit.translationX;
+            const double maskRight = (mask.left + mask.width) * fit.scaleX + fit.translationX;
+            const int firstColumn = std::max(0, static_cast<int>(std::floor(std::max(maskLeft, bounds->left))));
+            const int lastColumn = std::min(slotWidth, static_cast<int>(std::ceil(std::min(maskRight, bounds->left + bounds->width))));
+            for (int row = 0; row < mask.height; ++row) {
+                for (int column = firstColumn; column < lastColumn; ++column) {
+                    const double left = std::max({ static_cast<double>(column), maskLeft, bounds->left });
+                    const double right = std::min({ column + 1.0, maskRight, bounds->left + bounds->width });
+                    const double sourceLeft = std::clamp((left - fit.translationX) / fit.scaleX - mask.left, 0.0, static_cast<double>(mask.width));
+                    const double sourceRight = std::clamp((right - fit.translationX) / fit.scaleX - mask.left, sourceLeft, static_cast<double>(mask.width));
+                    double coverage = 0;
+                    for (int source = static_cast<int>(std::floor(sourceLeft)); source < std::ceil(sourceRight); ++source) {
+                        const double overlap = std::min(sourceRight, source + 1.0) - std::max(sourceLeft, static_cast<double>(source));
+                        coverage += mask.pixels[static_cast<std::size_t>(row) * mask.width + source] * overlap;
+                    }
+                    const auto value = static_cast<std::uint8_t>(std::clamp(std::lround(coverage * fit.scaleX), 0L, 255L));
+                    auto& destination = coverageOut[static_cast<std::size_t>(mask.top + row) * slotWidth + column];
+                    destination = isPrimaryCluster
+                        ? static_cast<std::uint8_t>(std::min(255, static_cast<int>(value) + destination))
+                        : std::max(destination, value);
+                }
+            }
+        }
     }
     return didDraw || overprint();
 }
@@ -2532,6 +2595,18 @@ bool FreeTypeRasterizer::rasterizeClusterAtPhase(const std::uint32_t* codePoints
 {
     const double prior = std::exchange(m_phaseInPixels, phaseInPixels);
     const bool didRasterize = rasterizeCluster(codePoints, count, face, weight, slotWidth, slotHeight, coverageOut);
+    m_phaseInPixels = prior;
+    return didRasterize;
+}
+
+bool FreeTypeRasterizer::rasterizeClusterInCell(const std::uint32_t* codePoints, int count, Rendering::FontFace face, std::uint32_t weight,
+    double phaseInPixels, Rendering::ClusterRasterBounds bounds, int slotWidth, int slotHeight, std::uint8_t* coverageOut)
+{
+    if (!std::isfinite(bounds.left) || !std::isfinite(bounds.width) || bounds.left < 0 || bounds.left >= slotWidth
+        || bounds.width <= 0 || bounds.width > slotWidth)
+        return false;
+    const double prior = std::exchange(m_phaseInPixels, phaseInPixels);
+    const bool didRasterize = rasterizeClusterWithBounds(codePoints, count, face, weight, slotWidth, slotHeight, coverageOut, &bounds);
     m_phaseInPixels = prior;
     return didRasterize;
 }
