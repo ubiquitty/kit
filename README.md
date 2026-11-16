@@ -13,10 +13,11 @@ use the Vulkan, FreeType, software and GTK libraries.
 
 [Embed a view](#embed-terminalview) · [API reference](Docs/ubiquittykit-api.md) · [Build the framework](#build) · [Get the apps](https://ubiquitty.org/)
 
-UbiquittyKit uses Ubiquitty Core, the most conformant engine in our recorded
-comparison:
+UbiquittyKit uses Ubiquitty Core for terminal behavior.
 
-**100% conformance: 4,532 / 4,532 applicable cases passed, versus about 66% for the next-best tested engine in our recorded comparison.**
+[![Recorded terminal compatibility](https://ubiquitty.org/reports/compatibility.svg)](https://ubiquitty.org/performance/#conformance)
+
+Recorded tests cover terminal controls and Unicode. [Current results and scope](https://ubiquitty.org/performance/#conformance).
 
 **The fastest parser in our comparative benchmarks, as of 7 November 2026.** [Conformance scope](https://github.com/ubiquitty/ubiquitty#conformance) · [Benchmark methods](https://github.com/ubiquitty/ubiquitty#benchmarks)
 
