@@ -1773,6 +1773,7 @@ package final class TerminalRenderer {
             images: images,
             backdrop: backdrop,
             confinedTo: contentScissor,
+            rulesConfinedTo: viewportScissor,
             phase: splitsAtBoxOverlays ? .fills : .whole,
             into: contentPass
         )
@@ -1799,6 +1800,7 @@ package final class TerminalRenderer {
                 images: images,
                 backdrop: backdrop,
                 confinedTo: contentScissor,
+                rulesConfinedTo: viewportScissor,
                 phase: .afterFills,
                 into: ink
             )
@@ -1814,7 +1816,7 @@ package final class TerminalRenderer {
             pass.colorAttachments[0].loadAction = .load
             pass.colorAttachments[0].storeAction = .store
             guard let rules = commands.makeRenderCommandEncoder(descriptor: pass) else { return nil }
-            if let contentScissor { rules.setScissorRect(contentScissor) }
+            if let viewportScissor { rules.setScissorRect(viewportScissor) }
             encoder.encodeEncodedRules(instances, uniforms: uniforms, sheets: sheets, segment: .head, into: rules)
             rules.endEncoding()
         }

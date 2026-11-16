@@ -256,6 +256,7 @@ final class FrameEncoder {
         images: ImageLayer? = nil,
         backdrop: Backdrop? = nil,
         confinedTo contentScissor: MTLScissorRect? = nil,
+        rulesConfinedTo ruleScissor: MTLScissorRect? = nil,
         phase: PassPhase = .whole,
         into encoder: MTLRenderCommandEncoder
     ) {
@@ -314,7 +315,21 @@ final class FrameEncoder {
         if let images {
             drawImages(images, band: .overText, uniforms: uniforms, into: encoder)
         }
+        // An underline's band may reach past the glyph atlas's margins. Core
+        // records those outer crossings and refuses a partial repaint of
+        // their row, so the complete stroke can draw without leaving old ink.
+        let rulesNeedViewport =
+            contentScissor != nil
+            && instances.counts.decorations > instances.counts.cursorTier.decorations
+            && !drawsBitmapPassesEncoded(uniforms)
+        if rulesNeedViewport {
+            encoder.setScissorRect(
+                ruleScissor
+                    ?? MTLScissorRect(x: 0, y: 0, width: Int(uniforms.viewportSizeInPixels.x), height: Int(uniforms.viewportSizeInPixels.y))
+            )
+        }
         drawRulePasses(instances, sheets, uniforms: uniforms, segment: .head, into: encoder)
+        if rulesNeedViewport, let contentScissor { encoder.setScissorRect(contentScissor) }
     }
 
     /// Draws secondary ink using the same instances and atlas as the ordinary grid.
