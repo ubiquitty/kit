@@ -72,7 +72,7 @@ public:
     ///   - width: The coverage plane's width in device pixels.
     ///   - height: The coverage plane's height in device pixels.
     ///   - coverage: Caller-owned storage for exactly `width * height` R8 bytes.
-    ///   - bounds: Optional allocated cell interval; the whole group fits it.
+    ///   - bounds: Optional cell interval; advance overflow fits the whole group.
     ///   - advanceLeft: The untransformed start of the group's advance.
     ///   - advanceRight: The untransformed end of the group's advance.
     /// - Returns: True when the native draw filled the coverage plane.
@@ -96,7 +96,7 @@ public:
     ///   - width: The coverage plane's width in device pixels.
     ///   - height: The coverage plane's height in device pixels.
     ///   - coverage: Caller-owned storage for exactly `width * height` R8 bytes.
-    ///   - bounds: Optional allocated cell interval; all routed runs fit together.
+    ///   - bounds: Optional cell interval; advance overflow fits all runs together.
     /// - Returns: True when native positioning and drawing filled the plane.
     bool draw(std::span<const std::uint32_t> codePoints, const NativeClusterFont& base,
         ResolveRun resolve, void* context, std::string_view features, double penX, double baseline,

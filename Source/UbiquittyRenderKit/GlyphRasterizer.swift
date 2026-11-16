@@ -69,18 +69,22 @@ final class GlyphRasterizer {
 
     enum ClusterFitMode {
         case preserveNativeAdvance
-        case fitAllocatedCells
+        case fitAdvanceOverflow
     }
 
     static func clusterFitMode(for codePoints: Span<UInt32>) -> ClusterFitMode {
         var visibleCount = 0
         for index in 0..<codePoints.count {
-            if !Ubiquitty.Unicode.Width.isInvisibleFormat(codePoints[index]) {
-                visibleCount += 1
-                if visibleCount == 2 { return .fitAllocatedCells }
+            let codePoint = codePoints[index]
+            if Ubiquitty.Unicode.Width.isInvisibleFormat(codePoint) { continue }
+            if Ubiquitty.Unicode.isExtendedPictographic(codePoint)
+                || Ubiquitty.Unicode.Width.forCodePoint(codePoint, .Narrow) == 2
+            {
+                return .preserveNativeAdvance
             }
+            visibleCount += 1
         }
-        return .preserveNativeAdvance
+        return visibleCount > 1 ? .fitAdvanceOverflow : .preserveNativeAdvance
     }
 
     private struct PendingGlyph {
@@ -813,7 +817,7 @@ final class GlyphRasterizer {
         return captureCoverage()
     }
 
-    /// Fits the complete positioned line after optical growth, retaining its vertical transform.
+    /// Fits an overflowing advance as one positioned line, retaining its vertical transform.
     private func applyClusterFit(
         _ line: CTLine,
         at origin: CGPoint,
@@ -822,6 +826,8 @@ final class GlyphRasterizer {
     ) {
         guard cellBounds.width > 0, cellBounds.left.isFinite, cellBounds.width.isFinite else { return }
         let advance = CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
+        // Native diacritic overhang is retained whenever the shaped advance fits.
+        guard advance.isFinite, abs(advance) > CGFloat(cellBounds.width) else { return }
         let start = origin.applying(growth).x
         let end = CGPoint(x: origin.x + advance, y: origin.y).applying(growth).x
         var left = min(start, end)

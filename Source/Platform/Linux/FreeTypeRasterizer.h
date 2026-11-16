@@ -136,7 +136,7 @@ public:
         int slotWidth, int slotHeight, std::uint8_t* coverageOut) override;
     bool rasterizeClusterAtPhase(const std::uint32_t*, int count, Rendering::FontFace, std::uint32_t weight, double phaseInPixels,
         int slotWidth, int slotHeight, std::uint8_t* coverageOut) override;
-    /// Fits a complete shaped cluster into its allocated terminal columns.
+    /// Fits a narrow shaped cluster when its advance exceeds its cell allocation.
     bool rasterizeClusterInCell(const std::uint32_t*, int count, Rendering::FontFace, std::uint32_t weight, double phaseInPixels,
         Rendering::ClusterRasterBounds, int slotWidth, int slotHeight, std::uint8_t* coverageOut) override;
 

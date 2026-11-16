@@ -529,7 +529,6 @@ final class CoverageSheet {
     ///
     /// - Parameters:
     ///   - line: The shaped cluster.
-    ///   - fitMode: Whether visible marks need the allocated cell bounds.
     ///   - baseGlyph: The cluster's base, which sizes the growth.
     ///   - font: The face carrying the base.
     ///   - style: The raster style, whose tier is the foreground's weight.
@@ -538,7 +537,6 @@ final class CoverageSheet {
     ///   - slot: The slot the cache assigned.
     func rasterise(
         cluster line: CTLine,
-        fitMode: GlyphRasterizer.ClusterFitMode,
         baseGlyph: CGGlyph,
         in font: CTFont,
         style: GlyphRasterizer.Style,
@@ -547,16 +545,12 @@ final class CoverageSheet {
         slot: Int
     ) {
         let centred = centredPen(of: baseGlyph, in: font, raisedBy: raise)
-        var cellBounds = Ubiquitty.Rendering.ClusterRasterBounds()
-        cellBounds.left = Double(pen.x + subpixel)
-        cellBounds.width = Double(centringWidthInPixels)
         rasterizer.rasterise(
             line: line,
             at: CGPoint(x: centred.x + subpixel, y: centred.y),
             boostCappedTo: boostCap,
             sizedBy: baseGlyph,
             in: font,
-            fittingIn: fitMode == .fitAllocatedCells ? cellBounds : nil,
             style: style
         )
         upload(slot)

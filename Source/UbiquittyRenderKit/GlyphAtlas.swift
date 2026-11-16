@@ -1785,7 +1785,6 @@ extension GlyphAtlas: WideClusterGlyphSource {
                 let baseFont = faceCarrying(shaped.base, face: face)
                 wide.rasterise(
                     cluster: shaped.line,
-                    fitMode: GlyphRasterizer.clusterFitMode(for: codePoints.span),
                     baseGlyph: GlyphAtlas.glyphIdentifier(for: shaped.base, in: baseFont) ?? 0,
                     in: baseFont,
                     style: rasterStyle(for: variant),
@@ -2604,7 +2603,7 @@ extension GlyphAtlas: ClusterGlyphSource {
             rasterizer.rasterise(
                 line: shaped.line,
                 at: pen,
-                fittingIn: GlyphRasterizer.clusterFitMode(for: codePoints.span) == .fitAllocatedCells ? cellBounds : nil,
+                fittingIn: GlyphRasterizer.clusterFitMode(for: codePoints.span) == .fitAdvanceOverflow ? cellBounds : nil,
                 style: rasterStyle(for: phase)
             )
         } else {

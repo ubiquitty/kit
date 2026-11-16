@@ -1178,8 +1178,8 @@ TEST(cascadedMarkedClustersKeepTheirVerticalPlacementWhileFittingColumns)
         };
         const auto naturalRows = inkRows(natural);
         CHECK(naturalRows.second >= naturalRows.first);
-        for (int columns : { 1, 2 }) {
-            const Ubiquitty::Rendering::ClusterRasterBounds bounds { 8, static_cast<double>(columns * cellWidth) };
+        for (int divisor : { 2, 4 }) {
+            const Ubiquitty::Rendering::ClusterRasterBounds bounds { 8, cellWidth / static_cast<double>(divisor) };
             std::vector<std::uint8_t> fitted(natural.size());
             CHECK(raster.rasterizeClusterInCell(points.data(), static_cast<int>(points.size()), Ubiquitty::Rendering::FontFace::Regular,
                 0, 0, bounds, width, height, fitted.data()));
@@ -1209,6 +1209,57 @@ TEST(cascadedMarkedClustersKeepTheirVerticalPlacementWhileFittingColumns)
         std::printf("    exercised the installed Devanagari fallback\n");
     } else
         std::printf("    SKIP Devanagari fallback: no scalable system face carries U+0915\n");
+}
+
+TEST(markedClustersKeepNativeProportionsAndOverhangWhenTheirAdvanceFits)
+{
+    CHECK(registerBundledFonts());
+    struct ClusterCase {
+        std::vector<std::uint32_t> points;
+        int columns;
+    };
+    const std::array cases {
+        ClusterCase { { 0x6f22, 0x301 }, 2 },
+        ClusterCase { { 0x8a9e, 0x20dd }, 2 },
+        ClusterCase { { 0x1f469, 0x200d, 0x1f469, 0x200d, 0x1f467, 0x200d, 0x1f467 }, 2 },
+        ClusterCase { { 'Z', 0x335, 0x34c, 0x35d, 0x30e, 0x321, 0x320, 0x32b }, 1 },
+        ClusterCase { { 0x250, 0x35d, 0x301 }, 1 },
+    };
+    bool hasMarkedOverhang = false;
+    for (int size : { 15, 28, 32 }) {
+        Ubiquitty::Linux::FreeTypeRasterizer raster {
+            static_cast<double>(size), "JetBrains Mono", {}, bundled("SymbolsNerdFontMono-Regular.ttf"), bundled("JetBrainsMono[wght].ttf")
+        };
+        const auto metrics = raster.cellMetrics();
+        const int cellWidth = static_cast<int>(metrics.cellWidth);
+        const int height = static_cast<int>(metrics.cellHeight) + 128;
+        CHECK_EQ(raster.glyphIndexForCodePoint(0x6f22), 0u);
+        CHECK_EQ(raster.glyphIndexForCodePoint(0x250), 0u);
+        for (const auto& cluster : cases) {
+            const int width = cluster.columns * cellWidth + 64;
+            for (auto style : { Ubiquitty::Rendering::FontFace::Regular, Ubiquitty::Rendering::FontFace::Italic }) {
+                for (double phase : { 0.0, 0.25, 0.75 }) {
+                    const Ubiquitty::Rendering::ClusterRasterBounds bounds { 32 + phase, static_cast<double>(cluster.columns * cellWidth) };
+                    std::vector<std::uint8_t> natural(static_cast<std::size_t>(width) * height), allocated(natural.size());
+                    CHECK(raster.rasterizeClusterAtPhase(cluster.points.data(), static_cast<int>(cluster.points.size()), style,
+                        0, phase, width, height, natural.data()));
+                    CHECK(raster.rasterizeClusterInCell(cluster.points.data(), static_cast<int>(cluster.points.size()), style,
+                        0, phase, bounds, width, height, allocated.data()));
+                    CHECK_MSG(natural == allocated, "fitting preserves native coverage when the shaped advance fits");
+                    CHECK(std::ranges::any_of(allocated, [](auto value) { return value != 0; }));
+                    if (cluster.points.front() == 'Z') {
+                        for (int row = 0; row < height; ++row) {
+                            for (int column = 0; column < width; ++column) {
+                                if (column + 1 <= bounds.left || column >= bounds.left + bounds.width)
+                                    hasMarkedOverhang = hasMarkedOverhang || allocated[static_cast<std::size_t>(row) * width + column] != 0;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    CHECK_MSG(hasMarkedOverhang, "fitting leaves zero-advance mark overhang visible outside the cell");
 }
 
 UBIQUITTY_TEST_MAIN()

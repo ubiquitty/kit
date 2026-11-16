@@ -13,6 +13,8 @@ namespace {
 
 struct ClusterRasterizer final : Ubiquitty::Rendering::GlyphRasterizer {
     int calls { 0 };
+    int nativeCalls { 0 };
+    int boundedCalls { 0 };
     std::uint32_t lastWeight { 0 };
     Ubiquitty::Rendering::ClusterRasterBounds lastBounds;
     std::vector<std::uint32_t> lastCluster;
@@ -45,14 +47,28 @@ struct ClusterRasterizer final : Ubiquitty::Rendering::GlyphRasterizer {
     bool rasterizeClusterInCell(const std::uint32_t* points, int count, Ubiquitty::Rendering::FontFace, std::uint32_t weight,
         double, Ubiquitty::Rendering::ClusterRasterBounds bounds, int width, int height, std::uint8_t* coverage) override
     {
+        ++boundedCalls;
+        lastBounds = bounds;
+        return drawCluster(points, count, weight, width, height, coverage, &bounds);
+    }
+
+    bool rasterizeClusterAtPhase(const std::uint32_t* points, int count, Ubiquitty::Rendering::FontFace, std::uint32_t weight,
+        double, int width, int height, std::uint8_t* coverage) override
+    {
+        ++nativeCalls;
+        return drawCluster(points, count, weight, width, height, coverage, nullptr);
+    }
+
+    bool drawCluster(const std::uint32_t* points, int count, std::uint32_t weight, int width, int height,
+        std::uint8_t* coverage, const Ubiquitty::Rendering::ClusterRasterBounds* bounds)
+    {
         ++calls;
         lastWeight = weight;
-        lastBounds = bounds;
         lastCluster.assign(points, points + count);
         std::fill_n(coverage, static_cast<std::size_t>(width) * height, std::uint8_t { 0 });
         for (int row = 0; row < height; ++row) {
             for (int column = 0; column < width; ++column) {
-                if (column >= bounds.left && column < bounds.left + bounds.width)
+                if (!bounds || (column >= bounds->left && column < bounds->left + bounds->width))
                     coverage[static_cast<std::size_t>(row) * width + column] = static_cast<std::uint8_t>(calls);
             }
         }
@@ -79,8 +95,8 @@ TEST(vulkanMarkedClustersKeepWholeSourcesAndSeparateOneAndTwoColumnSlots)
     const auto wide = backend.wideClusterGlyph(backend.context, points, Ubiquitty::Rendering::FontFace::Regular, 0, 0);
     CHECK(wide.present);
     CHECK_EQ(wide.maxUV.x - wide.minUV.x, 20.0f);
-    CHECK_EQ(rasterizer.lastBounds.left, 0.0);
-    CHECK_EQ(rasterizer.lastBounds.width, 20.0);
+    CHECK_EQ(rasterizer.nativeCalls, 1);
+    CHECK_EQ(rasterizer.boundedCalls, 1);
     CHECK(std::ranges::equal(rasterizer.lastCluster, points));
     CHECK_EQ(rasterizer.calls, 2);
     const auto repeatedMono = backend.clusterGlyph(backend.context, points, Ubiquitty::Rendering::FontFace::Regular, 0, 0);
@@ -108,6 +124,27 @@ TEST(vulkanWideMarkedClustersKeepDefaultWeightOnMissesAndHits)
     CHECK(backend.wideClusterGlyph(backend.context, points, Ubiquitty::Rendering::FontFace::Bold, 7, 0).present);
     CHECK_EQ(rasterizer.lastWeight, 0u);
     CHECK_EQ(rasterizer.calls, 2);
+}
+
+TEST(vulkanWideMarkedTextAndPictographsKeepTheirNativeRasterRoute)
+{
+    ClusterRasterizer rasterizer;
+    Ubiquitty::Linux::VulkanGlyphAtlas atlas(rasterizer, 4096, 4);
+    const auto backend = atlas.glyphBackend();
+    const std::array<std::vector<std::uint32_t>, 3> wide {
+        std::vector<std::uint32_t> { 0x6f22, 0x301 },
+        std::vector<std::uint32_t> { 0x8a9e, 0x20dd },
+        std::vector<std::uint32_t> { 0x1f469, 0x200d, 0x1f469, 0x200d, 0x1f467, 0x200d, 0x1f467 },
+    };
+    for (const auto& points : wide) {
+        CHECK(backend.wideClusterGlyph(backend.context, points, Ubiquitty::Rendering::FontFace::Regular, 0, 0).present);
+        CHECK(std::ranges::equal(rasterizer.lastCluster, points));
+    }
+    constexpr std::array<std::uint32_t, 8> marked { 'Z', 0x335, 0x34c, 0x35d, 0x30e, 0x321, 0x320, 0x32b };
+    CHECK(backend.clusterGlyph(backend.context, marked, Ubiquitty::Rendering::FontFace::Regular, 0, 0).present);
+    CHECK(std::ranges::equal(rasterizer.lastCluster, marked));
+    CHECK_EQ(rasterizer.nativeCalls, 3);
+    CHECK_EQ(rasterizer.boundedCalls, 1);
 }
 
 UBIQUITTY_TEST_MAIN()

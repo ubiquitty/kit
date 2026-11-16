@@ -160,19 +160,24 @@ enum RasterDriver {
                     coverage != 0 && (index % 160 < first || index % 160 >= end)
                 }
             }
-            for text in ["क्‍ष", "का", "M\u{0301}\u{20DD}", "MM\u{0301}"] {
+            let nativeCellAdvance = CGFloat(CTLineGetTypographicBounds(shapedLine("M"), nil, nil, nil))
+            for text in ["क्‍ष", "का", "कि", "कााा"] {
                 let points = text.unicodeScalars.map(\.value)
                 let fitMode = points.withUnsafeBufferPointer { GlyphRasterizer.clusterFitMode(for: $0.span) }
-                check("visible marked groups fit their cells", fitMode == .fitAllocatedCells, text)
+                check("narrow marked groups fit advance overflow", fitMode == .fitAdvanceOverflow, text)
                 let line = shapedLine(text)
-                for cellWidth in [CGFloat(8), CGFloat(16)] {
+                check(
+                    "the Indic fixture advances beyond one native cell",
+                    CTLineGetTypographicBounds(line, nil, nil, nil) > Double(nativeCellAdvance), text
+                )
+                for cellWidth in [nativeCellAdvance / 2, nativeCellAdvance] {
                     for phase in [CGFloat(0), CGFloat(0.375)] {
                         let pen = CGPoint(x: 20 + phase, y: 20)
                         var bounds = Ubiquitty.Rendering.ClusterRasterBounds()
                         bounds.left = Double(pen.x)
                         bounds.width = Double(cellWidth)
                         let inked = clusterRaster.rasterise(
-                            line: line, at: pen, fittingIn: fitMode == .fitAllocatedCells ? bounds : nil
+                            line: line, at: pen, fittingIn: fitMode == .fitAdvanceOverflow ? bounds : nil
                         )
                         check("a fitted marked group retains ink", inked, "\(text), width=\(cellWidth)")
                         check(
@@ -182,7 +187,7 @@ enum RasterDriver {
                         )
                         clusterRaster.rasterise(
                             line: line, at: pen, boostCappedTo: 1.1, sizedBy: glyph(0x4D), in: font,
-                            fittingIn: fitMode == .fitAllocatedCells ? bounds : nil
+                            fittingIn: fitMode == .fitAdvanceOverflow ? bounds : nil
                         )
                         check("a fitted grown group retains ink", clusterRaster.coverage.contains { $0 != 0 })
                         check(
@@ -191,6 +196,38 @@ enum RasterDriver {
                         )
                     }
                 }
+            }
+            let preservedClusters: [(String, CGFloat, GlyphRasterizer.ClusterFitMode)] = [
+                ("漢\u{0301}", 2, .preserveNativeAdvance),
+                ("語\u{20DD}", 2, .preserveNativeAdvance),
+                ("👩‍👩‍👧‍👧", 2, .preserveNativeAdvance),
+                ("Z\u{0335}\u{034C}\u{035D}\u{030E}\u{0321}\u{0320}\u{032B}", 1, .fitAdvanceOverflow),
+            ]
+            for (text, columns, expectedMode) in preservedClusters {
+                let points = text.unicodeScalars.map(\.value)
+                let fitMode = points.withUnsafeBufferPointer { GlyphRasterizer.clusterFitMode(for: $0.span) }
+                check("the cluster retains its native sizing policy", fitMode == expectedMode, text)
+                let line = shapedLine(text)
+                let pen = CGPoint(x: 20, y: 20)
+                var bounds = Ubiquitty.Rendering.ClusterRasterBounds()
+                bounds.left = Double(pen.x)
+                bounds.width = Double(nativeCellAdvance * columns)
+                clusterRaster.rasterise(line: line, at: pen)
+                let natural = clusterRaster.coverage
+                check("the natural cluster retains ink", natural.contains { $0 != 0 }, text)
+                if expectedMode == .fitAdvanceOverflow {
+                    check("the marked Latin advance fits its cell", CTLineGetTypographicBounds(line, nil, nil, nil) <= bounds.width)
+                    check("the fitting advance carries native ink overhang", hasOutsideInk(natural, left: pen.x, width: nativeCellAdvance))
+                }
+                let allocation = fitMode == .fitAdvanceOverflow ? bounds : nil
+                clusterRaster.rasterise(line: line, at: pen, fittingIn: allocation)
+                check("natural sizing and diacritic overhang are preserved", clusterRaster.coverage == natural, text)
+                clusterRaster.rasterise(line: line, at: pen, boostCappedTo: 1.1, sizedBy: glyph(0x4D), in: font)
+                let grown = clusterRaster.coverage
+                clusterRaster.rasterise(
+                    line: line, at: pen, boostCappedTo: 1.1, sizedBy: glyph(0x4D), in: font, fittingIn: allocation
+                )
+                check("natural optical growth is preserved", clusterRaster.coverage == grown, text)
             }
             let fittingLine = shapedLine("e\u{0301}")
             let pen = CGPoint(x: 20, y: 20)
@@ -222,7 +259,7 @@ enum RasterDriver {
                     line: line, at: pen, boostCappedTo: 1.1, sizedBy: italicGlyph, in: italic
                 )
                 let nativeWideItalicCoverage = clusterRaster.coverage
-                let bounds = fitMode == .fitAllocatedCells ? roomyBounds : nil
+                let bounds = fitMode == .fitAdvanceOverflow ? roomyBounds : nil
                 clusterRaster.rasterise(line: line, at: pen, fittingIn: bounds)
                 check("invisible suffixes preserve native italic coverage", clusterRaster.coverage == nativeItalicCoverage, text)
                 clusterRaster.rasterise(

@@ -211,8 +211,11 @@ void VulkanGlyphAtlas::rasterizeClusterInto(int slot, std::span<const std::uint3
     const Rendering::AtlasSlotRegion region { (slot % m_columns) * m_slotWidthInPixels, (slot / m_columns) * m_slotHeightInPixels, width, height };
     const double phase = isWide ? 0 : static_cast<double>(Rendering::variantPhase(variant)) / std::max(1, m_rasterizer.glyphPhaseCount());
     const Rendering::ClusterRasterBounds bounds { isWide ? 0 : m_monoMarginXInPixels + phase, static_cast<double>(isWide ? 2 * m_cellWidth : m_cellWidth) };
-    const bool inked = m_rasterizer.rasterizeClusterInCell(codePoints.data(), static_cast<int>(codePoints.size()), face, weight,
-        phase, bounds, width, height, m_slotScratch.data());
+    const bool inked = isWide
+        ? m_rasterizer.rasterizeClusterAtPhase(codePoints.data(), static_cast<int>(codePoints.size()), face, weight,
+              phase, width, height, m_slotScratch.data())
+        : m_rasterizer.rasterizeClusterInCell(codePoints.data(), static_cast<int>(codePoints.size()), face, weight,
+              phase, bounds, width, height, m_slotScratch.data());
     const std::span<const std::uint8_t> plane = inked ? std::span<const std::uint8_t>(m_slotScratch).first(static_cast<std::size_t>(width) * static_cast<std::size_t>(height)) : std::span<const std::uint8_t> {};
     Rendering::writeAtlasCoverage(m_coverage, m_atlasWidth, region, plane);
     recordInkBox(slot, plane, width, height);

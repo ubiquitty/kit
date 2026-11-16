@@ -280,7 +280,8 @@ bool NativeClusterRasterizer::drawGlyphs(std::span<const NativePositionedGlyph> 
     native.reserve(glyphs.size());
     for (const auto& glyph : glyphs)
         native.push_back({ glyph.glyph, glyph.x, glyph.y });
-    if (bounds) {
+    const bool shouldFit = bounds && std::abs(advanceRight - advanceLeft) > bounds->width;
+    if (shouldFit) {
         cairo_text_extents_t ink;
         cairo_scaled_font_glyph_extents(scaled, native.data(), static_cast<int>(native.size()), &ink);
         const double inkLeft = native.front().x + ink.x_bearing;
@@ -291,7 +292,7 @@ bool NativeClusterRasterizer::drawGlyphs(std::span<const NativePositionedGlyph> 
         cairo_translate(painter.get(), fit.translationX, 0);
         cairo_scale(painter.get(), fit.scaleX, 1);
     }
-    if (bounds)
+    if (shouldFit)
         setNativeFontForTransform(painter.get(), scaled);
     else
         cairo_set_scaled_font(painter.get(), scaled);
@@ -459,7 +460,8 @@ bool NativeClusterRasterizer::draw(std::span<const std::uint32_t> codePoints, co
             cairo_show_glyphs(painter.get(), glyphs.data(), static_cast<int>(glyphs.size()));
         }
     }
-    if (bounds) {
+    const bool shouldFit = bounds && std::abs(x - penX) > bounds->width;
+    if (shouldFit) {
         const auto fit = Rendering::fitClusterHorizontal(std::min(inkLeft, x), std::max(inkRight, x), *bounds);
         cairo_rectangle(painter.get(), bounds->left, 0, bounds->width, height);
         cairo_clip(painter.get());
@@ -467,7 +469,10 @@ bool NativeClusterRasterizer::draw(std::span<const std::uint32_t> codePoints, co
         cairo_scale(painter.get(), fit.scaleX, 1);
     }
     for (const auto& run : positionedRuns) {
-        setNativeFontForTransform(painter.get(), run.font);
+        if (shouldFit)
+            setNativeFontForTransform(painter.get(), run.font);
+        else
+            cairo_set_scaled_font(painter.get(), run.font);
         cairo_show_glyphs(painter.get(), run.glyphs.data(), static_cast<int>(run.glyphs.size()));
     }
     if (cairo_status(painter.get()) != CAIRO_STATUS_SUCCESS)

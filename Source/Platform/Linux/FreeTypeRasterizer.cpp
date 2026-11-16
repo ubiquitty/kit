@@ -1697,10 +1697,12 @@ bool FreeTypeRasterizer::rasterizeClusterWithBounds(const std::uint32_t* codePoi
     };
     std::vector<ClusterGlyphMask> masks;
     double advanceLeft = penX;
+    double shapedAdvance = 0;
     double inkLeft = std::numeric_limits<double>::infinity();
     double inkRight = -std::numeric_limits<double>::infinity();
     bool didDraw = false;
     for (unsigned int index = 0; index < glyphCount; ++index) {
+        shapedAdvance += positions[index].x_advance / shapeUnits;
         const double glyphX = penX + positions[index].x_offset / shapeUnits;
         const double glyphBaseline = baselineY - positions[index].y_offset / shapeUnits;
         // Cairo's image compositor keys native glyph masks on quarter-pixel
@@ -1803,17 +1805,21 @@ bool FreeTypeRasterizer::rasterizeClusterWithBounds(const std::uint32_t* codePoi
         penX += isPrimaryCluster ? std::round(positions[index].x_advance / shapeUnits) : positions[index].x_advance / shapeUnits;
     }
     if (bounds && didDraw) {
-        const auto fit = Rendering::fitClusterHorizontal(std::min({ advanceLeft, penX, inkLeft }),
-            std::max({ advanceLeft, penX, inkRight }), *bounds);
+        const bool shouldFit = std::abs(shapedAdvance) > bounds->width;
+        const auto fit = shouldFit ? Rendering::fitClusterHorizontal(std::min({ advanceLeft, advanceLeft + shapedAdvance, inkLeft }),
+                                         std::max({ advanceLeft, advanceLeft + shapedAdvance, inkRight }), *bounds)
+                                   : Rendering::ClusterHorizontalFit {};
+        const double clipLeft = shouldFit ? bounds->left : 0;
+        const double clipRight = shouldFit ? bounds->left + bounds->width : slotWidth;
         for (const auto& mask : masks) {
             const double maskLeft = mask.left * fit.scaleX + fit.translationX;
             const double maskRight = (mask.left + mask.width) * fit.scaleX + fit.translationX;
-            const int firstColumn = std::max(0, static_cast<int>(std::floor(std::max(maskLeft, bounds->left))));
-            const int lastColumn = std::min(slotWidth, static_cast<int>(std::ceil(std::min(maskRight, bounds->left + bounds->width))));
+            const int firstColumn = std::max(0, static_cast<int>(std::floor(std::max(maskLeft, clipLeft))));
+            const int lastColumn = std::min(slotWidth, static_cast<int>(std::ceil(std::min(maskRight, clipRight))));
             for (int row = 0; row < mask.height; ++row) {
                 for (int column = firstColumn; column < lastColumn; ++column) {
-                    const double left = std::max({ static_cast<double>(column), maskLeft, bounds->left });
-                    const double right = std::min({ column + 1.0, maskRight, bounds->left + bounds->width });
+                    const double left = std::max({ static_cast<double>(column), maskLeft, clipLeft });
+                    const double right = std::min({ column + 1.0, maskRight, clipRight });
                     const double sourceLeft = std::clamp((left - fit.translationX) / fit.scaleX - mask.left, 0.0, static_cast<double>(mask.width));
                     const double sourceRight = std::clamp((right - fit.translationX) / fit.scaleX - mask.left, sourceLeft, static_cast<double>(mask.width));
                     double coverage = 0;
@@ -2605,6 +2611,12 @@ bool FreeTypeRasterizer::rasterizeClusterInCell(const std::uint32_t* codePoints,
     if (!std::isfinite(bounds.left) || !std::isfinite(bounds.width) || bounds.left < 0 || bounds.left >= slotWidth
         || bounds.width <= 0 || bounds.width > slotWidth)
         return false;
+    if (codePoints && count > 0) {
+        const auto points = std::span(codePoints, static_cast<std::size_t>(count));
+        const auto base = points[Unicode::clusterBaseIndex(points)];
+        if (Unicode::Width::forCodePoint(base, Unicode::Width::AmbiguousWidth::Narrow) != 1 || Unicode::isExtendedPictographic(base))
+            return rasterizeClusterAtPhase(codePoints, count, face, weight, phaseInPixels, slotWidth, slotHeight, coverageOut);
+    }
     const double prior = std::exchange(m_phaseInPixels, phaseInPixels);
     const bool didRasterize = rasterizeClusterWithBounds(codePoints, count, face, weight, slotWidth, slotHeight, coverageOut, &bounds);
     m_phaseInPixels = prior;
