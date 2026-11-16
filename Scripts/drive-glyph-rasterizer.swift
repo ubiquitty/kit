@@ -211,25 +211,24 @@ enum RasterDriver {
             clusterRaster.rasterise(line: fittingLine, at: pen, fittingIn: roomyBounds)
             clusterRaster.rasterise(glyph: italicGlyph, in: italic, at: pen)
             check("cluster fitting leaves ordinary italic glyphs unchanged", clusterRaster.coverage == naturalItalic)
-            let bareItalicLine = shapedLine("f", in: italic)
-            clusterRaster.rasterise(line: bareItalicLine, at: pen)
-            let bareItalicLineCoverage = clusterRaster.coverage
-            clusterRaster.rasterise(
-                line: bareItalicLine, at: pen, boostCappedTo: 1.1, sizedBy: italicGlyph, in: italic
-            )
-            let bareWideItalicCoverage = clusterRaster.coverage
             for text in ["f\u{FE0E}", "f\u{200D}", "f\u{FE0E}\u{200D}"] {
                 let points = text.unicodeScalars.map(\.value)
                 let fitMode = points.withUnsafeBufferPointer { GlyphRasterizer.clusterFitMode(for: $0.span) }
                 check("invisible suffixes preserve native advance", fitMode == .preserveNativeAdvance, text)
                 let line = shapedLine(text, in: italic)
+                clusterRaster.rasterise(line: line, at: pen)
+                let nativeItalicCoverage = clusterRaster.coverage
+                clusterRaster.rasterise(
+                    line: line, at: pen, boostCappedTo: 1.1, sizedBy: italicGlyph, in: italic
+                )
+                let nativeWideItalicCoverage = clusterRaster.coverage
                 let bounds = fitMode == .fitAllocatedCells ? roomyBounds : nil
                 clusterRaster.rasterise(line: line, at: pen, fittingIn: bounds)
-                check("invisible suffixes preserve italic coverage", clusterRaster.coverage == bareItalicLineCoverage, text)
+                check("invisible suffixes preserve native italic coverage", clusterRaster.coverage == nativeItalicCoverage, text)
                 clusterRaster.rasterise(
                     line: line, at: pen, boostCappedTo: 1.1, sizedBy: italicGlyph, in: italic, fittingIn: bounds
                 )
-                check("invisible suffixes preserve wide italic coverage", clusterRaster.coverage == bareWideItalicCoverage, text)
+                check("invisible suffixes preserve native wide italic coverage", clusterRaster.coverage == nativeWideItalicCoverage, text)
             }
             clusterRaster.rasterise(line: shapedLine(" "), at: pen, fittingIn: roomyBounds)
             check("a fitted blank clears its predecessor", clusterRaster.coverage.allSatisfy { $0 == 0 })
