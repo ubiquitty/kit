@@ -237,7 +237,7 @@ private func runTerminalRendererDriver() {
         print("drive-terminal-renderer: the figure did not capture")
         exit(2)
     }
-    let capturedFigure = SurfaceImageStore(device: device).layer(for: figureCapture)
+    let capturedFigure = SurfaceImageStore(device: device).layer(for: figureCapture, isHoldingForResize: false)
     check(
         "a placeholder figure draws every cell on the capture route",
         capturedFigure?.quadCount == figureColumns * figureRows,
