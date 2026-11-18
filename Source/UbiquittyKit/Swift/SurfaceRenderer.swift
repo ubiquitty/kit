@@ -2371,10 +2371,10 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
         }
     }
 
-    /// Records the hovered band of the frame actually submitted, whose history
-    /// can have advanced beyond the published snapshot used for assembly.
+    /// Records the hovered band of the capture describing the current picture,
+    /// whose history can have advanced beyond the snapshot used for assembly.
     /// - Parameters:
-    ///   - capture: The submitted frame.
+    ///   - capture: The submitted frame or an identical picture accepted in its place.
     ///   - surface: The surface receiving it.
     private func noteCapturedHover(_ capture: Ubiquitty.Rendering.FrameCapture, for surface: TerminalSurface) {
         let color = capture.linkHoverColor()
@@ -3516,6 +3516,7 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
                         selectionSpans: selection.spanScratch.prefix(spanCount),
                         noSlotCount: surface.drive.syncFrameNoSlotCount
                     )
+                    noteCapturedHover(syncFrame, for: surface)
                     return true
                 }
                 lastFrameDecline = .boundaryBuild
