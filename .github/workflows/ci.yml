@@ -142,6 +142,10 @@ jobs:
             cat "$log"
             echo "::endgroup::"
           done
+      - name: Stop remaining owned CI containers
+        if: always()
+        run: ./Libraries/ubiquitty-core/Scripts/ci-linux-image.sh --source-root "$GITHUB_WORKSPACE" --cleanup-containers
+
 
   linux:
     name: Linux battery
@@ -213,8 +217,12 @@ jobs:
         env:
           UBQ_CI_LINUX_IMAGE: "true"
         run: ./Libraries/ubiquitty-core/Scripts/ci-linux-image.sh --source-root "$GITHUB_WORKSPACE" bash -c 'if [ -s "$CCACHE_STATSLOG" ]; then ccache --show-log-stats; else echo "No compiler invocations recorded in this job"; fi'
-      - name: Save the compiler cache
+      - name: Stop owned CI containers before caching
+        id: stop-containers
         if: always()
+        run: ./Libraries/ubiquitty-core/Scripts/ci-linux-image.sh --source-root "$GITHUB_WORKSPACE" --cleanup-containers
+      - name: Save the compiler cache
+        if: always() && steps.stop-containers.outcome == 'success'
         continue-on-error: true
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
         with:
@@ -393,8 +401,12 @@ jobs:
         with:
           path: ${{ runner.temp }}/ubq-ci-linux-image.tar
           key: ci-linux-image-${{ runner.arch }}-${{ steps.image.outputs.digest }}
-      - name: Save the compiler cache
+      - name: Stop owned CI containers before caching
+        id: stop-containers
         if: always()
+        run: ./Libraries/ubiquitty-core/Scripts/ci-linux-image.sh --source-root "$GITHUB_WORKSPACE" --cleanup-containers
+      - name: Save the compiler cache
+        if: always() && steps.stop-containers.outcome == 'success'
         continue-on-error: true
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
         with:
@@ -465,8 +477,12 @@ jobs:
         with:
           path: ${{ runner.temp }}/ubq-ci-linux-image.tar
           key: ci-linux-image-${{ runner.arch }}-${{ steps.image.outputs.digest }}
-      - name: Save the compiler cache
+      - name: Stop owned CI containers before caching
+        id: stop-containers
         if: always()
+        run: ./Libraries/ubiquitty-core/Scripts/ci-linux-image.sh --source-root "$GITHUB_WORKSPACE" --cleanup-containers
+      - name: Save the compiler cache
+        if: always() && steps.stop-containers.outcome == 'success'
         continue-on-error: true
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
         with:

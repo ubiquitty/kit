@@ -24,6 +24,7 @@ class WorkflowCachePaths(unittest.TestCase):
         workflow_tests = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(workflow_tests)
         self.assertEqual(workflow_tests.cache_path_problems(ROOT), [])
+        self.assertEqual(workflow_tests.container_cache_problems(ROOT), [])
 
 
 class CTestExecutionOwnership(unittest.TestCase):
