@@ -250,12 +250,12 @@ package final class TerminalRenderer {
     }
 
     /// The captured frame the view last presented, held until the view takes
-    /// a newer capture or presents a frame read from the model.
+    /// a newer capture or replaces its capture registration.
     ///
     /// Holding it is its lease: the drain writes no capture a frontend still
     /// holds, so a picture drawn from it later reads the rows the glass shows.
-    /// It is always the capture the view last took, the slot a view reads, so
-    /// the lease leaves the drain the other two of its three.
+    /// A lane capture is always the slot the view last took, leaving the
+    /// drain the other two of its three. A still read lives outside the lane.
     package private(set) var presentedCapture: Ubiquitty.Rendering.FrameCapture?
 
     /// The selection spans drawn over ``presentedCapture``, in its visible
@@ -287,8 +287,7 @@ package final class TerminalRenderer {
     /// Records the frame the view just presented.
     ///
     /// - Parameters:
-    ///   - capture: The captured frame presented, or nil for a frame read
-    ///     from the model.
+    ///   - capture: The captured frame presented, or nil to release it.
     ///   - selectionSpans: The selection drawn over the captured frame.
     ///   - noSlotCount: The drain's count of captures it found no slot for.
     // swift-only: the shared capture is passed only between in-package Swift renderers
@@ -504,8 +503,13 @@ package final class TerminalRenderer {
     /// accessors cannot return one.
     private let capture: Ubiquitty.Rendering.FrameCapture
 
-    /// The absolute row at the top of the frame the last capture took.
-    package var capturedFirstAbsoluteRow: Int { Int(capture.firstAbsoluteRow()) }
+    /// The frame queries must describe the picture submitted by either route.
+    /// A boundary frame already has a presentation lease; querying it borrows
+    /// that lease without retaining another capture slot.
+    private var captureForQueries: Ubiquitty.Rendering.FrameCapture { presentedCapture ?? capture }
+
+    /// The absolute row at the top of the submitted picture.
+    package var capturedFirstAbsoluteRow: Int { Int(captureForQueries.firstAbsoluteRow()) }
 
     /// The mono coverage sheet, for the comparison harness's slot dump.
     var monoSheetTexture: MTLTexture { atlas.texture }
@@ -594,7 +598,7 @@ package final class TerminalRenderer {
         guard count > 0, let overlays = instances.overlays.elements(as: Ubiquitty.Rendering.OverlayInstance.self) else {
             return nil
         }
-        let uniforms = capture.uniforms()
+        let uniforms = captureForQueries.uniforms()
         let gridLeft = uniforms.originInPixels.x
         let gridRight = gridLeft + uniforms.cellSizeInPixels.x * Float(instances.builtColumns)
         var inGutter = 0
@@ -608,7 +612,7 @@ package final class TerminalRenderer {
     }
 
     /// The history offset represented by the last captured frame.
-    package var lastCapturedViewOffsetForTesting: Int { Int(capture.viewOffset()) }
+    package var lastCapturedViewOffsetForTesting: Int { Int(captureForQueries.viewOffset()) }
 
     /// The column under a point along a captured row the frame laid out as
     /// proportional runs (LetterLayout.h), or nil for a row on the grid.
@@ -618,6 +622,7 @@ package final class TerminalRenderer {
     ///   - xInCells: The point along the row, in cells from the grid's left edge.
     /// - Returns: The column, or nil where the grid's arithmetic answers.
     package func letterColumn(row: Int, xInCells: Double) -> Int? {
+        let capture = captureForQueries
         guard capture.isRowLaidOutAsLetters(Int32(row)) else { return nil }
         return Int(capture.columnAt(Int32(row), xInCells * Double(capture.cellWidthInPixels())))
     }
@@ -630,6 +635,7 @@ package final class TerminalRenderer {
     ///   - xInCells: The point along the row, in cells from the grid's left edge.
     /// - Returns: The position, or nil where the grid's arithmetic answers.
     package func letterXInCells(row: Int, xInCells: Double) -> Double? {
+        let capture = captureForQueries
         guard capture.isRowLaidOutAsLetters(Int32(row)) else { return nil }
         return capture.xInCellsAt(Int32(row), xInCells * Double(capture.cellWidthInPixels()))
     }
@@ -643,6 +649,7 @@ package final class TerminalRenderer {
     /// - Returns: The letter's left edge and advance in cells, and whether the
     ///   row was laid out as letters at all.
     package func letterExtentForTesting(row: Int, column: Int) -> (left: Double, advance: Double, isLetterRow: Bool) {
+        let capture = captureForQueries
         let extent = capture.letterExtent(Int32(row), Int32(column))
         let cell = Double(capture.cellWidthInPixels())
         guard cell > 0 else { return (0, 0, false) }
@@ -652,7 +659,7 @@ package final class TerminalRenderer {
     /// The uniforms the last capture derived — the alpha and colour the frame
     /// was drawn with — for a scenario that reads the frame rather than the
     /// style it was asked for.
-    package var lastCaptureUniformsForTesting: Ubiquitty.Rendering.FrameUniforms { capture.uniforms() }
+    package var lastCaptureUniformsForTesting: Ubiquitty.Rendering.FrameUniforms { captureForQueries.uniforms() }
 
     /// Whether the last frame overran a stream it could not grow.
     var didTruncate: Bool { instances.didTruncate }
@@ -1233,6 +1240,7 @@ package final class TerminalRenderer {
     ///   - capture: The boundary capture to present.
     ///   - view: The tiers composited over the captured grid.
     ///   - selectionSpans: The same selection, borrowed in Core's span type.
+    ///   - isHoldingImageGapsForResize: Whether a resize carries delete/re-place gaps.
     /// - Returns: The frame to encode once a target is had, or nil when
     ///   nothing is to be presented.
     // The header printer cannot represent a default argument or an optional Swift
@@ -1241,7 +1249,8 @@ package final class TerminalRenderer {
     package func buildFrame(
         captured capture: Ubiquitty.Rendering.FrameCapture,
         view: Ubiquitty.Rendering.FrameCapture.ViewTierOverrides,
-        selectionSpans: Ubiquitty.Rendering.DrawnSelectionSpans
+        selectionSpans: Ubiquitty.Rendering.DrawnSelectionSpans,
+        isHoldingImageGapsForResize: Bool
     ) -> PendingFrame? {
         guard prepareVisibleFonts(capture) else { return nil }
         didLastFramePresentNothing = false
@@ -1363,7 +1372,7 @@ package final class TerminalRenderer {
             scroll.bottomRow = capture.scrollBottom()
             scroll.deltaRows = capture.scrollDelta()
         }
-        let images = imageStore.layer(for: capture)
+        let images = imageStore.layer(for: capture, isHoldingForResize: isHoldingImageGapsForResize)
         imageStore.uploadStagedPixels()
         lastPresentedOverlay = overlay(of: capture)
         return PendingFrame(

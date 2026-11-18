@@ -2635,6 +2635,8 @@ public final class TerminalSurface: PlatformView {
     package var shouldUseSubpixelGlyphsInRegisteredSync: Bool?
     internal var registeredSyncBackground: SIMD4<Float>?
     internal var registeredSyncBackgroundOpacity: Double?
+    /// Whether the registered capture may omit an opaque letterbox's hidden grid.
+    internal var isRegisteredSyncOcclusionSkipEnabled: Bool?
 
     /// The view offset the boundary-capture geometry was last registered
     /// with; nil before the first registration. Part of the key because a
@@ -4611,7 +4613,7 @@ public final class TerminalSurface: PlatformView {
             // asked rather than refused: the report still says covered there,
             // and the frame the reveal owes is exactly the one this repairs.
             guard self.frameDelivery == .Draw,
-                window.occlusionState.contains(.visible)
+                !self.isWindowReportedOccluded(window)
                     || Ubiquitty.Runtime.isPaneRevealUnconfirmed(self.reveal, TerminalSurface.monotonicTicksNow())
             else {
                 self.repaintRetriesRefused += 1
@@ -5206,7 +5208,7 @@ public final class TerminalSurface: PlatformView {
         // remaining ordered and drawable. Treat that containment as visible:
         // the suite is exercising foreground rendering without covering the
         // operator's desktop, not exercising the occlusion power policy.
-        return !CommandLine.arguments.contains("--ui-test") && !window.occlusionState.contains(.visible)
+        return CommandLine.arguments.contains("--ui-test") ? !window.isVisible : !window.occlusionState.contains(.visible)
         #else
         return !window.occlusionState.contains(.visible)
         #endif

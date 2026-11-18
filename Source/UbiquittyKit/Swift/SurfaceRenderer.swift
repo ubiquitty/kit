@@ -847,10 +847,10 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
     /// the grid copy. UBIQUITTY_NO_OCCLUSION_SKIP keeps the full path for a
     /// pixel-parity A/B; read once at launch.
     static let isOcclusionSkipEnabled = ProcessInfo.processInfo.environment["UBIQUITTY_NO_OCCLUSION_SKIP"] == nil
-    /// Live frames that skipped the drain and the copy, for a scenario
-    /// checking the skip happened rather than inferring it from timing.
+    /// Captures taken for live frames that skipped the drain and the copy,
+    /// checked from their completed work rather than inferred from timing.
     private(set) var gridCaptureSkipCount = 0
-    /// Live frames whose capture re-read every row rather than the dirty
+    /// Captures taken for live frames that re-read every row rather than the dirty
     /// ones: the first frame after a skip is one, and a scenario reading the
     /// last frame's census alone misses it when a settled frame follows.
     private(set) var gridFullRereadCount = 0
@@ -2361,12 +2361,42 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
                             return renderer.buildFrame(
                                 captured: capture,
                                 view: view,
-                                selectionSpans: Ubiquitty.Rendering.DrawnSelectionSpans(spans)
+                                selectionSpans: Ubiquitty.Rendering.DrawnSelectionSpans(spans),
+                                isHoldingImageGapsForResize: surface.isHoldingImageGapsForResize
                             )
                         }
                     }
                 }
             }
+        }
+    }
+
+    /// Records the hovered band of the frame actually submitted, whose history
+    /// can have advanced beyond the published snapshot used for assembly.
+    /// - Parameters:
+    ///   - capture: The submitted frame.
+    ///   - surface: The surface receiving it.
+    private func noteCapturedHover(_ capture: Ubiquitty.Rendering.FrameCapture, for surface: TerminalSurface) {
+        let color = capture.linkHoverColor()
+        surface.noteFrameHoverRun(
+            isActive: capture.isHoverLinkActive(),
+            rowFirst: capture.hoverLinkRowFirst(),
+            rowLast: capture.hoverLinkRowLast(),
+            columnFirst: capture.hoverLinkColumnFirst(),
+            columnLast: capture.hoverLinkColumnLast(),
+            color: (color.x, color.y, color.z)
+        )
+    }
+
+    /// Counts the work the capture actually completed, even when a later
+    /// drawable refusal prevents that frame from being submitted.
+    /// - Parameter capture: The newly taken capture, not a repeated picture.
+    private func noteCaptureWork(_ capture: Ubiquitty.Rendering.FrameCapture) {
+        if capture.didSkipGridCapture() {
+            gridCaptureSkipCount += 1
+        }
+        if capture.didReadEveryGridRow() {
+            gridFullRereadCount += 1
         }
     }
 
@@ -2388,6 +2418,8 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
     ///     rather than one made apart from the lane.
     ///   - surface: The surface.
     ///   - renderer: Its frame renderer.
+    ///   - deviceScale: The frame's backing pixels per point.
+    ///   - panOffset: The resolved pan offset in view points.
     ///   - clip: The frame's presentation clip in the target.
     ///   - cursorMixAlpha: The cursor's weight in the picture.
     ///   - clearColor: The pass's clear colour.
@@ -2399,6 +2431,8 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
         isPresentedCapture: Bool,
         for surface: TerminalSurface,
         renderer: TerminalRenderer,
+        deviceScale: Double,
+        panOffset: CGPoint,
         clip: CGRect?,
         cursorMixAlpha: Float,
         clearColor: MTLClearColor,
@@ -2452,6 +2486,19 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
             backgroundDrawable: target.backgroundDrawable,
             transactionally: false
         )
+        if !isDrawingStill {
+            notePresentedGeometry(for: surface, frame: pending, deviceScale: deviceScale, panOffset: panOffset)
+            noteCapturedHover(capture, for: surface)
+            surface.noteFrameImageQuads(Int32(pending.imageQuadCount))
+            lastFrameCounts = renderer.counts
+            lastFrameHadStatusRow = capture.hasStatusRow()
+            didReuseLastFrame = false
+            lastFramePlannedRows = Int(pending.rows)
+            lastFrameDirtyRows = Int(pending.rows)
+            didTrustDirtySetLastFrame = false
+            phaseLogReuseTerms = "still"
+            lastCapturedFrameTiers = tiers
+        }
         if isPresentedCapture {
             stillsFromPresentedCaptureCount += 1
         } else {
@@ -2660,8 +2707,7 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
     /// reads the frame on the glass rather than the model.
     ///
     /// - Parameter surface: The surface.
-    /// - Returns: The frame, or nil while the glass shows a frame read from
-    ///   the model, or none.
+    /// - Returns: The frame, or nil before the first captured frame.
     func presentedCapture(for surface: TerminalSurface) -> Ubiquitty.Rendering.FrameCapture? {
         surface.frameRenderers[Self.scaleKey(current.font.atlasScale)]?.presentedCapture
     }
@@ -3194,14 +3240,6 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
             hoverTextDigest: hovered?.textDigest ?? 0
         )
         applyFrameLinks(to: &options, frameLinks)
-        surface.noteFrameHoverRun(
-            isActive: options.isHoverLinkActive,
-            rowFirst: options.hoverLinkRowFirst,
-            rowLast: options.hoverLinkRowLast,
-            columnFirst: options.hoverLinkColumnFirst,
-            columnLast: options.hoverLinkColumnLast,
-            color: (options.linkHoverColor.x, options.linkHoverColor.y, options.linkHoverColor.z)
-        )
 
         // Register the boundary-capture geometry whenever the drawable's
         // placement changed: the session captures each completed DECSET-2026
@@ -3250,6 +3288,8 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
                 isPresentedCapture: true,
                 for: surface,
                 renderer: renderer,
+                deviceScale: deviceScale,
+                panOffset: presentation.panOffset,
                 clip: presentation.clip,
                 cursorMixAlpha: options.cursorMixAlpha,
                 clearColor: passClearColor,
@@ -3264,6 +3304,7 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
             || surface.shouldUseSubpixelGlyphsInRegisteredSync != options.shouldUseSubpixelGlyphs
             || surface.registeredSyncBackground != captureBackground
             || surface.registeredSyncBackgroundOpacity != groundOpacity
+            || surface.isRegisteredSyncOcclusionSkipEnabled != Self.isOcclusionSkipEnabled
             || surface.isRegisteredSyncCursorFilled != options.isFocused
             || surface.registeredSyncRaster != raster
             || surface.registeredSyncCellWidth != frameMetrics.cellWidth
@@ -3283,6 +3324,7 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
             geometry.viewOffset = options.viewOffset
             geometry.viewHistory = viewHistory
             geometry.isViewOffsetHeld = isViewOffsetHeld
+            geometry.isOcclusionSkipEnabled = Self.isOcclusionSkipEnabled
             // Focus rides the same assembled options as the style, so the
             // boundary route's cursor and the live route's agree.
             geometry.isFocused = options.isFocused
@@ -3353,6 +3395,7 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
             surface.shouldUseSubpixelGlyphsInRegisteredSync = options.shouldUseSubpixelGlyphs
             surface.registeredSyncBackground = captureBackground
             surface.registeredSyncBackgroundOpacity = groundOpacity
+            surface.isRegisteredSyncOcclusionSkipEnabled = Self.isOcclusionSkipEnabled
             surface.isRegisteredSyncCursorFilled = options.isFocused
             surface.registeredSyncViewOffset = surface.viewOffset
             surface.registeredSyncViewHistory = viewHistory
@@ -3403,6 +3446,7 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
             renderer.notePresentedCaptureTake(tookCapture: taken != nil, noSlotCount: surface.drive.syncFrameNoSlotCount)
         }
         if let syncFrame = taken {
+            noteCaptureWork(syncFrame)
             let selection = surface.selectionModel
             let spanCount = Int(supply.selection.count)
             // A capture can lag published output or a view registration, but
@@ -3493,10 +3537,11 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
                 isEdgeToEdge: presentedStamp?.isEdgeToEdge ?? false
             )
             let didReuseBoundaryGrid = renderer.didBoundaryFrameReuseGrid
+            let didSkipGridCapture = syncFrame.didSkipGridCapture()
             didReuseLastFrame = didReuseBoundaryGrid
-            lastFramePlannedRows = Int(snapshot.rows)
-            lastFrameDirtyRows = didReuseBoundaryGrid ? renderer.boundaryFrameDirtyRows : lastFramePlannedRows
-            didTrustDirtySetLastFrame = didReuseBoundaryGrid
+            lastFramePlannedRows = didSkipGridCapture ? 0 : Int(snapshot.rows)
+            lastFrameDirtyRows = didSkipGridCapture ? 0 : (didReuseBoundaryGrid ? renderer.boundaryFrameDirtyRows : lastFramePlannedRows)
+            didTrustDirtySetLastFrame = !didSkipGridCapture && didReuseBoundaryGrid
             phaseLogReuseTerms = didReuseBoundaryGrid ? "" : "boundary"
             // The status row the drain filled into the capture: the frame's
             // own fact, as the live route's is the options it filled.
@@ -3534,7 +3579,8 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
                 transactionally: presentsWithTransaction
             )
             notePresentedGeometry(for: surface, frame: pending, deviceScale: deviceScale, panOffset: presentation.panOffset)
-            if target.drawable != nil {
+            noteCapturedHover(syncFrame, for: surface)
+            if !isDrawingStill {
                 renderer.notePresented(
                     capture: syncFrame,
                     selectionSpans: selection.spanScratch.prefix(spanCount),
@@ -3580,6 +3626,9 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
             lastFrameDecline = .capture
             return false
         }
+        if !isDrawingStill {
+            noteCaptureWork(still)
+        }
         let (spanCount, ends) = surface.selectionModel.selectionOverStill(still, drive: surface.drive)
         guard
             encodeStill(
@@ -3588,6 +3637,8 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
                 isPresentedCapture: false,
                 for: surface,
                 renderer: renderer,
+                deviceScale: deviceScale,
+                panOffset: presentation.panOffset,
                 clip: presentation.clip,
                 cursorMixAlpha: options.cursorMixAlpha,
                 clearColor: passClearColor,
@@ -3597,9 +3648,14 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
             return false
         }
         if !isDrawingStill {
-            // The glass shows a frame the lane never served, so nothing is
-            // leased as the frame presented.
-            renderer.notePresented(capture: nil, selectionSpans: [])
+            // This capture is independently owned outside the lane. Keep the
+            // frame actually submitted for geometry queries, as the boundary
+            // route keeps its slot, without leasing a slot for a still.
+            renderer.notePresented(
+                capture: still,
+                selectionSpans: surface.selectionModel.spanScratch.prefix(spanCount),
+                noSlotCount: surface.drive.syncFrameNoSlotCount
+            )
             surface.selectionModel.visibleEnds =
                 ends.isVisible
                 ? ((Int(ends.startRow), Int(ends.startColumn)), (Int(ends.endRow), Int(ends.endColumn)))

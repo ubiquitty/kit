@@ -124,7 +124,10 @@ package final class SurfaceImageStore {
     }
 
     /// Builds the image layer from the immutable frame, without borrowing the live model.
-    package func layer(for capture: Ubiquitty.Rendering.FrameCapture) -> ImageLayer? {
+    /// - Parameters:
+    ///   - capture: The immutable placements and pixels to draw.
+    ///   - isHoldingForResize: Whether a live resize carries delete/re-place gaps.
+    package func layer(for capture: Ubiquitty.Rendering.FrameCapture, isHoldingForResize: Bool) -> ImageLayer? {
         let capturedQuads = capture.imageQuads()
         let count = capturedQuads.count
         reserveQuadScratch(count)
@@ -140,7 +143,9 @@ package final class SurfaceImageStore {
         }
         entries = entries.filter { $0.value.isSeenThisSync }
         var frame = Ubiquitty.Rendering.ImageLayerFrame()
-        frame.hasPlacements = count > 0
+        frame.hasPlacements = capture.hasImagePlacements()
+        frame.isHoldingForResize = isHoldingForResize
+        frame.hasCarriedLayer = carriedCount > 0
         frame.canResolve = true
         frame.resolvedPlacements = Int32(count)
         return resolvedLayer(frame: frame, resolved: count)
