@@ -630,7 +630,12 @@ package final class RichTextStore {
     private static func ruleRect(_ rule: Ubiquitty.RichText.PixelRect, top: Double, bottom: Double, height: Int) -> CGRect {
         let clippedTop = max(top, Double(rule.top))
         let clippedBottom = min(bottom, Double(rule.top) + Double(rule.height))
-        return CGRect(x: Double(rule.left), y: Double(height) - clippedBottom, width: Double(rule.width), height: max(0, clippedBottom - clippedTop))
+        return CGRect(
+            x: Double(rule.left),
+            y: Double(height) - clippedBottom,
+            width: Double(rule.width),
+            height: max(0, clippedBottom - clippedTop)
+        )
     }
 
     /// Visible pixel rows in the context's bottom-up coordinates.
