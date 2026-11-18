@@ -1656,6 +1656,7 @@ enum SurfaceSmoke {
                 backing: .buffered,
                 defer: false
             )
+            window.isReleasedWhenClosed = false
             window.contentView?.addSubview(surface)
             surface.frame = window.contentView?.bounds ?? .zero
             window.makeFirstResponder(surface)
@@ -2124,6 +2125,7 @@ enum SurfaceSmoke {
             backing: .buffered,
             defer: true
         )
+        window.isReleasedWhenClosed = false
         window.contentView?.addSubview(bar)
 
         func attendee(
@@ -2279,6 +2281,7 @@ enum SurfaceSmoke {
             backing: .buffered,
             defer: true
         )
+        other.isReleasedWhenClosed = false
         SessionPresenceIndicator.report([me, attendee(clientID: 9, isHuman: true)], for: other)
         guard indicator.isHidden, indicator.otherAttendeeCount == 0 else {
             return failed("the presence badge took another window's roster")
@@ -2385,6 +2388,7 @@ enum SurfaceSmoke {
             backing: .buffered,
             defer: true
         )
+        window.isReleasedWhenClosed = false
         window.contentView?.addSubview(bar)
 
         ClipboardScopeIndicator.report(.client, for: window)
@@ -2418,6 +2422,7 @@ enum SurfaceSmoke {
             backing: .buffered,
             defer: true
         )
+        other.isReleasedWhenClosed = false
         ClipboardScopeIndicator.report(.client, for: other)
         guard indicator.scope == .host else {
             return failed("clipboard scope: a badge took another window's scope, which reports the wrong session")
@@ -2510,9 +2515,14 @@ enum SurfaceSmoke {
         }
         guard let link = surface.viewPoint(forRow: 0, column: 2) else { return "frame work: no link cell" }
         surface.updateLinkAffordance(atViewPoint: link, isCommandHeld: true)
-        guard draw(surface), surface.lastFrameHoverRowLast >= 0,
+        let didDrawHover = draw(surface)
+        guard didDrawHover, surface.lastFrameHoverRowLast >= 0,
             surface.linkAccentResolutionCountForTesting == warmed
-        else { return "frame work: the first hover missed its cached durable colour" }
+        else {
+            let acceptedHover = renderer.presentedCapture(for: surface)?.isHoverLinkActive() ?? false
+            return
+                "frame work: the first hover missed its cached durable colour; drew=\(didDrawHover) decline=\(renderer.lastFrameDecline) run=\(surface.hoveredLinkRun != nil) acceptedHover=\(acceptedHover) reused=\(renderer.didReuseLastFrame) unchangedPictures=\(renderer.skippedAsReproducingGlassCount) rows=\(surface.lastFrameHoverRowFirst)...\(surface.lastFrameHoverRowLast) resolutions=\(surface.linkAccentResolutionCountForTesting)/\(warmed) colour=\(surface.lastFrameHoverColor)"
+        }
         for name in [
             NSAppearance.Name.darkAqua, .vibrantLight, .vibrantDark, .accessibilityHighContrastAqua, .accessibilityHighContrastDarkAqua,
         ] {

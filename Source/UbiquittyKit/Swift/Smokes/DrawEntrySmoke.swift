@@ -1282,6 +1282,7 @@ enum DrawEntrySmoke {
             backing: .buffered,
             defer: false
         )
+        window.isReleasedWhenClosed = false
         surface.frame = frame
         // The smoke checks the draw entry, not the occlusion policy: it runs
         // on a real screen with no application to bring its window forward, so
