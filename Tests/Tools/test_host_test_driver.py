@@ -17,6 +17,15 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 
 
+class WorkflowCachePaths(unittest.TestCase):
+    def test_cache_paths_resolve_from_preceding_canonical_roots(self):
+        core = Path(os.environ.get("UBQ_CORE_ROOT") or ROOT / "Libraries/ubiquitty-core")
+        spec = importlib.util.spec_from_file_location("workflow_cache_paths", core / "Tests/Tools/test_draft_workflows.py")
+        workflow_tests = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(workflow_tests)
+        self.assertEqual(workflow_tests.cache_path_problems(ROOT), [])
+
+
 class CTestExecutionOwnership(unittest.TestCase):
     def registration(self, *, native=True, advertise=True, remove_filter=False, record_native=True, preflight=""):
         core = Path(os.environ.get("UBQ_CORE_ROOT") or ROOT / "Libraries/ubiquitty-core")
