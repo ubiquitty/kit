@@ -11,7 +11,7 @@ types into scalars.
 
 Configuration changes must use the configuration owner, which persists the
 choice and applies it to affected sessions. Direct access to an imported value
-does not replace that transaction; see [the configuration contract](configuration-seam.md).
+does not replace that transaction; see [the configuration contract](https://github.com/ubiquitty/core/blob/main/Docs/configuration-seam.md).
 
 The command-palette adapter is a working example in
 `Source/Platform/macOS/App/Beam/PaletteBridge.swift` and

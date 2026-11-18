@@ -4,7 +4,7 @@
 # Trademark policy
 
 "Ubiquitty" and the Ubiquitty logo and application icon (the files under
-[`Resources/Icon/`](Resources/Icon/)) are trademarks of Stanislav Yaglo. The
+[`Resources/Icon/`](https://github.com/ubiquitty/core/tree/main/Resources/Icon)) are trademarks of Stanislav Yaglo. The
 source license in [`LICENSES/`](LICENSES/) covers copyright and patents; it
 grants no trademark rights, as Apache-2.0 section 6 says. This policy states what you may do with the marks without asking.
 

@@ -28,4 +28,4 @@ wide-gamut selector.
 - `Source/UbiquittyKit/Swift/SurfaceRenderer.swift`: layer preparation and
   color-space changes.
 - `Source/UbiquittyRenderKit/BackdropImage.swift`: color-managed backdrop decode.
-- [Settings catalog](settings-catalog.md): accepted setting values.
+- [Settings catalog](https://github.com/ubiquitty/ubiquitty/blob/main/Docs/settings-catalog.md): accepted setting values.

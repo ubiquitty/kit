@@ -708,7 +708,7 @@ The supported C++ surface is the umbrella's reachable header set, and the
 supported Swift surface is the framework's module interface. Internal module
 headers are not a separate compatibility promise.
 
-- [Model embedding](libubiquittycore.md) describes the terminal and PAL contract.
+- [Model embedding](https://github.com/ubiquitty/core/blob/main/Docs/libubiquittycore.md) describes the terminal and PAL contract.
 - `Samples/find-package-consumer` consumes the installed package.
 - `Source/UbiquittyKit/Session.h` is the complete session declaration.
 - `Tests/UbiquittyKit/test_kit_session.cpp` exercises the session facade.

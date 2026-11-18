@@ -11,7 +11,7 @@ Linux and wscons applications, the host daemon, the `ubq` agent, the editor
 clients, the documentation, the tests and the tooling.
 
 Two original parts carry other permissive licenses: the Emacs client keeps its
-separate [MIT license](../Source/Platform/Emacs/LICENSE), and the
+separate [MIT license](https://github.com/ubiquitty/ubiquitty/blob/main/Source/Platform/Emacs/LICENSE), and the
 [Code of Conduct](../.github/code_of_conduct.md) is an adaptation of
 Contributor Covenant 2.1 under CC-BY-4.0.
 
