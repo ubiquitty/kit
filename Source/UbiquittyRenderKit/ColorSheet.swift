@@ -186,6 +186,7 @@ final class ColorSheet {
                 bytes.baseAddress!,
                 bytesPerRow: bytesPerRow,
                 region: MTLRegionMake2D(Int(box.x), Int(box.y), Int(box.width), Int(box.height)),
+                ink: nil,
                 into: texture
             )
         }

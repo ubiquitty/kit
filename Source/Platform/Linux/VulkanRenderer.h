@@ -489,12 +489,9 @@ private:
     VkDescriptorSet m_descriptorSet = VK_NULL_HANDLE;
     VkDescriptorSet m_proportionalDescriptorSet = VK_NULL_HANDLE;
     VkDescriptorSet m_proportionalStripDescriptorSet = VK_NULL_HANDLE;
-    VkDescriptorSet m_decorationDescriptorSet = VK_NULL_HANDLE;
-    VkSampler m_decorationSampler = VK_NULL_HANDLE;
     bool m_descriptorWritten = false;
     bool m_isProportionalDescriptorWritten = false;
     bool m_isProportionalStripDescriptorWritten = false;
-    bool m_isDecorationDescriptorWritten = false;
 
     VkImageView m_colorView = VK_NULL_HANDLE; // view of m_image as a color attachment
     VkFramebuffer m_framebuffer = VK_NULL_HANDLE;

@@ -230,13 +230,16 @@ public struct FrameStyleInputs {
     /// At or below zero means unset, and the rules then draw at the face's own
     /// weight — a zero multiplier would erase them rather than leave them alone.
     public var underlineThicknessScale: Double
-    /// The user's `underline_offset`, in points.
+    /// The user's `[underline] offset`, in points from the automatic position.
     public var underlineOffsetInPoints: Double
     /// Whether a rule breaks around descender ink.
     public var shouldUnderlineSkipInk: Bool
     /// Whether a run's outer rule reaches the letter's ink past the cell.
     public var shouldUnderlineFollowInk: Bool
-    /// The dilation around crossing ink, in points.
+    /// The clearance around crossing ink, in points.
+    ///
+    /// Negative is automatic: the rule's own weight, which the builder
+    /// resolves once it has the face's metrics.
     public var underlineSkipInkPaddingInPoints: Double
     /// Device pixels per point for this frame.
     public var deviceScale: Double
@@ -277,9 +280,11 @@ public struct FrameStyleInputs {
 
 /// Returns the frame's pen and rule styling for the portable builder.
 ///
-/// Both products are a lone multiply, exact in Swift and in clang alike. The
+/// The offset is a lone multiply, exact in Swift and in clang alike. The
 /// contractable `a * b + c` shape is the one the two disagree about, and none is
-/// written here.
+/// written here. The skip-ink clearance goes through Core's own conversion, the
+/// one every C++ arm uses, so an automatic clearance reaches the builder as the
+/// same bare -1 rather than scaled.
 ///
 /// Written by reference rather than returned, so a caller layering further
 /// style writes around this one keeps them: a returned struct assigned
@@ -303,7 +308,10 @@ public func applyFrameStyle(
     style.underlineOffsetInPixels = Float(inputs.underlineOffsetInPoints * inputs.deviceScale)
     style.shouldUnderlineSkipInk = inputs.shouldUnderlineSkipInk
     style.shouldUnderlineFollowInk = inputs.shouldUnderlineFollowInk
-    style.underlineSkipInkPaddingInPixels = Float(inputs.underlineSkipInkPaddingInPoints * inputs.deviceScale)
+    style.underlineSkipInkPaddingInPixels = Ubiquitty.Preferences.Effective.underlineSkipInkPaddingInPixels(
+        inputs.underlineSkipInkPaddingInPoints,
+        inputs.deviceScale
+    )
     style.uniformBackgroundOpacity = Float(inputs.uniformBackgroundOpacity)
     style.uniformDefaultBackground = inputs.uniformDefaultBackground
 }

@@ -39,6 +39,8 @@ package final class GlyphAtlas {
 
     /// The R8 sheet the glyph and cell passes sample.
     let texture: MTLTexture
+    /// What skip-ink reads of ``texture`` (Core/Rendering/SkipInk.h).
+    let monoInk: Ubiquitty.Rendering.SkipInkRecord
     /// Orders uploads and reads for every view sharing these glyph sheets.
     let commandQueue: MTLCommandQueue
     /// The staged path from a rasteriser to every sheet; see ``AtlasUploader``.
@@ -745,11 +747,13 @@ package final class GlyphAtlas {
         descriptor.usage = .shaderRead
         descriptor.storageMode = device.cpuWrittenTextureStorageMode
         guard let texture = device.makeTexture(descriptor: descriptor),
+            let monoInk = Ubiquitty.Rendering.makeSkipInkRecord(Int32(texture.width), Int32(texture.height)),
             let commandQueue = device.makeCommandQueue()
         else {
             return nil
         }
         self.texture = texture
+        self.monoInk = monoInk
         self.commandQueue = commandQueue
         // Made before the sheets, which take it: every sheet of an atlas
         // stages through one uploader so a single flush carries them all.
@@ -1114,6 +1118,7 @@ extension GlyphAtlas: GlyphSource {
     private func flushRasterBatches() {
         rasterizer.flushBatch()
         wide?.flushRasterBatch()
+        proportional?.flushRasterBatch()
     }
 
     func flushStagedUploads() {
@@ -1121,11 +1126,13 @@ extension GlyphAtlas: GlyphSource {
         uploader.flush()
     }
 
-    /// How many glyphs the mono and wide sheets have queued for a batched
-    /// raster, ever: a glyph's ink is measured only when its batch lands, so a
-    /// build across which this moved drew some glyphs before their ink was
-    /// known.
-    var enqueuedRasterCount: Int { rasterizer.enqueuedCount + (wide?.enqueuedRasterCount ?? 0) }
+    /// How many glyphs the batched sheets — mono, wide and proportional — have
+    /// queued for a raster, ever: a glyph's ink is measured, and recorded for
+    /// skip-ink, only when its batch lands, so a build across which this moved
+    /// drew some glyphs before their ink was known.
+    var enqueuedRasterCount: Int {
+        rasterizer.enqueuedCount + (wide?.enqueuedRasterCount ?? 0) + (proportional?.enqueuedRasterCount ?? 0)
+    }
 
     /// Hands Core the slot cache and the layout for this frame.
     ///
@@ -1136,6 +1143,28 @@ extension GlyphAtlas: GlyphSource {
         binding.geometry = geometry
         binding.slotCapacity = Int32(slotCapacity)
         binding.inkBoxForSlot = UnsafePointer(inkBoxForSlot)
+    }
+
+    /// Hands Core the ink of every coverage sheet for this frame's rules.
+    ///
+    /// - Returns: One plane per sheet; a sheet this atlas did not build has an
+    ///   empty one, and the rules over its glyphs are drawn uncut.
+    func skipInkPlanes() -> Ubiquitty.Rendering.SkipInkPlanes {
+        var planes = Ubiquitty.Rendering.SkipInkPlanes()
+        planes.mono = Ubiquitty.Rendering.skipInkPlaneOf(monoInk)
+        if let wide {
+            planes.wide = Ubiquitty.Rendering.skipInkPlaneOf(wide.ink)
+        }
+        if let proportional {
+            planes.proportional = Ubiquitty.Rendering.skipInkPlaneOf(proportional.ink)
+        }
+        if let proportionalStrip {
+            planes.proportionalStrip = Ubiquitty.Rendering.skipInkPlaneOf(proportionalStrip.ink)
+        }
+        if let ligature {
+            planes.ligatureStrip = Ubiquitty.Rendering.skipInkPlaneOf(ligature.ink)
+        }
+        return planes
     }
 
     /// The atlas rect for a code point, rasterising it on a miss.
@@ -1214,6 +1243,7 @@ extension GlyphAtlas: GlyphSource {
             coverage.__dataUnsafe()!,
             bytesPerRow: Int(geometry.slotWidthInPixels),
             region: region(for: Int(slot)),
+            ink: monoInk,
             into: texture
         )
         return true
@@ -1248,6 +1278,7 @@ extension GlyphAtlas: GlyphSource {
                     bytes.baseAddress!,
                     bytesPerRow: Int(geometry.slotWidthInPixels),
                     region: region(for: Int(slot)),
+                    ink: monoInk,
                     into: texture
                 )
             }
@@ -1324,6 +1355,7 @@ extension GlyphAtlas: GlyphSource {
                         bytes.baseAddress!,
                         bytesPerRow: Int(geometry.slotWidthInPixels),
                         region: region(for: Int(slot)),
+                        ink: monoInk,
                         into: texture
                     )
                 }
@@ -1410,6 +1442,7 @@ extension GlyphAtlas: GlyphSource {
                         pixels.baseAddress!,
                         bytesPerRow: Int(self.geometry.slotWidthInPixels),
                         region: self.region(for: Int(slot)),
+                        ink: self.monoInk,
                         into: self.texture
                     )
                 }
@@ -1468,6 +1501,7 @@ extension GlyphAtlas: GlyphSource {
                 bytes.baseAddress!,
                 bytesPerRow: Int(geometry.slotWidthInPixels),
                 region: region(for: Int(slot)),
+                ink: monoInk,
                 into: texture
             )
         }
@@ -2162,6 +2196,7 @@ extension GlyphAtlas: SizedGlyphSource {
                     bytes.baseAddress!,
                     bytesPerRow: Int(geometry.slotWidthInPixels),
                     region: region(for: slot),
+                    ink: monoInk,
                     into: texture
                 )
             }
@@ -2409,6 +2444,7 @@ extension GlyphAtlas: ShapedGlyphSource {
                 bytes.baseAddress!,
                 bytesPerRow: Int(geometry.slotWidthInPixels),
                 region: region(for: Int(slot)),
+                ink: monoInk,
                 into: texture
             )
         }
@@ -2626,6 +2662,7 @@ extension GlyphAtlas: ClusterGlyphSource {
                 bytes.baseAddress!,
                 bytesPerRow: Int(geometry.slotWidthInPixels),
                 region: region(for: Int(slot)),
+                ink: monoInk,
                 into: texture
             )
         }
@@ -2927,6 +2964,7 @@ extension GlyphAtlas: BoxGlyphSource {
                         bytes.baseAddress!,
                         bytesPerRow: Int(geometry.slotWidthInPixels),
                         region: region(for: Int(slot)),
+                        ink: monoInk,
                         into: texture
                     )
                 }
@@ -2955,6 +2993,7 @@ extension GlyphAtlas: BoxGlyphSource {
                 bytes.baseAddress!,
                 bytesPerRow: Int(geometry.slotWidthInPixels),
                 region: region(for: Int(slot)),
+                ink: monoInk,
                 into: texture
             )
         }

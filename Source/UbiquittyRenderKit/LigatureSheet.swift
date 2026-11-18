@@ -28,6 +28,8 @@ import UbiquittyCore
 package final class LigatureSheet {
     /// The sheet the ligature pass samples.
     let texture: MTLTexture
+    /// What skip-ink reads of ``texture`` (Core/Rendering/SkipInk.h).
+    let ink: Ubiquitty.Rendering.SkipInkRecord
     /// Where a rasterised slot waits for the GPU to copy it into the sheet.
     ///
     /// A `MTLTexture.replace` is a CPU write ordered against nothing: the frame
@@ -286,6 +288,7 @@ package final class LigatureSheet {
         descriptor.usage = .shaderRead
         descriptor.storageMode = device.cpuWrittenTextureStorageMode
         guard let texture = device.makeTexture(descriptor: descriptor),
+            let ink = Ubiquitty.Rendering.makeSkipInkRecord(Int32(texture.width), Int32(texture.height)),
             let cache = Ubiquitty.Rendering.makeGlyphSlotCache(
                 Int32(columns * rows),
                 Ubiquitty.Rendering.recommendedHashBuckets(Int32(columns * rows)),
@@ -323,6 +326,7 @@ package final class LigatureSheet {
         glyphScratch.setShouldAntialias(true)
         self.glyphScratch = glyphScratch
         self.texture = texture
+        self.ink = ink
         self.uploader = uploader
         // Sixty-four slots is the flush granularity, not a budget: a build that
         // rasterises more issues its copies in batches, and the queue orders
@@ -2086,6 +2090,7 @@ package final class LigatureSheet {
                     bytes.baseAddress!,
                     bytesPerRow: slotWidthInPixels,
                     region: MTLRegionMake2D(Int(box.x), Int(box.y), Int(box.width), Int(box.height)),
+                    ink: ink,
                     into: texture
                 )
             }
@@ -2367,6 +2372,7 @@ package final class LigatureSheet {
             plane,
             bytesPerRow: context.bytesPerRow,
             region: MTLRegionMake2D(Int(box.x), Int(box.y), Int(box.width), Int(box.height)),
+            ink: ink,
             into: texture
         )
     }

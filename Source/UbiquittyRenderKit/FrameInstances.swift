@@ -97,7 +97,7 @@ final class FrameInstances {
             MemoryLayout<Ubiquitty.Rendering.CellInstance>.stride == 64
                 && MemoryLayout<Ubiquitty.Rendering.GlyphInstance>.stride == 64
                 && MemoryLayout<Ubiquitty.Rendering.OverlayInstance>.stride == 112
-                && MemoryLayout<Ubiquitty.Rendering.DecorationInstance>.stride == 160,
+                && MemoryLayout<Ubiquitty.Rendering.DecorationInstance>.stride == 64,
             "instance stride disagrees with Core/Rendering/CellInstance.h"
         )
         cells = GrowableBuffer(device: device, growth: .exactFit, stride: MemoryLayout<Ubiquitty.Rendering.CellInstance>.stride)
@@ -144,12 +144,7 @@ final class FrameInstances {
     ) -> Ubiquitty.Rendering.InstanceCounts {
         advanceFrame()
         sizeGridStreams(rows: Int(capture.rows()), columns: Int(capture.columns()))
-        var built = callCore(capture, backend, scope)
-        if overran(built) {
-            grow(toFit: built)
-            built = callCore(capture, backend, scope)
-        }
-        return record(built)
+        return record(withRoom { callCore(capture, backend, scope) })
     }
 
     /// Builds one boundary-captured frame's instances with the caller's
@@ -168,21 +163,14 @@ final class FrameInstances {
     ) -> Ubiquitty.Rendering.InstanceCounts {
         advanceFrame()
         sizeGridStreams(rows: Int(capture.rows()), columns: Int(capture.columns()))
-        var built = callCore(capture, backend, view, scope)
-        if overran(built) {
-            grow(toFit: built)
-            built = callCore(capture, backend, view, scope)
-        }
-        return record(built)
+        return record(withRoom { callCore(capture, backend, view, scope) })
     }
 
     /// Builds one frame's instances from inputs a caller assembled.
     ///
-    /// Sizes the grid-derived streams, calls Core, and repeats once if any
-    /// stream came back over its capacity — Core reports the count it needed, so
-    /// the second pass is sized exactly and cannot overrun for the same reason.
-    /// A stream whose regrow is refused leaves ``didTruncate`` set and its count
-    /// clamped.
+    /// Sizes the grid-derived streams and calls Core until every stream fits
+    /// (``withRoom(_:)``). A stream whose regrow is refused leaves
+    /// ``didTruncate`` set and its count clamped.
     ///
     /// - Parameters:
     ///   - inputs: The frame Core builds from.
@@ -194,12 +182,7 @@ final class FrameInstances {
     ) -> Ubiquitty.Rendering.InstanceCounts {
         advanceFrame()
         sizeGridStreams(rows: Int(inputs.rows), columns: Int(inputs.columns))
-        var built = callCore(inputs, backend)
-        if overran(built) {
-            grow(toFit: built)
-            built = callCore(inputs, backend)
-        }
-        return record(built)
+        return record(withRoom { callCore(inputs, backend) })
     }
 
     // MARK: - Building
@@ -322,47 +305,50 @@ final class FrameInstances {
     private static let isSkipInkDumpEnabled = getenv("UBIQUITTY_DUMP_SKIP_INK") != nil
     private static let isGlyphDumpEnabled = getenv("UBIQUITTY_DUMP_GLYPH_ROW") != nil
 
-    /// The rules the last build cut around ink, and the widest clearance any
-    /// of them keeps from the ink it crosses.
+    /// The rules the last build tested against glyph ink, and those the ink
+    /// cut, as Core counted them.
     ///
-    /// Walked on demand rather than tallied per build: a reader asking whether
-    /// descenders break the rule is a probe, and the build is the hot path.
-    package var skipInkRules: (count: Int, widestPadInPixels: Float) {
-        let decorationCount = Int(counts.decorations)
-        guard decorationCount > 0,
-            let decorationBase = decorations.elements(as: Ubiquitty.Rendering.DecorationInstance.self)
-        else {
-            return (0, 0)
-        }
-        var count = 0
-        var widestPad: Float = 0
-        for index in 0..<decorationCount where decorationBase[index].skipInk != 0 {
-            count += 1
-            widestPad = max(widestPad, decorationBase[index].padInAtlas.x)
-        }
-        return (count, widestPad)
+    /// From the counts rather than the stream: a cut rule is several pieces and
+    /// an uncut one is one, so the stream cannot say whether skip-ink ran.
+    package var skipInkRules: (rules: Int, cutRules: Int) {
+        (Int(counts.skipInkRules), Int(counts.skipInkCutRules))
     }
 
-    /// Prints every skip-ink decoration beside the phased glyph of its cell, for
-    /// a reader checking that the rule's coverage tap lands on the ink it skips.
+    /// Where Core writes what each tested rule read, while the dump is on;
+    /// empty, and nothing written, otherwise.
+    private var skipInkTraces = [Ubiquitty.Rendering.SkipInkTrace](
+        repeating: Ubiquitty.Rendering.SkipInkTrace(),
+        count: FrameInstances.isSkipInkDumpEnabled ? 4096 : 0
+    )
+
+    /// Prints every rule the last build tested against ink: the rule, the
+    /// glyph ink each of its sources read, and the pieces it was cut into.
     private func dumpSkipInkStream() {
-        let decorationCount = Int(counts.decorations)
-        let glyphCount = Int(counts.glyphs)
-        guard decorationCount > 0,
-            let decorationBase = decorations.elements(as: Ubiquitty.Rendering.DecorationInstance.self),
-            let glyphBase = glyphs.elements(as: Ubiquitty.Rendering.GlyphInstance.self)
-        else {
+        let traces = skipInkTraces
+        let ruleCount = min(Int(counts.skipInkRules), traces.count)
+        let decorationBase = decorations.elements(as: Ubiquitty.Rendering.DecorationInstance.self)
+        var lines = "[skipink] rules=\(counts.skipInkRules) cut=\(counts.skipInkCutRules) decorations=\(counts.decorations)\n"
+        let describe = { (name: String, source: Ubiquitty.Rendering.SkipInkSource) -> String in
+            guard source.isPresent else {
+                return ""
+            }
             return
+                " \(name)=sheet\(source.sheet.rawValue) ink=\(source.inkLeft)..\(source.inkRight) band=\(source.bandTop)..\(source.bandBottom) slot=\(source.slotLeft),\(source.slotTop)..\(source.slotRight),\(source.slotBottom)"
         }
-        var lines = "[skipink] decorations=\(decorationCount) glyphs=\(glyphCount)\n"
-        for index in 0..<decorationCount where decorationBase[index].skipInk != 0 {
-            let d = decorationBase[index]
+        for index in 0..<ruleCount {
+            let trace = traces[index]
+            let rule = trace.rule
             lines +=
-                "[skipink]   rule x=\(d.topLeftInPixels.x)..\(d.bottomRightInPixels.x) y=\(d.topLeftInPixels.y)..\(d.bottomRightInPixels.y) ink uv=\(d.inkTopLeft.x)..\(d.inkBottomRight.x) v=\(d.inkTopLeft.y)..\(d.inkBottomRight.y) slot=\(d.glyphSlotTopLeftUV.x)..\(d.glyphSlotBottomRightUV.x) pad=\(d.padInAtlas.x),\(d.padInAtlas.y)\n"
-            for g in 0..<glyphCount where abs(glyphBase[g].originInPixels.x - d.topLeftInPixels.x) < 40 {
-                let i = glyphBase[g]
+                "[skipink]   rule x=\(rule.left)..\(rule.right) y=\(rule.top)..\(rule.bottom) reach=\(trace.query.reachAcross),\(trace.query.reachUpDown) cut=\(trace.isCut)"
+                + describe("own", trace.query.own) + describe("left", trace.query.left) + describe("right", trace.query.right) + "\n"
+            guard let decorationBase else {
+                continue
+            }
+            let end = min(Int(trace.firstPiece) + Int(trace.pieceCount), Int(counts.decorations))
+            for piece in Int(trace.firstPiece)..<max(end, Int(trace.firstPiece)) {
+                let d = decorationBase[piece]
                 lines +=
-                    "[skipink]     glyph o=\(i.originInPixels.x),\(i.originInPixels.y) s=\(i.sizeInPixels.x),\(i.sizeInPixels.y) uv=\(i.atlasTopLeft.x)..\(i.atlasBottomRight.x) v=\(i.atlasTopLeft.y)..\(i.atlasBottomRight.y)\n"
+                    "[skipink]     piece x=\(d.topLeftInPixels.x)..\(d.bottomRightInPixels.x) y=\(d.topLeftInPixels.y)..\(d.bottomRightInPixels.y)\n"
             }
         }
         fputs(lines, stderr)
@@ -439,14 +425,19 @@ final class FrameInstances {
         _ inputs: Ubiquitty.Rendering.BuildInputs,
         _ backend: Ubiquitty.Rendering.GlyphBackend
     ) -> Ubiquitty.Rendering.InstanceCounts {
-        // The crossings are written beside the streams, into storage the
-        // build borrows for the call.
+        // The crossings, and the skip-ink traces while the dump is on, are
+        // written beside the streams, into storage the build borrows for the
+        // call.
         rowInkCrossings.withUnsafeMutableBufferPointer { crossings in
-            var out = Ubiquitty.Rendering.InstanceBuffers()
-            fillBuffers(into: &out)
-            out.rowInkCrossings = crossings.baseAddress
-            out.rowInkCrossingCapacity = crossings.count
-            return Ubiquitty.Rendering.buildCellInstances(inputs, backend, out)
+            skipInkTraces.withUnsafeMutableBufferPointer { traces in
+                var out = Ubiquitty.Rendering.InstanceBuffers()
+                fillBuffers(into: &out)
+                out.rowInkCrossings = crossings.baseAddress
+                out.rowInkCrossingCapacity = crossings.count
+                out.skipInkTraces = traces.baseAddress
+                out.skipInkTraceCapacity = traces.count
+                return Ubiquitty.Rendering.buildCellInstances(inputs, backend, out)
+            }
         }
     }
 
@@ -455,14 +446,19 @@ final class FrameInstances {
         _ backend: Ubiquitty.Rendering.GlyphBackend,
         _ scope: Ubiquitty.Rendering.BuildScope
     ) -> Ubiquitty.Rendering.InstanceCounts {
-        // The crossings are written beside the streams, into storage the
-        // build borrows for the call.
+        // The crossings, and the skip-ink traces while the dump is on, are
+        // written beside the streams, into storage the build borrows for the
+        // call.
         rowInkCrossings.withUnsafeMutableBufferPointer { crossings in
-            var out = Ubiquitty.Rendering.InstanceBuffers()
-            fillBuffers(into: &out)
-            out.rowInkCrossings = crossings.baseAddress
-            out.rowInkCrossingCapacity = crossings.count
-            return capture.build(backend, out, scope)
+            skipInkTraces.withUnsafeMutableBufferPointer { traces in
+                var out = Ubiquitty.Rendering.InstanceBuffers()
+                fillBuffers(into: &out)
+                out.rowInkCrossings = crossings.baseAddress
+                out.rowInkCrossingCapacity = crossings.count
+                out.skipInkTraces = traces.baseAddress
+                out.skipInkTraceCapacity = traces.count
+                return capture.build(backend, out, scope)
+            }
         }
     }
 
@@ -472,14 +468,19 @@ final class FrameInstances {
         _ view: Ubiquitty.Rendering.FrameCapture.ViewTierOverrides,
         _ scope: Ubiquitty.Rendering.BuildScope
     ) -> Ubiquitty.Rendering.InstanceCounts {
-        // The crossings are written beside the streams, into storage the
-        // build borrows for the call.
+        // The crossings, and the skip-ink traces while the dump is on, are
+        // written beside the streams, into storage the build borrows for the
+        // call.
         rowInkCrossings.withUnsafeMutableBufferPointer { crossings in
-            var out = Ubiquitty.Rendering.InstanceBuffers()
-            fillBuffers(into: &out)
-            out.rowInkCrossings = crossings.baseAddress
-            out.rowInkCrossingCapacity = crossings.count
-            return capture.build(backend, out, view, scope)
+            skipInkTraces.withUnsafeMutableBufferPointer { traces in
+                var out = Ubiquitty.Rendering.InstanceBuffers()
+                fillBuffers(into: &out)
+                out.rowInkCrossings = crossings.baseAddress
+                out.rowInkCrossingCapacity = crossings.count
+                out.skipInkTraces = traces.baseAddress
+                out.skipInkTraceCapacity = traces.count
+                return capture.build(backend, out, view, scope)
+            }
         }
     }
 
@@ -517,6 +518,29 @@ final class FrameInstances {
         out.marginStripCapacity = marginStrips.capacity
         out.overlays = overlays.elements(as: Ubiquitty.Rendering.OverlayInstance.self)
         out.overlayCapacity = overlays.capacity
+    }
+
+    /// Calls Core until every stream it wrote fits, growing them between
+    /// attempts.
+    ///
+    /// Core reports the count a frame needs, so a retry is sized for the
+    /// attempt before it. It can still need more: the retry's `beginFrame`
+    /// lands the rasters that attempt queued, and ink that lands can cut a rule
+    /// the attempt drew whole, which is more pieces. The retry queues nothing,
+    /// every glyph having been faulted already, so a third attempt needs no
+    /// more than the second; past it the counts are recorded as truncated.
+    ///
+    /// - Parameter call: One build into the streams as they stand.
+    /// - Returns: The last build's counts.
+    private func withRoom(
+        _ call: () -> Ubiquitty.Rendering.InstanceCounts
+    ) -> Ubiquitty.Rendering.InstanceCounts {
+        var built = call()
+        for _ in 0..<2 where overran(built) {
+            grow(toFit: built)
+            built = call()
+        }
+        return built
     }
 
     private func overran(_ built: Ubiquitty.Rendering.InstanceCounts) -> Bool {

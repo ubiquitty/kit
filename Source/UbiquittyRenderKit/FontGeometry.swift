@@ -214,6 +214,7 @@ package struct FontGeometry {
         faceRules.underlineThickness = Float(CTFontGetUnderlineThickness(font))
         faceRules.descent = Float(descent)
         faceRules.leading = Float(leading)
+        faceRules.underscoreWeight = Self.underscoreWeight(font)
         let rules = Ubiquitty.Rendering.ruleGeometry(
             Float(pointSize * atlasScale),
             Float(atlasScale),
@@ -452,5 +453,59 @@ extension FontGeometry {
         var box = CGRect.zero
         CTFontGetBoundingRectsForGlyphs(font, .default, glyphs, &box, 1)
         return (max(0, Double(box.maxY)), max(0, Double(-box.minY)))
+    }
+}
+
+extension FontGeometry {
+    /// Returns the weight the face's own underscore draws at, as the glyph
+    /// raster draws it, read by Core's rule (measuredUnderscoreWeight) as every
+    /// engine's underscore is.
+    ///
+    /// Drawn into the same kind of context the atlas draws glyphs into, a
+    /// linear-gray alpha bitmap with antialiasing on and font smoothing left to
+    /// the user's setting, so the weight is the one the face's letters are seen
+    /// at, stem darkening included, rather than the outline's.
+    ///
+    /// - Parameter font: The face, already at its size in device pixels.
+    /// - Returns: The weight, or zero for a face with no underscore or one
+    ///   that draws nothing.
+    static func underscoreWeight(_ font: CTFont) -> Float {
+        var character: UInt16 = 0x5F
+        var glyph: CGGlyph = 0
+        guard CTFontGetGlyphsForCharacters(font, &character, &glyph, 1), glyph != 0 else {
+            return 0
+        }
+        var bounds = CGRect.zero
+        CTFontGetBoundingRectsForGlyphs(font, .horizontal, &glyph, &bounds, 1)
+        guard bounds.width > 0, bounds.height > 0 else {
+            return 0
+        }
+        let margin = 4
+        let width = Int(bounds.width.rounded(.up)) + 2 * margin
+        let height = Int(bounds.height.rounded(.up)) + 2 * margin
+        guard
+            let context = CGContext(
+                data: nil,
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bytesPerRow: width,
+                space: CGColorSpace(name: CGColorSpace.linearGray) ?? CGColorSpaceCreateDeviceGray(),
+                bitmapInfo: CGImageAlphaInfo.alphaOnly.rawValue
+            )
+        else {
+            return 0
+        }
+        context.setFillColor(gray: 1.0, alpha: 1.0)
+        context.setShouldAntialias(true)
+        var position = CGPoint(x: CGFloat(margin) - bounds.minX, y: CGFloat(margin) - bounds.minY)
+        CTFontDrawGlyphs(font, &glyph, &position, 1, context)
+        guard let image = context.makeImage(), let pixels = image.dataProvider?.data, image.bytesPerRow > 0 else {
+            return 0
+        }
+        let length = CFDataGetLength(pixels)
+        var coverage = [UInt8](repeating: 0, count: length)
+        CFDataGetBytes(pixels, CFRange(location: 0, length: length), &coverage)
+        return Ubiquitty.Rendering.measuredUnderscoreWeight(coverage, Int32(image.bytesPerRow), Int32(length / image.bytesPerRow))
     }
 }

@@ -33,6 +33,8 @@ import UbiquittyCore
 final class CoverageSheet {
     /// The sheet the glyph passes sample.
     let texture: MTLTexture
+    /// What skip-ink reads of ``texture`` (Core/Rendering/SkipInk.h).
+    let ink: Ubiquitty.Rendering.SkipInkRecord
     /// The staged path to the sheet; see ``AtlasUploader``.
     private let uploader: AtlasUploader
 
@@ -147,6 +149,7 @@ final class CoverageSheet {
         descriptor.usage = .shaderRead
         descriptor.storageMode = device.cpuWrittenTextureStorageMode
         guard let texture = device.makeTexture(descriptor: descriptor),
+            let ink = Ubiquitty.Rendering.makeSkipInkRecord(Int32(texture.width), Int32(texture.height)),
             // Core's factory, because the class is a shared reference type and
             // Swift cannot place one itself. The bucket count is Core's too: the
             // load factor and the power-of-two mask are one decision every
@@ -160,6 +163,7 @@ final class CoverageSheet {
             return nil
         }
         self.texture = texture
+        self.ink = ink
         self.columns = fitColumns
         self.rows = fitRows
         self.slotWidthInPixels = slotWidthInPixels
@@ -239,6 +243,7 @@ final class CoverageSheet {
                     pixels.baseAddress!,
                     bytesPerRow: self.slotWidthInPixels,
                     region: self.region(for: slot),
+                    ink: self.ink,
                     into: self.texture
                 )
             }
@@ -698,6 +703,7 @@ final class CoverageSheet {
                 bytes.baseAddress!,
                 bytesPerRow: slotWidthInPixels,
                 region: region(for: slot),
+                ink: ink,
                 into: texture
             )
         }
@@ -739,6 +745,7 @@ final class CoverageSheet {
                 bytes.baseAddress!,
                 bytesPerRow: slotWidthInPixels,
                 region: region(for: slot),
+                ink: ink,
                 into: texture
             )
         }

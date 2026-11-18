@@ -67,6 +67,16 @@ protocol GlyphSource: AnyObject {
     /// - Parameter binding: The binding to fill.
     func bindMonoAtlas(into binding: inout Ubiquitty.Rendering.MonoAtlasBinding)
 
+    /// Returns the ink of every coverage sheet, as Core's skip-ink reads it
+    /// (``GlyphBackend/bindSkipInkPlanes``), once a frame.
+    ///
+    /// On the base protocol because every source that draws glyphs draws them
+    /// over rules: a source that answered nothing would draw every underline
+    /// straight through its descenders.
+    ///
+    /// - Returns: One plane per sheet; an absent sheet's is empty.
+    func skipInkPlanes() -> Ubiquitty.Rendering.SkipInkPlanes
+
     /// Returns the atlas rect for one code point, rasterising on a miss.
     ///
     /// - Parameters:
@@ -537,6 +547,9 @@ final class GlyphBackendContext {
             var binding = Ubiquitty.Rendering.MonoAtlasBinding()
             GlyphBackendContext.source(context).bindMonoAtlas(into: &binding)
             return binding
+        }
+        backend.bindSkipInkPlanes = { context in
+            GlyphBackendContext.source(context).skipInkPlanes()
         }
         backend.monoGlyph = { context, codePoint, face, weight, phase in
             GlyphBackendContext.source(context).monoGlyph(codePoint, face: face, weight: weight, variant: phase)

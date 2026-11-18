@@ -209,6 +209,15 @@ public:
     ///   rasterizer applies no variable weight, so one key keeps key and raster
     ///   in agreement.
     Rendering::MonoAtlasBinding bindMonoAtlas();
+
+    /// Returns every sheet's ink as Core's skip-ink reads it, once a frame.
+    ///
+    /// Each sheet keeps its coverage on the host and uploads it from there, so
+    /// the planes are those bytes: what cuts a rule is what the images hold.
+    ///
+    /// - Returns: One plane per sheet; mono and wide share one image here, and
+    ///   a sheet this atlas was not given is absent.
+    [[nodiscard]] Rendering::SkipInkPlanes skipInkPlanes() const;
     /// Rasterizes a mono glyph into a slot the cache has just allocated.
     ///
     /// - Parameters:

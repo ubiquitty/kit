@@ -310,6 +310,11 @@ FreeTypeRasterizer::FreeTypeRasterizer(double fontPixelSize, std::string family,
         m_primaryDescentInEm = -static_cast<double>(m_face->descender) / m_face->units_per_EM;
     }
     m_cellMetrics = computeCellMetrics();
+    // The face's own rule, as this raster draws it: the underscore drawn into
+    // the cell just measured and read by Core's rule, then the cell measured
+    // again with it (RuleGeometry.h).
+    m_underscoreWeight = Rendering::underscoreWeight(*this, static_cast<int>(std::ceil(m_cellMetrics.cellWidth)), static_cast<int>(std::ceil(m_cellMetrics.cellHeight)));
+    m_cellMetrics = computeCellMetrics();
     m_faceMetrics = computeFaceMetrics();
     m_glyphOverhang = computeGlyphOverhang(m_cellMetrics);
 }
@@ -1138,14 +1143,16 @@ Rendering::CellMetrics FreeTypeRasterizer::computeCellMetrics() const
     cellHeight = static_cast<int>(layout.cellHeight);
     baseline = static_cast<int>(layout.baselineFromTop);
 
-    // The face rule policy (RuleGeometry.h): the face's underline weight in
-    // font units scaled to its pixel size, and the space below its baseline —
+    // The face rule policy (RuleGeometry.h): the weight the face's underscore
+    // draws at, with its underline weight in font units scaled to its pixel
+    // size standing in until that is measured, and the space below its baseline —
     // the descender plus whatever the line height leaves beyond ascent and
     // descent, which is the leading CoreText reports for the same face.
     Rendering::RuleFaceMetrics faceRules;
     if (m_face->units_per_EM > 0)
         faceRules.underlineThickness = static_cast<float>(
             static_cast<double>(m_face->underline_thickness) * m_fontPixelSize / m_face->units_per_EM);
+    faceRules.underscoreWeight = m_underscoreWeight;
     faceRules.descent = static_cast<float>(-static_cast<double>(sm.descender) / 64.0);
     faceRules.leading = static_cast<float>(std::max(0.0, (static_cast<double>(sm.height) - static_cast<double>(sm.ascender - sm.descender)) / 64.0));
     const Rendering::RuleGeometry rules = Rendering::ruleGeometry(static_cast<float>(m_fontPixelSize), static_cast<float>(m_deviceScale), faceRules);

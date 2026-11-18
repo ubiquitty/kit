@@ -37,6 +37,7 @@ final class StubGlyphSource: GlyphSource {
     func bindMonoAtlas(into binding: inout Ubiquitty.Rendering.MonoAtlasBinding) {
         binding.slotCapacity = 256
     }
+    func skipInkPlanes() -> Ubiquitty.Rendering.SkipInkPlanes { Ubiquitty.Rendering.SkipInkPlanes() }
     func monoGlyph(
         _ codePoint: UInt32,
         face: Ubiquitty.Rendering.FontFace,

@@ -17,6 +17,7 @@
 // that read those slots and before the frame that will.
 //
 import Metal
+import UbiquittyCore
 
 /// The staged path from a rasteriser's bytes to an atlas sheet.
 ///
@@ -84,15 +85,36 @@ package final class AtlasUploader {
     ///   - bytes: The rasterised slot, tightly packed at `bytesPerRow`.
     ///   - bytesPerRow: The source pitch.
     ///   - region: Where the slot sits in the sheet.
+    ///   - ink: The sheet's skip-ink record (Core/Rendering/SkipInk.h), or nil
+    ///     for a sheet whose texels are not coverage. Required rather than
+    ///     defaulted: a coverage sheet staged without its record draws its
+    ///     glyphs and leaves the rules beneath them uncut.
     ///   - texture: The sheet.
-    package func stage(
+    ///
+    /// Internal rather than package: its signature names a Core type, which the
+    /// generated C++ interface cannot carry, and only this module's sheets stage.
+    func stage(
         _ bytes: UnsafeRawPointer,
         bytesPerRow: Int,
         region: MTLRegion,
+        ink: Ubiquitty.Rendering.SkipInkRecord?,
         into texture: MTLTexture
     ) {
         let byteCount = bytesPerRow * region.size.height
         guard byteCount > 0 else { return }
+        // Here, where every path into the sheet passes, and before any of
+        // them: the record is read by the build in progress, not the GPU copy.
+        ink?
+            .record(
+                Int32(clamping: region.origin.x),
+                Int32(clamping: region.origin.y),
+                Int32(clamping: region.size.width),
+                Int32(clamping: region.size.height),
+                bytes,
+                bytesPerRow,
+                1,
+                0
+            )
         guard byteCount <= capacityInBytes else {
             unorderedCount += 1
             texture.replace(region: region, mipmapLevel: 0, withBytes: bytes, bytesPerRow: bytesPerRow)

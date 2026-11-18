@@ -103,6 +103,7 @@ extension SurfaceStyle {
         shouldDrawBrailleGrid = configuration.shouldDrawBrailleGrid
         brailleStyle = BrailleStyle.from(configuration.brailleStyle)
         shadeStyle = ShadeStyle.from(configuration.shadeStyle)
+        curlyUnderlineShape = CurlyUnderlineShape.from(configuration.curlyRuleShape)
         selectionStyle = configuration.selectionStyle == Ubiquitty.Rendering.SelectionStyle.Tint ? .tint : .native
         switch configuration.nonOwnerPresentation {
         case .Pan: nonOwnerPresentation = .pan

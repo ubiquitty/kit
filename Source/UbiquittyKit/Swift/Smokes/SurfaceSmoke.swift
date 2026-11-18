@@ -242,7 +242,8 @@ enum SurfaceSmoke {
         // a renderer styled from `SurfaceStyle`'s neutral defaults instead
         // cuts its rule around descenders with no clearance, so the rule runs
         // into the stroke it skips. The clearance is the field that tells the
-        // two apart: the configuration's default keeps one, the type's does not.
+        // two apart: the configuration's default keeps one (automatic, read as
+        // a negative number of points), the type's does not.
         do {
             let configuration = Ubiquitty.Preferences.values().pointee
             let configuredPad = Ubiquitty.Preferences.Effective.underlineSkipInkPad(configuration)
@@ -250,7 +251,7 @@ enum SurfaceSmoke {
                 return failed("the shared factory built no surface renderer")
             }
             guard shared.style.shouldUnderlineSkipInk == Ubiquitty.Preferences.Effective.underlineSkipInk(configuration),
-                configuredPad > 0, shared.style.underlineSkipInkPaddingInPoints == configuredPad
+                configuredPad != 0, shared.style.underlineSkipInkPaddingInPoints == configuredPad
             else {
                 return failed(
                     "the shared factory's renderer skips ink with a \(shared.style.underlineSkipInkPaddingInPoints) pt clearance where the configuration names \(configuredPad) pt"

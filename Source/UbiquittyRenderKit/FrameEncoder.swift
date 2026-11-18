@@ -90,7 +90,7 @@ struct InstancePass {
     /// every instance is a textured quad. False for passes that degrade: a cell
     /// still paints its background when the sheet is absent (a blank cell
     /// already carries `minUV == maxUV`), and a rule is geometry that samples
-    /// only for skip-ink.
+    /// nothing: Core cuts it where ink touches it before it reaches the pass.
     ///
     /// The distinction is not tidiness. The fragment stage keeps whatever the
     /// previous pass bound, so an ink pass drawn without its own sheet samples
@@ -98,18 +98,6 @@ struct InstancePass {
     /// coverage, a wide glyph from the single-cell sheet — with every instance
     /// count correct and nothing to fail.
     let requiresSheet: Bool
-    /// A second sheet at fragment texture 1. The rule pass uses it for
-    /// proportional fallback strips.
-    unowned(unsafe) var secondTexture: MTLTexture? = nil
-    /// A third sheet at fragment texture 2. The rule pass uses it for
-    /// ligature strips.
-    unowned(unsafe) var thirdTexture: MTLTexture? = nil
-    /// A fourth sheet at fragment texture 3. The rule pass uses it for the
-    /// dedicated proportional sheet, under a run drawn glyph by glyph.
-    unowned(unsafe) var fourthTexture: MTLTexture? = nil
-    /// A fifth sheet at fragment texture 4. The rule pass uses it for the
-    /// two-cell sheet, under a wide glyph's columns.
-    unowned(unsafe) var fifthTexture: MTLTexture? = nil
     /// The first instance drawn, for a stream drawn in two segments: the head
     /// into the retained grid, the cursor tier's tail after the blit.
     var baseInstance: Int = 0
@@ -328,7 +316,7 @@ final class FrameEncoder {
                     ?? MTLScissorRect(x: 0, y: 0, width: Int(uniforms.viewportSizeInPixels.x), height: Int(uniforms.viewportSizeInPixels.y))
             )
         }
-        drawRulePasses(instances, sheets, uniforms: uniforms, segment: .head, into: encoder)
+        drawRulePasses(instances, uniforms: uniforms, segment: .head, into: encoder)
         if rulesNeedViewport, let contentScissor { encoder.setScissorRect(contentScissor) }
     }
 
@@ -511,7 +499,7 @@ final class FrameEncoder {
         }
         guard phase != .fills else { return }
         drawGlyphPasses(instances, sheets, uniforms: uniforms, segment: .cursorTier, into: encoder)
-        drawRulePasses(instances, sheets, uniforms: uniforms, segment: .cursorTier, into: encoder)
+        drawRulePasses(instances, uniforms: uniforms, segment: .cursorTier, into: encoder)
         guard includesFloatingOverlays else { return }
         draw(
             InstancePass(
@@ -660,7 +648,7 @@ final class FrameEncoder {
             encoder.setVertexBytes(bytes.baseAddress!, length: bytes.count, index: 0)
             encoder.setFragmentBytes(bytes.baseAddress!, length: bytes.count, index: 0)
         }
-        drawRulePasses(instances, sheets, uniforms: uniforms, segment: segment, isEncodedPass: true, into: encoder)
+        drawRulePasses(instances, uniforms: uniforms, segment: segment, isEncodedPass: true, into: encoder)
     }
 
     /// Aliases the drawable's stored bytes without applying the sRGB transfer.
@@ -690,7 +678,7 @@ final class FrameEncoder {
         // The tier's rules first, where the sRGB pass left them, so the
         // floating overlays still land over them.
         if isBitmap {
-            drawRulePasses(instances, sheets, uniforms: uniforms, segment: .cursorTier, isEncodedPass: true, into: encoder)
+            drawRulePasses(instances, uniforms: uniforms, segment: .cursorTier, isEncodedPass: true, into: encoder)
             encodeBitmapOverlaysInOrder(instances, into: encoder)
             return
         }
@@ -1026,15 +1014,15 @@ final class FrameEncoder {
     }
 
     /// Draws the rules over the text: underlines, strikethroughs and box
-    /// strokes, encoded directly as ``drawFillPasses`` is.
+    /// strokes, encoded directly as ``drawFillPasses`` is. A rule glyph ink
+    /// cuts arrives as the pieces Core left standing, so the pass binds no
+    /// sheet.
     ///
     /// - Parameters:
     ///   - instances: The streams Core built, and the counts it wrote.
-    ///   - sheets: The sheet the skip-ink taps sample.
     ///   - encoder: The pass to record into.
     private func drawRulePasses(
         _ instances: FrameInstances,
-        _ sheets: AtlasSheets,
         uniforms: Ubiquitty.Rendering.FrameUniforms,
         segment: StreamSegment,
         isEncodedPass: Bool = false,
@@ -1057,12 +1045,8 @@ final class FrameEncoder {
                 pipeline: pipeline,
                 buffer: instances.decorations.buffer,
                 count: rules.count,
-                texture: sheets.mono,
+                texture: nil,
                 requiresSheet: false,
-                secondTexture: sheets.proportionalStrip,
-                thirdTexture: sheets.ligature,
-                fourthTexture: sheets.proportional,
-                fifthTexture: sheets.wide,
                 baseInstance: rules.base
             ),
             into: encoder
@@ -1090,20 +1074,6 @@ final class FrameEncoder {
         if let texture = pass.texture {
             encoder.setFragmentTexture(texture, index: 0)
             encoder.setFragmentSamplerState(samplers.atlas, index: 0)
-        }
-        // Optional sheets fall back to mono so every declared texture slot is
-        // deterministic even on a frame carrying no corresponding run.
-        if let second = pass.secondTexture ?? pass.texture, pass.secondTexture != nil || pass.texture != nil {
-            encoder.setFragmentTexture(second, index: 1)
-        }
-        if let third = pass.thirdTexture ?? pass.texture, pass.thirdTexture != nil || pass.texture != nil {
-            encoder.setFragmentTexture(third, index: 2)
-        }
-        if let fourth = pass.fourthTexture ?? pass.texture, pass.fourthTexture != nil || pass.texture != nil {
-            encoder.setFragmentTexture(fourth, index: 3)
-        }
-        if let fifth = pass.fifthTexture ?? pass.texture, pass.fifthTexture != nil || pass.texture != nil {
-            encoder.setFragmentTexture(fifth, index: 4)
         }
         // Two triangles as six vertices, positioned in the vertex shader from
         // the instance rather than from a vertex buffer, so the quad geometry

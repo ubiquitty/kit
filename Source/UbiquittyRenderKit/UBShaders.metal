@@ -67,31 +67,28 @@ struct OverlayInstance {
 // carries the originating cell's width so dotted/dashed/curly patterns
 // repeat once per cell regardless of how many cells a rule spans.
 struct DecorationInstance {
-    float2 topLeftInPixels;
+    float2 topLeftInPixels;      // the piece drawn
     float2 bottomRightInPixels;
     float4 color;
     float  kind;         // DECO_* selector
     float  dashPeriodInPixels;     // cell advance in pixels (pattern period)
     float  thicknessInPixels;      // stroke thickness in pixels (curl/box use it)
-    float  skipInk;      // 1 = cut the rule where glyph ink crosses it
-    float2 inkTopLeft;       // glyph cell-box atlas UV; .y is the band v on both
-    float2 inkBottomRight;       // ends, so the fragment samples coverage at the band
-    float2 padInAtlas;        // skip-ink dilation radius in atlas UV units
-    float2 pad1;              // .x tap count; .y base-8 self/left/right sheet selectors
-    float2 glyphSlotTopLeftUV;       // glyph's full atlas-slot UV rect: dilation taps are
-    float2 glyphSlotBottomRightUV;       // clamped to it so the disc can't bleed into a neighbour slot
-    // Cross-cell skip-ink: the left/right neighbour glyphs, so a descender that
-    // leans into this cell from the adjacent cell breaks this rule too. *Ink =
-    // (cellBoxU min, max, band v top, bottom); *Box = (slot min.x,y, max.x,y).
-    // An absent neighbour has .x>=.y in its box (zeroed), and is skipped.
-    float4 leftInk;
-    float4 leftBox;
-    float4 rightInk;
-    float4 rightBox;
+    // Which of the piece's ends ink cut: 1 its left, 2 its right. A cut end
+    // lies wherever the cut does, inside a pixel as often as not, and that
+    // pixel is drawn in the part the piece covers; an end on the rule's own
+    // edge is drawn by the centre rule, as an uncut rule's is.
+    float  cutEnds;
+    // The whole rule the piece belongs to: the frame its pattern is laid out
+    // in. Core cuts a rule where glyph ink touches it (SkipInk.h) and sends the
+    // pieces left; every piece carries the same band, so its dots and dashes
+    // fall where they would on the uncut rule.
+    float2 bandTopLeftInPixels;
+    float2 bandBottomRightInPixels;
 };
 
 // Decoration kinds. Solid (0.0) fills the rect — the else case in the
 // fragment, so no named constant; the rest mask inside it.
+constant float decorationSolid = 0.0;
 constant float decorationDotted = 1.0;
 constant float decorationDashed = 2.0;
 constant float decorationCurly  = 3.0;
@@ -974,22 +971,14 @@ struct DecorationOut {
     float  bitmapTier [[flat]]; // Uniforms.bitmapTier, carried so the fragment needs no buffer of its own
     float3 colorEncoded [[flat]]; // the rule colour as authored (sRGB-encoded), for the bitmap tier's mix
     float4 color; // rgb LINEAR (converted in the vertex stage), a as authored
-    float2 localPositionInPixels;      // pixel offset from the rule's top-left corner
-    float2 sizeInPixels;       // rule rect size in pixels
+    float2 localPositionInPixels;      // pixel offset from the rule's band's top-left corner
+    float2 sizeInPixels;       // the band's size in pixels
     float  kind;
     float  dashPeriodInPixels;
     float  thicknessInPixels;
-    float  skipInk;
-    float2 inkUV;        // glyph cell-box atlas UV at this fragment's band
-    float2 padInAtlas;        // skip-ink dilation radius (atlas UV)
-    float  padSteps;     // taps per side across the radius (scales with pad px)
-    float  sheetMask;    // base-8 digits: the sheet the self, left and right taps read
-    float2 glyphSlotTopLeftUV;       // glyph atlas-slot UV clamp rect (flat — no neighbour bleed)
-    float2 glyphSlotBottomRightUV;
-    float4 leftInk;      // left/right neighbour glyph (cross-cell skip-ink); see
-    float4 leftBox;      // DecorationInstance for the field layout
-    float4 rightInk;
-    float4 rightBox;
+    // The piece across, its cut ends only: an edge drawn by the centre rule
+    // stands far outside, so it takes nothing from any pixel.
+    float2 cutAcross [[flat]];
 };
 
 vertex DecorationOut decorationVertex(uint vid [[vertex_id]],
@@ -999,8 +988,16 @@ vertex DecorationOut decorationVertex(uint vid [[vertex_id]],
 {
     DecorationInstance d = decos[iid];
     float2 corner = quadCorners[vid];
-    float2 sizeInPixels = d.bottomRightInPixels - d.topLeftInPixels;
-    float2 positionInPixels = d.topLeftInPixels + corner * sizeInPixels;
+    // A cut end's pixel is drawn in part, so the quad reaches the whole pixel
+    // the end lies in — and no further than the band's own pixels, which the
+    // centre rule gives this rule and not its neighbour.
+    const uint cutEnds = uint(d.cutEnds + 0.5);
+    const bool isLeftCut = (cutEnds & 1u) != 0;
+    const bool isRightCut = (cutEnds & 2u) != 0;
+    const float quadLeft = isLeftCut ? max(floor(d.topLeftInPixels.x), ceil(d.bandTopLeftInPixels.x - 0.5)) : d.topLeftInPixels.x;
+    const float quadRight = isRightCut ? min(ceil(d.bottomRightInPixels.x), ceil(d.bandBottomRightInPixels.x - 0.5)) : d.bottomRightInPixels.x;
+    float2 positionInPixels = float2(mix(quadLeft, quadRight, corner.x),
+                                     mix(floor(d.topLeftInPixels.y), ceil(d.bottomRightInPixels.y), corner.y));
 
     DecorationOut out;
     out.position = float4(pixelsToNdc(positionInPixels, u.viewportSizeInPixels), 0.0, 1.0);
@@ -1010,196 +1007,65 @@ vertex DecorationOut decorationVertex(uint vid [[vertex_id]],
     // every pixel of the quad, and the conversion is three pow() calls. The alpha rides
     // along unconverted, which is what the fragment reads it as.
     out.color = float4(srgbToLinear(d.color.rgb), d.color.a);
-    out.localPositionInPixels = corner * sizeInPixels;
-    out.sizeInPixels = sizeInPixels;
+    // The pattern is the band's: a piece of a cut rule draws its own part of it.
+    out.localPositionInPixels = positionInPixels - d.bandTopLeftInPixels;
+    out.sizeInPixels = d.bandBottomRightInPixels - d.bandTopLeftInPixels;
     out.kind = d.kind;
     out.dashPeriodInPixels = d.dashPeriodInPixels;
     out.thicknessInPixels = d.thicknessInPixels;
-    out.skipInk = d.skipInk;
-    // inkTopLeft/inkBottomRight are the glyph cell-box atlas-UV corners spanning the
-    // rule's rect (u across the cell width, v across the rule's height), so
-    // interpolating per-axis gives this fragment the glyph UV at its actual
-    // 2D position — the skip-ink cut then follows the letter outline.
-    out.inkUV = float2(mix(d.inkTopLeft.x, d.inkBottomRight.x, corner.x),
-                       mix(d.inkTopLeft.y, d.inkBottomRight.y, corner.y));
-    out.padInAtlas = d.padInAtlas;
-    out.padSteps = d.pad1.x;
-    out.sheetMask = d.pad1.y;
-    out.glyphSlotTopLeftUV = d.glyphSlotTopLeftUV;
-    out.glyphSlotBottomRightUV = d.glyphSlotBottomRightUV;
-    out.leftInk = d.leftInk;
-    out.leftBox = d.leftBox;
-    out.rightInk = d.rightInk;
-    out.rightBox = d.rightBox;
+    out.cutAcross = float2(isLeftCut ? d.topLeftInPixels.x : -1.0e9, isRightCut ? d.bottomRightInPixels.x : 1.0e9);
     return out;
 }
 
-// Max glyph coverage in a disc of radius padInAtlas (2N+1 taps per side) around
-// baseUV, clamped to [glyphSlotTopLeftUV, glyphSlotBottomRightUV] — the glyph's own atlas slot. Taps
-// outside the slot contribute nothing (they'd sample a neighbour glyph), so
-// the gap widens up to this glyph's own ink at any pad. glyphSlotBottomRightUV.x <= glyphSlotTopLeftUV.x
-// marks an absent source (e.g. a blank cell or off-grid neighbour) → 0.
-static float inkCoverageDisc(texture2d<float> atlas, sampler atlasSampler,
-                             float2 baseUV, float2 padInAtlas, int steps,
-                             float2 glyphSlotTopLeftUV, float2 glyphSlotBottomRightUV)
-{
-    if (glyphSlotBottomRightUV.x <= glyphSlotTopLeftUV.x)
-        return 0.0;
-    float cov = 0.0;
-    float2 stepUV = padInAtlas / float(steps);
-    for (int dy = -steps; dy <= steps; ++dy) {
-        for (int dx = -steps; dx <= steps; ++dx) {
-            // Round the square grid to a disc so the halo radius is uniform
-            // (a square would over-cut diagonally by ~1.4x).
-            if (dx * dx + dy * dy > steps * steps)
-                continue;
-            float2 uv = baseUV + float2(float(dx), float(dy)) * stepUV;
-            if (uv.x < glyphSlotTopLeftUV.x || uv.x > glyphSlotBottomRightUV.x
-                || uv.y < glyphSlotTopLeftUV.y || uv.y > glyphSlotBottomRightUV.y)
-                continue;
-            cov = max(cov, atlas.sample(atlasSampler, atlasNormalized(atlas, uv)).r);
-        }
-    }
-    return cov;
-}
-
-static float inkCoverageDiscForSheet(int sheetSelector,
-                                     texture2d<float> monoSheet,
-                                     texture2d<float> proportionalStripSheet,
-                                     texture2d<float> ligatureStripSheet,
-                                     texture2d<float> proportionalSheet,
-                                     texture2d<float> wideSheet,
-                                     sampler atlasSampler,
-                                     float2 baseUV, float2 padInAtlas, int steps,
-                                     float2 glyphSlotTopLeftUV, float2 glyphSlotBottomRightUV)
-{
-    if (sheetSelector == 1) {
-        return inkCoverageDisc(proportionalStripSheet, atlasSampler, baseUV, padInAtlas,
-                               steps, glyphSlotTopLeftUV, glyphSlotBottomRightUV);
-    }
-    if (sheetSelector == 2) {
-        return inkCoverageDisc(ligatureStripSheet, atlasSampler, baseUV, padInAtlas,
-                               steps, glyphSlotTopLeftUV, glyphSlotBottomRightUV);
-    }
-    if (sheetSelector == 3) {
-        return inkCoverageDisc(proportionalSheet, atlasSampler, baseUV, padInAtlas,
-                               steps, glyphSlotTopLeftUV, glyphSlotBottomRightUV);
-    }
-    if (sheetSelector == 4) {
-        return inkCoverageDisc(wideSheet, atlasSampler, baseUV, padInAtlas,
-                               steps, glyphSlotTopLeftUV, glyphSlotBottomRightUV);
-    }
-    return inkCoverageDisc(monoSheet, atlasSampler, baseUV, padInAtlas,
-                           steps, glyphSlotTopLeftUV, glyphSlotBottomRightUV);
-}
-
-// The software renderer's skip-ink cut, for the bitmap tier: the same disc
-// of taps as the real-font cut, read nearest — the CPU truncates each tap's
-// coordinate to a texel — and clamped to the sheet's edge. On a bitmap face
-// bilinear taps are a difference between the arms, not a refinement.
-// A linear sampler at a texel centre returns that texel exactly, which is how
-// nearest is had without a second sampler.
-static float inkCoverageSoftwareTaps(texture2d<float> sheet, sampler sheetSampler,
-                                     float2 baseUV, float2 padInAtlas, int steps,
-                                     float2 glyphSlotTopLeftUV, float2 glyphSlotBottomRightUV)
-{
-    if (glyphSlotBottomRightUV.x <= glyphSlotTopLeftUV.x)
-        return 0.0;
-    float2 size = float2(sheet.get_width(), sheet.get_height());
-    float2 stepUV = padInAtlas / float(steps);
-    float cov = 0.0;
-    for (int dy = -steps; dy <= steps; ++dy) {
-        for (int dx = -steps; dx <= steps; ++dx) {
-            if (dx * dx + dy * dy > steps * steps)
-                continue;
-            // SoftwareRenderer's skipInkTapBias: off the texel grid, where the
-            // interpolated coordinate and the CPU's round to different sides.
-            float2 uv = baseUV + float2(float(dx), float(dy)) * stepUV + 1.0 / 128.0;
-            // Only the glyph's own slot answers, as the CPU culls: a tap past
-            // the slot's edge would read the glyph packed beside it.
-            if (uv.x < glyphSlotTopLeftUV.x || uv.x > glyphSlotBottomRightUV.x
-                || uv.y < glyphSlotTopLeftUV.y || uv.y > glyphSlotBottomRightUV.y)
-                continue;
-            uv = clamp(floor(uv) + 0.5, float2(0.5), size - 0.5);
-            cov = max(cov, sheet.sample(sheetSampler, uv / size).r);
-        }
-    }
-    return cov;
-}
-
-static float inkCoverageSoftwareTapsForSheet(int sheetSelector,
-                                             texture2d<float> monoSheet,
-                                             texture2d<float> proportionalStripSheet,
-                                             texture2d<float> ligatureStripSheet,
-                                             texture2d<float> proportionalSheet,
-                                             sampler atlasSampler,
-                                             float2 baseUV, float2 padInAtlas, int steps,
-                                             float2 glyphSlotTopLeftUV, float2 glyphSlotBottomRightUV)
-{
-    if (sheetSelector == 1)
-        return inkCoverageSoftwareTaps(proportionalStripSheet, atlasSampler, baseUV, padInAtlas, steps,
-                                       glyphSlotTopLeftUV, glyphSlotBottomRightUV);
-    if (sheetSelector == 2)
-        return inkCoverageSoftwareTaps(ligatureStripSheet, atlasSampler, baseUV, padInAtlas, steps,
-                                       glyphSlotTopLeftUV, glyphSlotBottomRightUV);
-    if (sheetSelector == 3)
-        return inkCoverageSoftwareTaps(proportionalSheet, atlasSampler, baseUV, padInAtlas, steps,
-                                       glyphSlotTopLeftUV, glyphSlotBottomRightUV);
-    return inkCoverageSoftwareTaps(monoSheet, atlasSampler, baseUV, padInAtlas, steps,
-                                   glyphSlotTopLeftUV, glyphSlotBottomRightUV);
-}
-
-// Decoration fragment: emits the rule's color, masked by `kind`, then
-// (for underline rules with skipInk set) cut where glyph ink crosses the
-// underline band.
+// Decoration fragment: emits the rule's color, masked by `kind`. A rule glyph
+// ink cuts arrives as the pieces Core left standing (SkipInk.h), so no glyph is
+// sampled here.
 //  - Solid: full coverage (single/double rule, overline, strike, box).
 //  - Dotted/dashed: an on/off duty cycle along x, period scales with stroke thickness.
 //  - Curly: a sine wave whose stroke is `thicknessInPixels` tall, centered in the
 //    rule rect; coverage = distance of this fragment's y from the wave.
 // The decoration body, shared by the two entry points below. As with the
 // overlay, `destination` is read only on the bitmap tier.
-static float4 decorationShade(DecorationOut in,
-                              texture2d<float> atlas,
-                              texture2d<float> proportionalStripSheet,
-                              texture2d<float> ligatureStripSheet,
-                              texture2d<float> proportionalSheet,
-                              texture2d<float> wideSheet,
-                              sampler atlasSampler,
-                              float4 destination)
+static float4 decorationShade(DecorationOut in, float4 destination)
 {
-    float alpha = in.color.a;
+    // The part of this pixel the piece covers across, at a cut end; all of it
+    // elsewhere.
+    const float across = clamp(min(in.position.x + 0.5, in.cutAcross.y) - max(in.position.x - 0.5, in.cutAcross.x), 0.0, 1.0);
+    float alpha = in.color.a * across;
     if (in.kind == decorationDotted) {
-        // Round dots: substantial BALLS, not specks. The radius fills the band
-        // (the emit side sizes the band to the dot diameter), and the period is
-        // derived from the radius (dot + an equal gap) so dots and gaps stay
-        // balanced as the stroke scales — with a cell-relative floor so the
-        // dots can't pack into a near-solid rule at thin strokes. Anchoring the
-        // period to the radius (not a bare cell fraction) is what keeps the
-        // balls big; the period-only fix in 1aed85c2 had shrunk them to ~1px.
-        float r = max(in.sizeInPixels.y * 0.5, 1.0);
-        // Period = half the cell → exactly two dots per cell, so the grid divides
-        // the cell evenly and scales with the font (cellWidth grows with point size).
-        // Phased per-cell (cell-local x): each dot sits at a quarter point
-        // (0.25 / 0.75 of the cell), fully inside the cell's rect — so a run's
-        // first dot starts cleanly on the left instead of being clipped to a
-        // half-ball, and even spacing falls out for free since every cell is
-        // identical. The radius floor keeps dot+gap separated in narrow cells.
-        float period = max(in.dashPeriodInPixels * 0.5, r * 3.0);
-        float lx = in.localPositionInPixels.x;
-        float cx = (floor(lx / period) + 0.5) * period;
-        float dx = lx - cx;
-        float dy = in.localPositionInPixels.y - in.sizeInPixels.y * 0.5;
-        float d = length(float2(dx, dy));
-        alpha *= clamp(r + 0.5 - d, 0.0, 1.0);
+        // Round dots the band's height across, one at the start of each
+        // pitch from the band's left edge, where the run starts
+        // (CellInstanceBuilder's patternPitch):
+        // the nearer of the dot this pixel's centre lies in the pitch of and
+        // the next.
+        float period = in.dashPeriodInPixels;
+        float radius = in.sizeInPixels.y * 0.5;
+        float along = in.localPositionInPixels.x;
+        float first = floor(along / period) * period + radius;
+        float deltaY = in.localPositionInPixels.y - radius;
+        // A circle fitted to the pixel grid: its square's corners rounded to
+        // the radius less half a pixel (dottedRuleCornerInset), so a small dot
+        // is solid and a heavy one round.
+        float corner = max(radius - 0.5, 0.0);
+        float2 toThis = abs(float2(along - first, deltaY)) - (radius - corner);
+        float2 toNext = abs(float2(along - first - period, deltaY)) - (radius - corner);
+        float apart = min(length(max(toThis, 0.0)) + min(max(toThis.x, toThis.y), 0.0),
+                          length(max(toNext, 0.0)) + min(max(toNext.x, toNext.y), 0.0)) - corner;
+        alpha *= clamp(0.5 - apart, 0.0, 1.0);
     } else if (in.kind == decorationDashed) {
-        // One dash per cell at 65% duty: a long mark (0.65 cell) with a 0.35-cell
-        // gap. Cell-locked (cell-local x) so every dash is identical and the gaps
-        // align to the grid — a uniform broken *line*, distinguishable at a glance from the
-        // round dots (two per cell). Scales with the font since the period is the
-        // cell. The stroke floor guards a degenerate period in very narrow cells.
-        float period = max(in.dashPeriodInPixels, in.thicknessInPixels * 6.0);
-        float phase = fract(in.localPositionInPixels.x / period);
-        if (phase >= 0.65) alpha = 0.0;
+        // Dashes from the band's left edge, where the run starts, at the pitch Core chose,
+        // three-fifths of it on (dashedRuleOnShare): the part of this pixel
+        // the dash it lies in covers, and the one before it.
+        float period = in.dashPeriodInPixels;
+        float along = in.localPositionInPixels.x;
+        float start = floor(along / period) * period;
+        float marks = clamp(min(along + 0.5, start + 0.6 * period) - max(along - 0.5, start), 0.0, 1.0)
+            + clamp(min(along + 0.5, start - 0.4 * period) - max(along - 0.5, start - period), 0.0, 1.0);
+        alpha *= min(marks, 1.0);
+    }
+    if (in.kind == decorationDashed || in.kind == decorationSolid) {
+        // A straight rule is drawn at its weight exactly (ruleWeight): the
+        // part of this pixel's row its band covers.
         // A dash's band is the stroke itself, so the band's height is the
         // weight the thickness setting asks for. Sampling at pixel centers
         // alone answers only in whole rows, quantizing that weight to the pixel
@@ -1211,94 +1077,36 @@ static float4 decorationShade(DecorationOut in,
         float rowBottom = min(in.localPositionInPixels.y + 0.5, in.sizeInPixels.y);
         alpha *= max(rowBottom - rowTop, 0.0);
     } else if (in.kind == decorationCurly) {
-        // One sine cycle per cell. The wave's centerline rides the middle
-        // of the rule rect; amplitude leaves room for the stroke so the
-        // curl stays inside the rect. Coverage falls off within half the
-        // stroke thickness of the wave, anti-aliased by one pixel.
+        // Circular arcs half a period across, alternately crest and trough,
+        // meeting on the centre line with matching tangents (CellInstanceBuilder's
+        // curlyRuleProportions): the distance to the nearest of the arc
+        // this pixel lies under and its two neighbours, or to an arc's end where
+        // its circle's nearest point is past it.
         float period = max(in.dashPeriodInPixels, 2.0);
-        // Heavier than half the stroke: a diagonal wave sampled by vertical
-        // distance looks thinner than a flat rule of the same weight on its
-        // slopes, so over-weight it to read as solid as the single underline.
-        float halfThick = in.thicknessInPixels * 0.8;
-        float amp = max(in.sizeInPixels.y * 0.5 - halfThick, 0.5);
-        float mid = in.sizeInPixels.y * 0.5;
-        float wave = mid + amp * sin(in.localPositionInPixels.x / period * 6.2831853);
-        float dist = abs(in.localPositionInPixels.y - wave);
-        alpha *= clamp(halfThick + 0.5 - dist, 0.0, 1.0);
+        float halfWeight = in.thicknessInPixels * 0.5;
+        float swing = max(in.sizeInPixels.y * 0.5 - halfWeight - 0.5, 0.25);
+        float middle = in.sizeInPixels.y * 0.5;
+        float span = period * 0.5;
+        float radius = (span * span * 0.25 + swing * swing) / (2.0 * swing);
+        float index = floor(in.localPositionInPixels.x / span);
+        float apart = 1.0e9;
+        for (int step = -1; step <= 1; ++step) {
+            float arc = index + float(step);
+            // Even arcs crest toward the text, odd ones dip away from it.
+            float side = arc - 2.0 * floor(arc * 0.5) < 0.5 ? -1.0 : 1.0;
+            float arcLeft = arc * span;
+            float2 circle = float2(arcLeft + span * 0.5, middle - side * (radius - swing));
+            float2 offset = float2(in.localPositionInPixels.x, in.localPositionInPixels.y) - circle;
+            float reach = length(offset);
+            float2 nearest = reach > 0.0 ? circle + offset / reach * radius : circle + float2(0.0, side * radius);
+            bool isOnArc = nearest.x >= arcLeft && nearest.x <= arcLeft + span && (side < 0.0 ? nearest.y <= middle : nearest.y >= middle);
+            float distance = isOnArc ? abs(reach - radius)
+                                     : min(length(float2(in.localPositionInPixels.x - arcLeft, in.localPositionInPixels.y - middle)), length(float2(in.localPositionInPixels.x - arcLeft - span, in.localPositionInPixels.y - middle)));
+            apart = min(apart, distance);
+        }
+        alpha *= clamp(halfWeight + 0.5 - apart, 0.0, 1.0);
     }
 
-    // Skip-ink: dilate the glyph coverage at the underline band by padInAtlas
-    // and cut the rule wherever ink (with its halo) lands, so descenders
-    // break the line cleanly. A (2N+1)x(2N+1) tap grid spanning ±padInAtlas
-    // approximates a disc-dilation of the coverage mask; the strongest tap
-    // drives the cut. N (padSteps) scales with the pad radius in pixels so
-    // the taps stay ~1px apart — a fixed 3x3 grid would leave gaps between
-    // taps once the radius grew past a pixel, breaking the cut into stripes
-    // instead of widening it. The cut runs against this cell's glyph and its
-    // two neighbours, so a descender's halo can reach across the cell edge
-    // (a per-cell rule can't otherwise break for an adjacent cell's ink).
-    if (in.skipInk > 0.5 && in.bitmapTier > 0.5) {
-        // Bitmap tier: the portable renderer's cut, texel for texel, from the
-        // sheets the low, middle and high base-8 digits select for this cell
-        // and its left and right neighbours. A bitmap face never reaches the
-        // two-cell sheet's digit: its taps are only made on a phased frame.
-        int steps = max(int(in.padSteps + 0.5), 1);
-        int selectors = int(in.sheetMask + 0.5);
-        float fx = (in.sizeInPixels.x > 0.0) ? in.localPositionInPixels.x / in.sizeInPixels.x : 0.0;
-        float fy = (in.sizeInPixels.y > 0.0) ? in.localPositionInPixels.y / in.sizeInPixels.y : 0.0;
-        float cov = inkCoverageSoftwareTapsForSheet(selectors % 8, atlas, proportionalStripSheet, ligatureStripSheet,
-                                                    proportionalSheet, atlasSampler, in.inkUV, in.padInAtlas, steps,
-                                                    in.glyphSlotTopLeftUV, in.glyphSlotBottomRightUV);
-        float2 lUV = float2(in.leftInk.x + (fx + 1.0) * (in.leftInk.y - in.leftInk.x),
-                            mix(in.leftInk.z, in.leftInk.w, fy));
-        cov = max(cov, inkCoverageSoftwareTapsForSheet((selectors / 8) % 8, atlas, proportionalStripSheet,
-                                                       ligatureStripSheet, proportionalSheet, atlasSampler, lUV,
-                                                       in.padInAtlas, steps, in.leftBox.xy, in.leftBox.zw));
-        float2 rUV = float2(in.rightInk.x + (fx - 1.0) * (in.rightInk.y - in.rightInk.x),
-                            mix(in.rightInk.z, in.rightInk.w, fy));
-        cov = max(cov, inkCoverageSoftwareTapsForSheet((selectors / 64) % 8, atlas, proportionalStripSheet,
-                                                       ligatureStripSheet, proportionalSheet, atlasSampler, rUV,
-                                                       in.padInAtlas, steps, in.rightBox.xy, in.rightBox.zw));
-        alpha *= clamp(1.0 - cov, 0.0, 1.0);
-    } else if (in.skipInk > 0.5) {
-        int steps = max(int(in.padSteps + 0.5), 1);
-        // This fragment's fraction across the rule rect. The neighbour glyphs
-        // share this cell's width, so the same fraction shifted by ±1 cell
-        // lands at the matching point in the neighbour's cell box.
-        float fx = (in.sizeInPixels.x > 0.0)
-            ? in.localPositionInPixels.x / in.sizeInPixels.x : 0.0;
-        float fy = (in.sizeInPixels.y > 0.0)
-            ? in.localPositionInPixels.y / in.sizeInPixels.y : 0.0;
-        // Each tap reads the sheet that holds the ink the cell DRAWS: a cell a
-        // ligature run covers draws its slice of the strip, and its glyph in
-        // the mono sheet — the default form, at the cell's own phase — is not
-        // on screen. A cut placed by that form sits beside the stem it should
-        // split.
-        int selectors = int(in.sheetMask + 0.5);
-        int ownSheet = selectors % 8;
-        int leftSheet = (selectors / 8) % 8;
-        int rightSheet = (selectors / 64) % 8;
-        // Own glyph: sample at this fragment's interpolated cell-box UV.
-        float cov = inkCoverageDiscForSheet(ownSheet, atlas, proportionalStripSheet,
-                                            ligatureStripSheet, proportionalSheet, wideSheet, atlasSampler, in.inkUV,
-                                            in.padInAtlas, steps, in.glyphSlotTopLeftUV,
-                                            in.glyphSlotBottomRightUV);
-        // Left neighbour: a point fx of the way across this cell is (fx + 1) of
-        // the way across the left cell, so map it into the left cell box. Only
-        // taps that fall inside the left slot (near the shared edge) survive.
-        float2 lUV = float2(in.leftInk.x + (fx + 1.0) * (in.leftInk.y - in.leftInk.x),
-                            mix(in.leftInk.z, in.leftInk.w, fy));
-        cov = max(cov, inkCoverageDiscForSheet(leftSheet, atlas, proportionalStripSheet,
-                                               ligatureStripSheet, proportionalSheet, wideSheet, atlasSampler, lUV,
-                                               in.padInAtlas, steps, in.leftBox.xy, in.leftBox.zw));
-        // Right neighbour: (fx - 1) of the way across the right cell.
-        float2 rUV = float2(in.rightInk.x + (fx - 1.0) * (in.rightInk.y - in.rightInk.x),
-                            mix(in.rightInk.z, in.rightInk.w, fy));
-        cov = max(cov, inkCoverageDiscForSheet(rightSheet, atlas, proportionalStripSheet,
-                                               ligatureStripSheet, proportionalSheet, wideSheet, atlasSampler, rUV,
-                                               in.padInAtlas, steps, in.rightBox.xy, in.rightBox.zw));
-        alpha *= clamp(1.0 - cov, 0.0, 1.0);
-    }
     if (in.bitmapTier > 0.5) {
         // Bitmap tier: the portable renderer is the reference, and it
         // composites a rule edge in the ENCODED domain, rounded half up. The
@@ -1321,57 +1129,29 @@ static float4 decorationShade(DecorationOut in,
 }
 
 fragment float4 decorationFragment(DecorationOut in [[stage_in]],
-                                   texture2d<float> atlas [[texture(0)]],
-                                   texture2d<float> proportionalStripSheet [[texture(1)]],
-                                   texture2d<float> ligatureStripSheet [[texture(2)]],
-                                   texture2d<float> proportionalSheet [[texture(3)]],
-                                   texture2d<float> wideSheet [[texture(4)]],
-                                   sampler atlasSampler [[sampler(0)]],
                                    float4 destination [[color(0)]])
 {
-    return decorationShade(in, atlas, proportionalStripSheet, ligatureStripSheet, proportionalSheet,
-                           wideSheet, atlasSampler, destination);
+    return decorationShade(in, destination);
 }
 
-fragment float4 decorationFragmentBlended(DecorationOut in [[stage_in]],
-                                          texture2d<float> atlas [[texture(0)]],
-                                          texture2d<float> proportionalStripSheet [[texture(1)]],
-                                          texture2d<float> ligatureStripSheet [[texture(2)]],
-                                          texture2d<float> proportionalSheet [[texture(3)]],
-                                          texture2d<float> wideSheet [[texture(4)]],
-                                          sampler atlasSampler [[sampler(0)]])
+fragment float4 decorationFragmentBlended(DecorationOut in [[stage_in]])
 {
-    return decorationShade(in, atlas, proportionalStripSheet, ligatureStripSheet, proportionalSheet,
-                           wideSheet, atlasSampler, float4(0.0));
+    return decorationShade(in, float4(0.0));
 }
 
 // The bitmap tier's rules where the target cannot be read (see
 // unreadDestination).
-fragment float4 decorationFragmentUnread(DecorationOut in [[stage_in]],
-                                         texture2d<float> atlas [[texture(0)]],
-                                         texture2d<float> proportionalStripSheet [[texture(1)]],
-                                         texture2d<float> ligatureStripSheet [[texture(2)]],
-                                         texture2d<float> proportionalSheet [[texture(3)]],
-                                         texture2d<float> wideSheet [[texture(4)]],
-                                         sampler atlasSampler [[sampler(0)]])
+fragment float4 decorationFragmentUnread(DecorationOut in [[stage_in]])
 {
-    return decorationShade(in, atlas, proportionalStripSheet, ligatureStripSheet, proportionalSheet,
-                           wideSheet, atlasSampler, unreadDestination);
+    return decorationShade(in, unreadDestination);
 }
 
 // The bitmap tier's rules where the target cannot be read, drawn into a
 // linear-format view of the target so the blend mixes the encoded bytes, as
 // the software renderer's rule mix does.
-fragment float4 decorationFragmentUnreadEncoded(DecorationOut in [[stage_in]],
-                                                texture2d<float> atlas [[texture(0)]],
-                                                texture2d<float> proportionalStripSheet [[texture(1)]],
-                                                texture2d<float> ligatureStripSheet [[texture(2)]],
-                                                texture2d<float> proportionalSheet [[texture(3)]],
-                                                texture2d<float> wideSheet [[texture(4)]],
-                                                sampler atlasSampler [[sampler(0)]])
+fragment float4 decorationFragmentUnreadEncoded(DecorationOut in [[stage_in]])
 {
-    float4 shaded = decorationShade(in, atlas, proportionalStripSheet, ligatureStripSheet, proportionalSheet,
-                                    wideSheet, atlasSampler, unreadDestination);
+    float4 shaded = decorationShade(in, unreadDestination);
     return float4(linearToSrgb(shaded.rgb), shaded.a);
 }
 

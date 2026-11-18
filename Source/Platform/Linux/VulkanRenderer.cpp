@@ -687,7 +687,6 @@ void VulkanRenderer::rebuildAtlas()
     m_isProportionalDescriptorWritten = false;
     m_isProportionalStripDescriptorWritten = false;
     m_isLigatureDescriptorWritten = false;
-    m_isDecorationDescriptorWritten = false;
     m_lastFrameGlyphInstances = 0;
     m_lastFrameProportionalInstances = 0;
     m_lastFrameProportionalStripInstances = 0;
@@ -823,8 +822,11 @@ bool VulkanRenderer::ensureGridPipelines()
     // strip, and binding 4 the dedicated proportional sheet, which the rule
     // pass taps under a run drawn glyph by glyph. All start on mono until
     // their resources exist, so every declared selector reads a valid image.
-    VkDescriptorSetLayoutBinding bindings[5] {};
-    for (uint32_t i = 0; i < 5; ++i) {
+    // Binding 0 is the coverage sheet a glyph pass samples, binding 1 the
+    // colour sheet. No rule samples either: Core cuts a rule around glyph ink
+    // before it reaches this renderer.
+    VkDescriptorSetLayoutBinding bindings[2] {};
+    for (uint32_t i = 0; i < 2; ++i) {
         bindings[i].binding = i;
         bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         bindings[i].descriptorCount = 1;
@@ -832,7 +834,7 @@ bool VulkanRenderer::ensureGridPipelines()
     }
     VkDescriptorSetLayoutCreateInfo dslInfo {};
     dslInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    dslInfo.bindingCount = 5;
+    dslInfo.bindingCount = 2;
     dslInfo.pBindings = bindings;
     if (vkCreateDescriptorSetLayout(m_device, &dslInfo, nullptr, &m_descriptorSetLayout) != VK_SUCCESS) {
         Ubiquitty::PAL::logLine(stderr, "vulkan: vkCreateDescriptorSetLayout failed building the grid pipelines");
@@ -870,28 +872,27 @@ bool VulkanRenderer::ensureGridPipelines()
         return false;
     }
 
-    // Five sets of five samplers separate text sheets from filtered rule
-    // coverage. Three input sets name the composed and both retained targets.
+    // Four sets of two samplers, one set per coverage sheet a glyph pass
+    // draws from. Three input sets name the composed and both retained targets.
     const VkDescriptorPoolSize poolSizes[] = {
-        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 25 },
+        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 8 },
         { VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 3 }
     };
     VkDescriptorPoolCreateInfo dpInfo {};
     dpInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    dpInfo.maxSets = 8;
+    dpInfo.maxSets = 7;
     dpInfo.poolSizeCount = 2;
     dpInfo.pPoolSizes = poolSizes;
     if (vkCreateDescriptorPool(m_device, &dpInfo, nullptr, &m_descriptorPool) != VK_SUCCESS) {
         Ubiquitty::PAL::logLine(stderr, "vulkan: vkCreateDescriptorPool failed building the grid pipelines");
         return false;
     }
-    // The common layout keeps every coverage selector available to a rule.
-    const VkDescriptorSetLayout setLayouts[5] = { m_descriptorSetLayout, m_descriptorSetLayout, m_descriptorSetLayout, m_descriptorSetLayout, m_descriptorSetLayout };
-    VkDescriptorSet allocatedSets[5] {};
+    const VkDescriptorSetLayout setLayouts[4] = { m_descriptorSetLayout, m_descriptorSetLayout, m_descriptorSetLayout, m_descriptorSetLayout };
+    VkDescriptorSet allocatedSets[4] {};
     VkDescriptorSetAllocateInfo dsAlloc {};
     dsAlloc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
     dsAlloc.descriptorPool = m_descriptorPool;
-    dsAlloc.descriptorSetCount = 5;
+    dsAlloc.descriptorSetCount = 4;
     dsAlloc.pSetLayouts = setLayouts;
     if (vkAllocateDescriptorSets(m_device, &dsAlloc, allocatedSets) != VK_SUCCESS) {
         Ubiquitty::PAL::logLine(stderr, "vulkan: vkAllocateDescriptorSets failed building the grid pipelines");
@@ -906,24 +907,6 @@ bool VulkanRenderer::ensureGridPipelines()
     dsAlloc.pSetLayouts = inputLayouts;
     if (vkAllocateDescriptorSets(m_device, &dsAlloc, m_gridInputSets) != VK_SUCCESS)
         return false;
-    m_decorationDescriptorSet = allocatedSets[4];
-
-    if (!m_decorationSampler) {
-        VkSamplerCreateInfo samplerInfo {};
-        samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-        samplerInfo.magFilter = VK_FILTER_LINEAR;
-        samplerInfo.minFilter = VK_FILTER_LINEAR;
-        samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
-        samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
-        samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
-        samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
-        samplerInfo.borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
-        if (vkCreateSampler(m_device, &samplerInfo, nullptr, &m_decorationSampler) != VK_SUCCESS) {
-            Ubiquitty::PAL::logLine(stderr, "vulkan: vkCreateSampler failed building native decoration coverage");
-            return false;
-        }
-    }
-    m_isDecorationDescriptorWritten = false;
 
     VkShaderModule cellVert = loadShader("cell.vert.spv");
     VkShaderModule cellFrag = loadShader("cell.frag.spv");
@@ -1057,22 +1040,14 @@ bool VulkanRenderer::ensureGridPipelines()
         { 4, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(Rendering::GlyphInstance, atlasTopLeft) },
         { 5, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(Rendering::GlyphInstance, atlasBottomRight) },
     };
-    // DecorationInstance attributes, read as whole vec4s so the cut's
-    // neighbour pairs fit in the sixteen attributes every device has.
+    // DecorationInstance attributes: the piece drawn, and the whole rule it
+    // belongs to, which its pattern is laid out across.
     const VkVertexInputAttributeDescription decoAttributes[] = {
         { 0, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(Rendering::DecorationInstance, topLeftInPixels) },
         { 1, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(Rendering::DecorationInstance, bottomRightInPixels) },
         { 2, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(Rendering::DecorationInstance, color) },
         { 3, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(Rendering::DecorationInstance, kind) },
-        { 4, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(Rendering::DecorationInstance, inkTopLeft) },
-        { 5, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(Rendering::DecorationInstance, padInAtlas) },
-        // The glyph's own atlas slot, so the skip-ink taps stop at its edge
-        // instead of reading the glyph packed beside it.
-        { 6, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(Rendering::DecorationInstance, glyphSlotTopLeftUV) },
-        { 7, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(Rendering::DecorationInstance, leftInk) },
-        { 8, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(Rendering::DecorationInstance, leftBox) },
-        { 9, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(Rendering::DecorationInstance, rightInk) },
-        { 10, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(Rendering::DecorationInstance, rightBox) },
+        { 4, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(Rendering::DecorationInstance, bandTopLeftInPixels) },
     };
     const uint32_t cellAttributeCount = static_cast<uint32_t>(sizeof(cellAttributes) / sizeof(cellAttributes[0]));
     const uint32_t glyphAttributeCount = static_cast<uint32_t>(sizeof(glyphAttributes) / sizeof(glyphAttributes[0]));
@@ -1196,16 +1171,10 @@ void VulkanRenderer::destroyGridPipelines()
         m_ligatureDescriptorSet = VK_NULL_HANDLE;
         for (auto& input : m_gridInputSets)
             input = VK_NULL_HANDLE;
-        m_decorationDescriptorSet = VK_NULL_HANDLE;
         m_isProportionalDescriptorWritten = false;
         m_isProportionalStripDescriptorWritten = false;
         m_isLigatureDescriptorWritten = false;
-        m_isDecorationDescriptorWritten = false;
         m_descriptorWritten = false;
-    }
-    if (m_decorationSampler) {
-        vkDestroySampler(m_device, m_decorationSampler, nullptr);
-        m_decorationSampler = VK_NULL_HANDLE;
     }
     if (m_pipelineLayout) {
         vkDestroyPipelineLayout(m_device, m_pipelineLayout, nullptr);
@@ -2784,7 +2753,10 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
     // paints the pane past its last cell with a quad of its own.
     const std::size_t cellCapacity = static_cast<std::size_t>(rows) * columns + 1 + static_cast<std::size_t>(rows);
     const std::size_t glyphCapacity = cellCapacity; // up to one overflow glyph / cell
-    const std::size_t decorationCapacity = cellCapacity * 8; // up to ~8 rules / cell
+    // A seed rather than a bound: a rule glyph ink cuts arrives as several
+    // pieces, and the builder reports the count it needed, which the frame
+    // regrows to below.
+    const std::size_t decorationCapacity = cellCapacity * 8;
     // Overlays: the cursor (1) plus up to one translucent selection quad per row.
     const std::size_t overlayCapacity = Rendering::maxOverlaysForRows(rows, otherSearchMatchSpans.size(), triggerHighlightSpans.size(), hiliteSpans.size());
     // One colour glyph per cell at most: an emoji spans two columns, so a screen
@@ -2812,7 +2784,7 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
     // it needed and the frame regrows below, as the software renderer does.
     const std::size_t boxFillCapacity = cellCapacity;
     if (!ensureInstanceBuffers(cellCapacity, glyphCapacity,
-            proportionalCapacity, proportionalStripCapacity, decorationCapacity, overlayCapacity,
+            proportionalCapacity, proportionalStripCapacity, std::max(decorationCapacity, m_decorationCapacity), overlayCapacity,
             colorCapacity, ligatureCapacity, wideCapacity, std::max(boxFillCapacity, m_boxFillCapacity))) {
         return false;
     }
@@ -2902,10 +2874,11 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
             || counts.proportionalStrips > m_proportionalStripCapacity
             || counts.ligatureGlyphs > m_ligatureCapacity
             || counts.wideGlyphs > m_wideCapacity
-            || counts.boxFills > m_boxFillCapacity) {
+            || counts.boxFills > m_boxFillCapacity
+            || counts.decorations > m_decorationCapacity) {
             if (!ensureInstanceBuffers(cellCapacity, glyphCapacity,
                     std::max(counts.proportionalGlyphs, m_proportionalCapacity),
-                    std::max(counts.proportionalStrips, m_proportionalStripCapacity), decorationCapacity, overlayCapacity,
+                    std::max(counts.proportionalStrips, m_proportionalStripCapacity), std::max(counts.decorations, m_decorationCapacity), overlayCapacity,
                     colorCapacity, std::max(counts.ligatureGlyphs, m_ligatureCapacity), std::max(counts.wideGlyphs, m_wideCapacity),
                     std::max(counts.boxFills, m_boxFillCapacity))) {
                 return false;
@@ -3146,21 +3119,15 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
     // Point the descriptor at the atlas (once; the atlas image/view/sampler
     // are stable for the renderer's lifetime).
     if (!m_descriptorWritten) {
-        // Bindings 2, 3 and 4 start on mono and are taken over by the
-        // proportional strip, ligature strip and proportional sheet resources
-        // below.
-        VkDescriptorImageInfo imageInfo[5] {};
+        VkDescriptorImageInfo imageInfo[2] {};
         imageInfo[0].sampler = m_fontAtlas->atlas->sampler();
         imageInfo[0].imageView = m_fontAtlas->atlas->view();
         imageInfo[0].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         imageInfo[1].sampler = m_fontAtlas->colorAtlas->sampler();
         imageInfo[1].imageView = m_fontAtlas->colorAtlas->view();
         imageInfo[1].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        imageInfo[2] = imageInfo[0];
-        imageInfo[3] = imageInfo[0];
-        imageInfo[4] = imageInfo[0];
-        VkWriteDescriptorSet writes[5] {};
-        for (uint32_t i = 0; i < 5; ++i) {
+        VkWriteDescriptorSet writes[2] {};
+        for (uint32_t i = 0; i < 2; ++i) {
             writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             writes[i].dstSet = m_descriptorSet;
             writes[i].dstBinding = i;
@@ -3168,119 +3135,78 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
             writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
             writes[i].pImageInfo = &imageInfo[i];
         }
-        // All in one call. A binding the layout declares and nobody writes is
+        // Both in one call. A binding the layout declares and nobody writes is
         // undefined behaviour the moment any shader in the set could sample it,
         // and it costs nothing at run time until then — so it passes every check
         // right up to the frame that reads it.
-        vkUpdateDescriptorSets(m_device, 5, writes, 0, nullptr);
+        vkUpdateDescriptorSets(m_device, 2, writes, 0, nullptr);
         m_descriptorWritten = true;
-        m_isDecorationDescriptorWritten = false;
     }
-    // The proportional set differs from the main set only at binding 0. The
-    // other declared bindings are still populated before the set is bound.
-    // The sixth write also keeps the main set's proportional-sheet alias
-    // valid. Decorations bind a separately filtered view of these sheets.
+    // The proportional set differs from the main set only at binding 0.
     if (canShapeProportional && !m_isProportionalDescriptorWritten) {
-        VkDescriptorImageInfo proportionalInfo[5] {};
+        VkDescriptorImageInfo proportionalInfo[2] {};
         proportionalInfo[0].sampler = m_fontAtlas->proportionalImage.sampler();
         proportionalInfo[0].imageView = m_fontAtlas->proportionalImage.view();
         proportionalInfo[0].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         proportionalInfo[1].sampler = m_fontAtlas->colorAtlas->sampler();
         proportionalInfo[1].imageView = m_fontAtlas->colorAtlas->view();
         proportionalInfo[1].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        proportionalInfo[2] = proportionalInfo[0];
-        proportionalInfo[3] = proportionalInfo[0];
-        proportionalInfo[4] = proportionalInfo[0];
-        VkWriteDescriptorSet proportionalWrites[6] {};
-        for (uint32_t i = 0; i < 6; ++i) {
+        VkWriteDescriptorSet proportionalWrites[2] {};
+        for (uint32_t i = 0; i < 2; ++i) {
             proportionalWrites[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            proportionalWrites[i].dstSet = i < 5 ? m_proportionalDescriptorSet : m_descriptorSet;
-            proportionalWrites[i].dstBinding = i < 5 ? i : 4;
+            proportionalWrites[i].dstSet = m_proportionalDescriptorSet;
+            proportionalWrites[i].dstBinding = i;
             proportionalWrites[i].descriptorCount = 1;
             proportionalWrites[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            proportionalWrites[i].pImageInfo = &proportionalInfo[i < 5 ? i : 0];
+            proportionalWrites[i].pImageInfo = &proportionalInfo[i];
         }
-        vkUpdateDescriptorSets(m_device, 6, proportionalWrites, 0, nullptr);
+        vkUpdateDescriptorSets(m_device, 2, proportionalWrites, 0, nullptr);
         m_isProportionalDescriptorWritten = true;
-        m_isDecorationDescriptorWritten = false;
     }
     if (canShapeProportionalStrips && !m_isProportionalStripDescriptorWritten) {
-        VkDescriptorImageInfo proportionalStripInfo[5] {};
+        VkDescriptorImageInfo proportionalStripInfo[2] {};
         proportionalStripInfo[0].sampler = m_fontAtlas->proportionalStripImage.sampler();
         proportionalStripInfo[0].imageView = m_fontAtlas->proportionalStripImage.view();
         proportionalStripInfo[0].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         proportionalStripInfo[1].sampler = m_fontAtlas->colorAtlas->sampler();
         proportionalStripInfo[1].imageView = m_fontAtlas->colorAtlas->view();
         proportionalStripInfo[1].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        proportionalStripInfo[2] = proportionalStripInfo[0];
-        proportionalStripInfo[3] = proportionalStripInfo[0];
-        proportionalStripInfo[4] = proportionalStripInfo[0];
-        VkWriteDescriptorSet proportionalStripWrites[6] {};
-        for (uint32_t i = 0; i < 6; ++i) {
+        VkWriteDescriptorSet proportionalStripWrites[2] {};
+        for (uint32_t i = 0; i < 2; ++i) {
             proportionalStripWrites[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            proportionalStripWrites[i].dstSet = i < 5 ? m_proportionalStripDescriptorSet : m_descriptorSet;
-            proportionalStripWrites[i].dstBinding = i < 5 ? i : 2;
+            proportionalStripWrites[i].dstSet = m_proportionalStripDescriptorSet;
+            proportionalStripWrites[i].dstBinding = i;
             proportionalStripWrites[i].descriptorCount = 1;
             proportionalStripWrites[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            proportionalStripWrites[i].pImageInfo = &proportionalStripInfo[i < 5 ? i : 0];
+            proportionalStripWrites[i].pImageInfo = &proportionalStripInfo[i];
         }
-        vkUpdateDescriptorSets(m_device, 6, proportionalStripWrites, 0, nullptr);
+        vkUpdateDescriptorSets(m_device, 2, proportionalStripWrites, 0, nullptr);
         m_isProportionalStripDescriptorWritten = true;
-        m_isDecorationDescriptorWritten = false;
     }
     // The ligature set: binding 0 is the strip sheet, binding 1 the same colour
-    // image the first set names, and its remaining bindings are valid strip
-    // images. Binding 1
-    // goes unread by the mono pipeline, and is written anyway — the layout
-    // declares it, and a descriptor left unwritten in a set that is bound is
-    // undefined behaviour whether or not this frame's shader happens to sample
-    // it. The sixth write also keeps the main set's ligature-sheet alias valid.
+    // image the first set names. Binding 1 goes unread by the mono pipeline,
+    // and is written anyway — the layout declares it, and a descriptor left
+    // unwritten in a set that is bound is undefined behaviour whether or not
+    // this frame's shader happens to sample it.
     if (canShapeLigatures && !m_isLigatureDescriptorWritten) {
-        VkDescriptorImageInfo ligatureInfo[5] {};
+        VkDescriptorImageInfo ligatureInfo[2] {};
         ligatureInfo[0].sampler = m_fontAtlas->ligatureImage.sampler();
         ligatureInfo[0].imageView = m_fontAtlas->ligatureImage.view();
         ligatureInfo[0].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         ligatureInfo[1].sampler = m_fontAtlas->colorAtlas->sampler();
         ligatureInfo[1].imageView = m_fontAtlas->colorAtlas->view();
         ligatureInfo[1].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        ligatureInfo[2] = ligatureInfo[0];
-        ligatureInfo[3] = ligatureInfo[0];
-        ligatureInfo[4] = ligatureInfo[0];
-        VkWriteDescriptorSet ligatureWrites[6] {};
-        for (uint32_t i = 0; i < 6; ++i) {
+        VkWriteDescriptorSet ligatureWrites[2] {};
+        for (uint32_t i = 0; i < 2; ++i) {
             ligatureWrites[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            ligatureWrites[i].dstSet = i < 5 ? m_ligatureDescriptorSet : m_descriptorSet;
-            ligatureWrites[i].dstBinding = i < 5 ? i : 3;
+            ligatureWrites[i].dstSet = m_ligatureDescriptorSet;
+            ligatureWrites[i].dstBinding = i;
             ligatureWrites[i].descriptorCount = 1;
             ligatureWrites[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            ligatureWrites[i].pImageInfo = &ligatureInfo[i < 5 ? i : 0];
+            ligatureWrites[i].pImageInfo = &ligatureInfo[i];
         }
-        vkUpdateDescriptorSets(m_device, 6, ligatureWrites, 0, nullptr);
+        vkUpdateDescriptorSets(m_device, 2, ligatureWrites, 0, nullptr);
         m_isLigatureDescriptorWritten = true;
-        m_isDecorationDescriptorWritten = false;
-    }
-
-    if (!m_isDecorationDescriptorWritten) {
-        const VkImageView monoView = m_fontAtlas->atlas->view();
-        const std::array<VkImageView, 5> views { monoView, m_fontAtlas->colorAtlas->view(),
-            canShapeProportionalStrips ? m_fontAtlas->proportionalStripImage.view() : monoView,
-            canShapeLigatures ? m_fontAtlas->ligatureImage.view() : monoView,
-            canShapeProportional ? m_fontAtlas->proportionalImage.view() : monoView };
-        std::array<VkDescriptorImageInfo, 5> imageInfo {};
-        std::array<VkWriteDescriptorSet, 5> writes {};
-        for (std::uint32_t index = 0; index < writes.size(); ++index) {
-            imageInfo[index].sampler = m_decorationSampler;
-            imageInfo[index].imageView = views[index];
-            imageInfo[index].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            writes[index].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            writes[index].dstSet = m_decorationDescriptorSet;
-            writes[index].dstBinding = index;
-            writes[index].descriptorCount = 1;
-            writes[index].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            writes[index].pImageInfo = &imageInfo[index];
-        }
-        vkUpdateDescriptorSets(m_device, static_cast<std::uint32_t>(writes.size()), writes.data(), 0, nullptr);
-        m_isDecorationDescriptorWritten = true;
     }
 
     // The window's background image, placed by Core over the frame and
@@ -3590,9 +3516,8 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
         // descriptor set. Same shader, so the coverage formula the CPU oracle
         // pins is the one strips take too.
         //
-        // The set is rebound to the atlas afterwards rather than before the
-        // next pass, because the decoration pass below samples binding 0 for
-        // skip-ink and would read strips as glyph coverage.
+        // The set is rebound to the atlas afterwards, so whatever draws next
+        // with a glyph pipeline samples glyph coverage rather than strips.
         if (ligature.count > 0) {
             vkCmdBindDescriptorSets(m_commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelineLayout, 0, 1, &m_ligatureDescriptorSet, 0, nullptr);
             vkCmdBindPipeline(m_commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, glyphPipeline);
@@ -3603,7 +3528,8 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
         if (proportional.count > 0 || proportionalStrips.count > 0 || ligature.count > 0)
             pushAtlasSpread(0.0f);
         if (decorations.count > 0) {
-            vkCmdBindDescriptorSets(m_commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelineLayout, 0, 1, &m_decorationDescriptorSet, 0, nullptr);
+            // Rules sample no sheet: Core cut them around glyph ink and sent
+            // the pieces left standing, so set 0 is left as it is.
             vkCmdBindPipeline(m_commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_decorationPipeline);
             vkCmdBindVertexBuffers(m_commandBuffer, 0, 1, &m_decorationBuffer, &offset);
             const auto synchronizeRules = [&] {
@@ -3641,7 +3567,6 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
                 }
             }
             vkCmdDraw(m_commandBuffer, 6, end - first, 0, first);
-            vkCmdBindDescriptorSets(m_commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelineLayout, 0, 1, &m_descriptorSet, 0, nullptr);
         }
     };
     const auto drawCursorTier = [&]() {

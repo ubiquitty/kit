@@ -519,9 +519,15 @@ package final class TerminalRenderer {
     /// How many instances each stream held on the last ``render(_:uniforms:into:)``.
     package var counts: Ubiquitty.Rendering.InstanceCounts { instances.counts }
 
-    /// The rules the last build cut around ink, and the widest clearance any
-    /// of them keeps from that ink, in device pixels.
-    package var skipInkRules: (count: Int, widestPadInPixels: Float) { instances.skipInkRules }
+    /// The rules the last build tested against glyph ink, those the ink cut,
+    /// and the clearance each cut keeps beside the ink, in device pixels.
+    ///
+    /// The clearance is the one the capture handed the build, so a probe sees
+    /// what the cut was decided with rather than what a preference asked for.
+    package var skipInkRules: (rules: Int, cutRules: Int, clearanceInPixels: Float) {
+        let counted = instances.skipInkRules
+        return (counted.rules, counted.cutRules, capture.skipInkPaddingInPixels())
+    }
 
     /// The mono sheet's filled slots against its capacity, for the
     /// drawing-debug panel.
@@ -1145,8 +1151,9 @@ package final class TerminalRenderer {
     /// ink is measured only when the batch lands, after the build that faulted
     /// it. That build drew it from the whole slot and knew nothing of its ink:
     /// the rule that follows the ink stopped at the cell, the crossings named
-    /// the slot's margins. Landing the batch and building again draws the
-    /// frame from measured ink. The second build faults nothing, so it is the
+    /// the slot's margins, and an underline beneath it went uncut, because
+    /// the sheet's skip-ink record is written as the batch lands. Landing the
+    /// batch and building again draws the frame from measured ink. The second build faults nothing, so it is the
     /// frame's last; a frame that faulted nothing builds once.
     ///
     /// - Parameter build: The build, run once or twice.

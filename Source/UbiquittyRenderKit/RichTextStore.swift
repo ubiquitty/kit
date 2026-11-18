@@ -409,8 +409,8 @@ package final class RichTextStore {
                 }
                 target.restoreGState()
             }
-            var underlines: [(pixels: Ubiquitty.RichText.PixelRect, top: Double, color: CGColor)] = []
-            var strikes: [(pixels: Ubiquitty.RichText.PixelRect, color: CGColor)] = []
+            var underlines: [(pixels: Ubiquitty.RichText.PixelRect, top: Double, bottom: Double, color: CGColor)] = []
+            var strikes: [(pixels: Ubiquitty.RichText.PixelRect, top: Double, bottom: Double, color: CGColor)] = []
             // One rule per decorated stretch, never per grapheme: two abutting
             // antialiased rectangles leave a seam wherever their shared edge
             // falls inside a pixel.
@@ -460,7 +460,7 @@ package final class RichTextStore {
                         height: height
                     )
                 {
-                    underlines.append((pixels, Double(rows.underlineTop), color))
+                    underlines.append((pixels, Double(rows.underlineTop), Double(rows.underlineBottom), color))
                 }
                 if style.styles & 8 != 0,
                     let pixels = Self.rulePixels(
@@ -472,7 +472,7 @@ package final class RichTextStore {
                         height: height
                     )
                 {
-                    strikes.append((pixels, color))
+                    strikes.append((pixels, Double(rows.strikeTop), Double(rows.strikeBottom), color))
                 }
             }
             // Skip-ink cuts the underline by the grid's ink test, which Core
@@ -496,15 +496,15 @@ package final class RichTextStore {
                 {
                     context.saveGState()
                     context.clip(to: rect, mask: mask)
-                    context.fill(rect)
+                    context.fill(Self.ruleRect(underline.pixels, top: underline.top, bottom: underline.bottom, height: height))
                     context.restoreGState()
                 } else {
-                    context.fill(rect)
+                    context.fill(Self.ruleRect(underline.pixels, top: underline.top, bottom: underline.bottom, height: height))
                 }
             }
             for strike in strikes {
                 context.setFillColor(strike.color)
-                context.fill(Self.rowRect(strike.pixels, height: height))
+                context.fill(Self.ruleRect(strike.pixels, top: strike.top, bottom: strike.bottom, height: height))
             }
             drawGlyphs(in: context)
         }
@@ -523,6 +523,7 @@ package final class RichTextStore {
         var face = Ubiquitty.RichText.DecorationFace()
         face.em = Float(CTFontGetSize(font))
         face.underlineThickness = Float(CTFontGetUnderlineThickness(font))
+        face.underscoreWeight = FontGeometry.underscoreWeight(font)
         face.ascent = Float(CTFontGetAscent(font))
         face.descent = Float(CTFontGetDescent(font))
         face.leading = Float(CTFontGetLeading(font))
@@ -621,6 +622,15 @@ package final class RichTextStore {
         guard let rasterWidth = Int32(exactly: width), let rasterHeight = Int32(exactly: height) else { return nil }
         let rule = Ubiquitty.RichText.clippedRuleRect(left, Double(top), right, Double(bottom), rasterWidth, rasterHeight)
         return rule.width > 0 && rule.height > 0 ? rule : nil
+    }
+
+    /// A rule's own extent within its pixel rows, in the context's bottom-up
+    /// coordinates: whole pixels across, and its exact top and bottom down, so
+    /// the row its weight leaves is covered in part, as grid text's rules are.
+    private static func ruleRect(_ rule: Ubiquitty.RichText.PixelRect, top: Double, bottom: Double, height: Int) -> CGRect {
+        let clippedTop = max(top, Double(rule.top))
+        let clippedBottom = min(bottom, Double(rule.top) + Double(rule.height))
+        return CGRect(x: Double(rule.left), y: Double(height) - clippedBottom, width: Double(rule.width), height: max(0, clippedBottom - clippedTop))
     }
 
     /// Visible pixel rows in the context's bottom-up coordinates.

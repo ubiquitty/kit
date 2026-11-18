@@ -1995,15 +1995,20 @@ public final class TerminalSurface: PlatformView {
         frameRenderers.values.reduce(0) { $0 + $1.imageStore.offLockUploadCount }
     }
 
-    /// The underline rules this surface's last build cut around descender
-    /// ink, and the widest clearance any of them keeps, in device pixels.
+    /// The underline rules this surface's last build tested against glyph
+    /// ink, those the ink cut, and the widest clearance a cut keeps beside the
+    /// ink, in device pixels.
     ///
-    /// The cut itself is drawn by the fragment stage from these rules, so a
-    /// probe that cannot read the drawable reads what the shader was handed.
-    package var lastBuiltSkipInkRules: (count: Int, widestPadInPixels: Float) {
-        frameRenderers.values.reduce((count: 0, widestPadInPixels: Float(0))) { sum, renderer in
+    /// Core decides the cut and the renderer draws the pieces it leaves, so a
+    /// probe that cannot read the drawable reads the decision itself.
+    package var lastBuiltSkipInkRules: (rules: Int, cutRules: Int, clearanceInPixels: Float) {
+        frameRenderers.values.reduce((rules: 0, cutRules: 0, clearanceInPixels: Float(0))) { sum, renderer in
             let rules = renderer.skipInkRules
-            return (sum.count + rules.count, max(sum.widestPadInPixels, rules.widestPadInPixels))
+            return (
+                sum.rules + rules.rules,
+                sum.cutRules + rules.cutRules,
+                max(sum.clearanceInPixels, rules.clearanceInPixels)
+            )
         }
     }
 

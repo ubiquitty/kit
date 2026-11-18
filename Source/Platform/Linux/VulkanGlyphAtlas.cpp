@@ -379,6 +379,20 @@ Rendering::MonoAtlasBinding VulkanGlyphAtlas::bindMonoAtlas()
     return binding;
 }
 
+Rendering::SkipInkPlanes VulkanGlyphAtlas::skipInkPlanes() const
+{
+    Rendering::SkipInkPlanes planes;
+    planes.mono = Rendering::skipInkCoveragePlane(m_coverage, m_atlasWidth, m_atlasHeight);
+    planes.wide = planes.mono;
+    if (m_ligatureSheet)
+        planes.ligatureStrip = Rendering::skipInkCoveragePlane(m_ligatureSheet->coverage(), m_ligatureSheet->widthInPixels(), m_ligatureSheet->heightInPixels());
+    if (m_proportionalStripSheet)
+        planes.proportionalStrip = Rendering::skipInkCoveragePlane(m_proportionalStripSheet->coverage(), m_proportionalStripSheet->widthInPixels(), m_proportionalStripSheet->heightInPixels());
+    if (m_proportionalSheet)
+        planes.proportional = Rendering::skipInkCoveragePlane(m_proportionalSheet->coverage(), m_proportionalSheet->widthInPixels(), m_proportionalSheet->heightInPixels());
+    return planes;
+}
+
 // The mono overflow canvas (cell + 2*margin), not the grid pitch: the pitch is
 // max(2*cell, monoSlot) and rasterising to it would stretch the glyph wherever
 // the mono margin pushes the pitch past two cells.
@@ -418,6 +432,7 @@ Rendering::GlyphBackend VulkanGlyphAtlas::glyphBackend()
     };
     backend.beginFrame = [](void* context) { static_cast<VulkanGlyphAtlas*>(context)->beginFrame(); };
     backend.bindMonoAtlas = [](void* context) { return static_cast<VulkanGlyphAtlas*>(context)->bindMonoAtlas(); };
+    backend.bindSkipInkPlanes = [](void* context) { return static_cast<const VulkanGlyphAtlas*>(context)->skipInkPlanes(); };
     backend.rasteriseMonoGlyph = [](void* context, std::uint32_t codePoint, Rendering::FontFace face, std::uint32_t variant, int slot) {
         return static_cast<VulkanGlyphAtlas*>(context)->rasteriseMonoGlyph(codePoint, face, variant, slot);
     };

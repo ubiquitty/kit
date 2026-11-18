@@ -137,6 +137,46 @@ extension ShadeStyle {
     }
 }
 
+/// The shape a curly underline draws at (`[underline] curly`).
+///
+/// A Swift mirror of `Ubiquitty::Rendering::CurlyRuleShape` for the reason
+/// ``BrailleStyle`` is one; `Tests/Core/Rendering/test_render_configuration.cpp`
+/// fails if a case is added, removed or reordered on the C++ side.
+public enum CurlyUnderlineShape: UInt8, Sendable, CaseIterable {
+    /// A short, tight curl.
+    case compact = 0
+    /// One wave per letter.
+    case medium = 1
+    /// One wave per letter with a deeper swing.
+    case wide = 2
+}
+
+extension CurlyUnderlineShape {
+    /// The portable enumerator this shape stands for.
+    var core: Ubiquitty.Rendering.CurlyRuleShape {
+        switch self {
+        case .compact: return Ubiquitty.Rendering.CurlyRuleShape.Compact
+        case .medium: return Ubiquitty.Rendering.CurlyRuleShape.Medium
+        case .wide: return Ubiquitty.Rendering.CurlyRuleShape.Wide
+        }
+    }
+
+    /// The shape a portable enumerator stands for.
+    ///
+    /// Internal for the reason ``BrailleStyle/from(_:)`` is.
+    ///
+    /// - Parameter core: The Core value, from a preference.
+    /// - Returns: The matching shape, or medium for a value this build does
+    ///   not know.
+    static func from(_ core: Ubiquitty.Rendering.CurlyRuleShape) -> CurlyUnderlineShape {
+        switch core {
+        case Ubiquitty.Rendering.CurlyRuleShape.Compact: return .compact
+        case Ubiquitty.Rendering.CurlyRuleShape.Wide: return .wide
+        default: return .medium
+        }
+    }
+}
+
 /// Where a selection's colour is drawn.
 public enum SelectionStyle: UInt8, Sendable, CaseIterable {
     /// The system's selection colour, opaque, under the text.
@@ -401,21 +441,26 @@ public struct SurfaceStyle: Hashable, Sendable {
     public var brailleStyle: BrailleStyle = .regular
     /// How the shade glyphs draw, defaulting to Core's factory setting.
     public var shadeStyle: ShadeStyle = .pattern
+    /// The shape a curly underline draws at, defaulting to Core's factory setting.
+    public var curlyUnderlineShape: CurlyUnderlineShape = .medium
     /// Where a selection's colour is drawn, defaulting to Core's factory setting.
     public var selectionStyle: SelectionStyle = .native
     /// Native-size cursor following is opt-in; it never resizes the host grid.
     public var nonOwnerPresentation: RemoteViewportPresentation = .letterbox
     /// The default foreground's opacity, 0–255.
     public var defaultForegroundAlpha: UInt8
-    /// The user's multiplier on the face's underline thickness.
+    /// The user's multiplier on the font's own underline weight, the weight
+    /// its underscore draws at.
     public var underlineThicknessScale: Double
-    /// The user's `underline_offset`, in points.
+    /// The user's `[underline] offset`, in points from the automatic position;
+    /// zero is automatic.
     public var underlineOffsetInPoints: Double
     /// Whether a rule breaks around descender ink.
     public var shouldUnderlineSkipInk: Bool
     /// Whether a run's outer rule reaches the letter's ink past the cell.
     public var shouldUnderlineFollowInk: Bool
-    /// The dilation around crossing ink, in points.
+    /// The clearance around crossing ink, in points; negative is automatic,
+    /// the rule's own weight.
     public var underlineSkipInkPaddingInPoints: Double
     /// The whole-pass cell-background alpha, 0–1.
     public var backgroundOpacity: Double
@@ -499,7 +544,8 @@ public struct SurfaceStyle: Hashable, Sendable {
     ///   - underlineThicknessScale: The multiplier on rule thickness.
     ///   - underlineOffsetInPoints: The user's underline offset.
     ///   - shouldUnderlineSkipInk: Whether rules break around ink.
-    ///   - underlineSkipInkPaddingInPoints: The dilation around crossing ink.
+    ///   - underlineSkipInkPaddingInPoints: The clearance around crossing ink;
+    ///     negative is automatic, the rule's own weight.
     ///   - backgroundOpacity: The whole-pass cell-background alpha.
     ///   - defaultBackgroundRed: An override for the default background's red,
     ///     or nil to take the palette's.
@@ -3129,6 +3175,7 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
         )
         options.style.brailleStyle = style.brailleStyle.core
         options.style.shadeStyle = style.shadeStyle.core
+        options.style.curlyRuleShape = style.curlyUnderlineShape.core
         let hasSelection = Ubiquitty.Selection.hasSelection(surface.selectionModel.session.pointee)
         applyPlatformSelection(
             to: &options.style,

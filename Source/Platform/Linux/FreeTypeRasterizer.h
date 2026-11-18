@@ -786,6 +786,10 @@ private:
     /* owned via FT_Done_Face */ FT_FaceRec_* m_fallbackFace = nullptr;
     double m_primaryAscentInEm = 0;
     double m_primaryDescentInEm = 0;
+    // The weight the primary face's underscore draws at through this raster,
+    // read by Core's rule (Rendering::underscoreWeight); zero until the cell
+    // it is drawn into is known.
+    float m_underscoreWeight = 0.0f;
     // The primary family's bold member, when the bundle table names one as a
     // separate file. A variable face expresses bold on its `wght` axis and has
     // no such file; a static one has no axis to place, so without this a bold
