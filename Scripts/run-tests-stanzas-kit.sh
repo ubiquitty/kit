@@ -9,6 +9,12 @@
 # (`wanted`, `build_and_run`, `ubq_build_test`, `OUT`, `ROOT`, `RAN`), and its
 # name is literal so Scripts/stanza-declarations.awk can list it.
 
+# The exact-head preflight already ran these pure controls. Explicit filters
+# still request the standalone recipe, and local suites without it run both.
+ubq_preflight_control_requested() {
+    [ "${UBQ_CI_PREFLIGHT_COMPLETE:-0}" != "1" ] || [ "${#FILTERS[@]}" -gt 0 ]
+}
+
 # File-link filesystem checks stay off the main actor, coalesce pointer motion,
 # and discard stale interest without adding a worker for each path.
 if [ "$(uname -s)" = "Darwin" ] && wanted file_link_lookup; then
@@ -144,7 +150,7 @@ fi
 # public/package interop funcs -- the rule is proven, not asserted. The real
 # check runs post-build inside check-ubiquittykit, where the header and archive
 # it reads exist.
-if wanted swift_cxx_exports; then
+if wanted swift_cxx_exports && ubq_preflight_control_requested; then
     echo "=== swift_cxx_exports ==="
     RAN=$((RAN + 1))
     python3 "$ROOT/Scripts/check-swift-cxx-exports.py" --self-test || exit 1
@@ -176,7 +182,7 @@ if wanted test_snapshot_gate_scope; then
     python3 "$ROOT/Tests/Tools/test_snapshot_gate_scope.py" || exit 1
 fi
 
-if wanted test_coverage_floor; then
+if wanted test_coverage_floor && ubq_preflight_control_requested; then
     echo "=== test_coverage_floor ==="
     RAN=$((RAN + 1))
     "$ROOT/Scripts/check-coverage-floor.sh" --self-test || exit 1

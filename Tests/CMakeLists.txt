@@ -286,13 +286,26 @@ if(APPLE AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
         test_rich_text_font_catalog
         test_resume_sealer
         test_resume_sealer_cxx)
+    set_property(DIRECTORY APPEND PROPERTY UBIQUITTY_HOST_TESTS
+        test_rich_text_native_geometry
+        test_rich_text_font_catalog
+        test_resume_sealer
+        test_resume_sealer_cxx)
 endif()
 
 # The kit's shell stanzas, one ctest entry each, so the tests a push reaches
 # include the stanzas whose subject it changed. The driver runs a named stanza
 # without CTest, and ctest-covered.txt names the entries ctest has run so a full
 # driver run does not repeat them.
-ubiquitty_schedule_shell_stanzas(DRIVER ${UBIQUITTY_KIT_SOURCE_DIR}/Scripts/run-tests.sh)
+ubiquitty_read_shell_stanzas(_ubq_kit_stanzas DRIVER ${UBIQUITTY_KIT_SOURCE_DIR}/Scripts/run-tests.sh)
+# The native entry runs this exact target with no additional stanza setup.
+if(TEST test_rich_text_native_geometry)
+    list(REMOVE_ITEM _ubq_kit_stanzas test_rich_text_native_geometry)
+endif()
+if("$ENV{UBQ_CI_PREFLIGHT_COMPLETE}" STREQUAL "1")
+    list(REMOVE_ITEM _ubq_kit_stanzas swift_cxx_exports test_coverage_floor)
+endif()
+ubiquitty_schedule_shell_stanzas(DRIVER ${UBIQUITTY_KIT_SOURCE_DIR}/Scripts/run-tests.sh STANZAS ${_ubq_kit_stanzas})
 add_test(NAME test_ios_simulator_ownership
     COMMAND "${Python3_EXECUTABLE}" "${UBIQUITTY_KIT_SOURCE_DIR}/Tests/Tools/test_ios_simulator.py")
 ubiquitty_set_test_entry_properties(test_ios_simulator_ownership)
