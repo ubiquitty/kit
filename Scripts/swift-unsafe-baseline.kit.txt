@@ -16,7 +16,7 @@
 1 Source/UbiquittyKit/Swift/ProtectedFile.swift
 2 Source/UbiquittyKit/Swift/SurfaceRenderer.swift
 5 Source/UbiquittyKit/Swift/SurfaceSelectionModel.swift
-1 Source/UbiquittyKit/Swift/SurfaceSmoke.swift
+1 Source/UbiquittyKit/Swift/Smokes/SurfaceSmoke.swift
 5 Source/UbiquittyKit/Swift/SurfaceSnapshot.swift
 1 Source/UbiquittyKit/Swift/TerminalSurface+Input.swift
 7 Source/UbiquittyKit/Swift/TerminalSurface.swift

@@ -48,7 +48,7 @@ set(UBIQUITTY_APPLE_SHARED_RENDERKIT_SOURCES
     Source/UbiquittyRenderKit/BoxFaceLadder.swift
     Source/UbiquittyRenderKit/FontRouter.swift
     Source/UbiquittyRenderKit/FrameClock.swift
-    Source/UbiquittyRenderKit/FrameClockSmoke.swift
+    Source/UbiquittyRenderKit/Smokes/FrameClockSmoke.swift
     Source/UbiquittyRenderKit/PresentSlipAccounting.swift
     Source/UbiquittyRenderKit/PrimaryRunShaper.swift
     Source/UbiquittyRenderKit/FrameEncoder.swift
@@ -88,7 +88,7 @@ set(UBIQUITTY_APPLE_SHARED_RENDERKIT_SOURCES
     Source/UbiquittyRenderKit/RuntimeDrainBench.swift
     Source/UbiquittyRenderKit/RuntimeDrive.swift
     Source/UbiquittyRenderKit/RuntimeFrameBench.swift
-    Source/UbiquittyRenderKit/RuntimeSmoke.swift
+    Source/UbiquittyRenderKit/Smokes/RuntimeSmoke.swift
     Source/UbiquittyRenderKit/StreamDebugRecorder.swift)
 
 # The Kit's shared half: the types its public API names, which cannot live in a
@@ -98,7 +98,7 @@ set(UBIQUITTY_APPLE_SHARED_KIT_SOURCES
     Source/UbiquittyKit/Swift/ProtectedFile.swift
     Source/UbiquittyKit/Swift/PlatformView.swift
     Source/UbiquittyKit/Swift/TerminalSurface+Bindings.swift
-    Source/UbiquittyKit/Swift/DrawEntrySmoke.swift
+    Source/UbiquittyKit/Swift/Smokes/DrawEntrySmoke.swift
     Source/UbiquittyKit/Swift/IOSSurfaceSnapshot.swift
     Source/UbiquittyKit/Swift/TerminalSurface+Thumbnail.swift
     Source/UbiquittyKit/Swift/TerminalSurface+ConsentPrompt.swift
@@ -106,15 +106,15 @@ set(UBIQUITTY_APPLE_SHARED_KIT_SOURCES
     Source/UbiquittyKit/Swift/SurfaceRenderer+Configuration.swift
     Source/UbiquittyKit/Swift/SurfaceSelectionModel.swift
     Source/UbiquittyKit/Swift/DeliveryBench.swift
-    Source/UbiquittyKit/Swift/SurfaceSmoke.swift
-    Source/UbiquittyKit/Swift/GridCacheSmoke.swift
+    Source/UbiquittyKit/Swift/Smokes/SurfaceSmoke.swift
+    Source/UbiquittyKit/Swift/Smokes/GridCacheSmoke.swift
     Source/UbiquittyKit/Swift/GridCacheScrollBench.swift
-    Source/UbiquittyKit/Swift/ShippedFacesSmoke.swift
-    Source/UbiquittyKit/Swift/ShippedFamilyLookupSmoke.swift
-    Source/UbiquittyKit/Swift/ProportionalFacesSmoke.swift
-    Source/UbiquittyKit/Swift/TouchSmoke.swift
-    Source/UbiquittyKit/Swift/RichTextSelectionSmoke.swift
-    Source/UbiquittyKit/Swift/AccessibilityValueSmoke.swift
+    Source/UbiquittyKit/Swift/Smokes/ShippedFacesSmoke.swift
+    Source/UbiquittyKit/Swift/Smokes/ShippedFamilyLookupSmoke.swift
+    Source/UbiquittyKit/Swift/Smokes/ProportionalFacesSmoke.swift
+    Source/UbiquittyKit/Swift/Smokes/TouchSmoke.swift
+    Source/UbiquittyKit/Swift/Smokes/RichTextSelectionSmoke.swift
+    Source/UbiquittyKit/Swift/Smokes/AccessibilityValueSmoke.swift
     Source/UbiquittyKit/Swift/SurfaceSnapshot.swift
     Source/UbiquittyKit/Swift/SnapshotRunner.swift
     Source/UbiquittyKit/Swift/SurfaceRenderProfile.swift
@@ -203,7 +203,7 @@ set(UBIQUITTY_MACOS_KIT_SOURCES
     Source/UbiquittyKit/Swift/TerminalSurface+ProgramIcon.swift
     Source/UbiquittyKit/Swift/ProcessIcons.swift
     Source/UbiquittyKit/Swift/PhosphorIcons.swift
-    Source/UbiquittyKit/Swift/ShippedIconsSmoke.swift
+    Source/UbiquittyKit/Swift/Smokes/ShippedIconsSmoke.swift
     # The pasteboard half of the PAL clipboard backend, which
     # Source/Platform/macOS/Clipboard.cpp calls through a C seam. It rides this
     # list because the seam has to resolve in both products — the app links the
