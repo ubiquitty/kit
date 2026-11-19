@@ -2620,11 +2620,8 @@ extension GlyphAtlas: ClusterGlyphSource {
         phase: UInt32,
         slot: Int32
     ) -> Bool {
-        // One extraction at the seam's consumer: the helpers below take typed
-        // buffers, and the span's borrow covers this call.
-        let codePoints = UnsafeBufferPointer(start: codePoints.__dataUnsafe(), count: Int(codePoints.size()))
         if unifontScale > 0 {
-            rasterizer.rasteriseUnifontCluster(Ubiquitty.Rendering.ClusterSpan(codePoints), scale: unifontScale)
+            rasterizer.rasteriseUnifontCluster(codePoints, scale: unifontScale)
         } else {
             drawCluster(codePoints, face: face, phase: phase, showingRowsFrom: 0, into: rasterizer)
         }
@@ -2670,12 +2667,16 @@ extension GlyphAtlas {
     ///   - firstRow: The row of the cluster's own slot the plane's top row shows.
     ///   - plane: The plane to draw into, of any height.
     private func drawCluster(
-        _ codePoints: UnsafeBufferPointer<UInt32>,
+        _ codePoints: Ubiquitty.Rendering.ClusterSpan,
         face: Ubiquitty.Rendering.FontFace,
         phase: UInt32,
         showingRowsFrom firstRow: Int,
         into plane: GlyphRasterizer
     ) {
+        // One extraction for the slot, its windows and its measurement: the
+        // helpers below take typed buffers, and the span's borrow covers this
+        // call.
+        let codePoints = UnsafeBufferPointer(start: codePoints.__dataUnsafe(), count: Int(codePoints.size()))
         guard let shaped = drawableClusterLine(codePoints, face: face) else {
             plane.rasteriseBlank()
             return
@@ -2729,11 +2730,10 @@ extension GlyphAtlas {
             var unifont = Ubiquitty.Rendering.UnifontRasterizer(Int32(unifontScale), 0, 0)
             return unifont.measureClusterInk(codePoints, geometry.slotWidthInPixels, geometry.slotHeightInPixels, max(reach, 0))
         }
-        let codePoints = UnsafeBufferPointer(start: codePoints.__dataUnsafe(), count: Int(codePoints.size()))
         let slotHeight = Int(geometry.slotHeightInPixels)
         let reach = max(Int(reach), 0)
         let height = slotHeight + 2 * reach
-        guard !codePoints.isEmpty else {
+        guard codePoints.size() > 0 else {
             return Ubiquitty.Rendering.ClusterInkRows()
         }
         if clusterReachPlane?.height != height {
@@ -2787,10 +2787,9 @@ extension GlyphAtlas {
         rowOffset: Int32,
         slot: Int32
     ) -> Bool {
-        let codePoints = UnsafeBufferPointer(start: codePoints.__dataUnsafe(), count: Int(codePoints.size()))
         if unifontScale > 0 {
             rasterizer.rasteriseUnifontClusterWindow(
-                Ubiquitty.Rendering.ClusterSpan(codePoints),
+                codePoints,
                 scale: unifontScale,
                 rowOffset: Int(rowOffset)
             )
