@@ -903,6 +903,32 @@ final class GlyphRasterizer {
         }
     }
 
+    /// Fills the plane with one window of a bitmap cluster's stacked drawing,
+    /// through the portable rasterizer.
+    ///
+    /// The plane is a slot: row `r` of it shows row `rowOffset + r` of the
+    /// cluster's own slot, uncut, so the marks Core stacked past the slot's
+    /// edge land here at the size and on the grid the slot draws them at.
+    ///
+    /// - Parameters:
+    ///   - codePoints: The cluster, base first.
+    ///   - scale: The integer upscale the cell was cut for.
+    ///   - rowOffset: The row of the cluster's slot the plane's top row shows.
+    func rasteriseUnifontClusterWindow(_ codePoints: Ubiquitty.Rendering.ClusterSpan, scale: Int, rowOffset: Int) {
+        clearPlane()
+        var rasterizer = Ubiquitty.Rendering.UnifontRasterizer(Int32(scale), 0, 0)
+        coverage.withUnsafeMutableBufferPointer { plane in
+            _ = rasterizer.rasteriseClusterWindow(
+                codePoints,
+                Int32(width),
+                Int32(height),
+                Int32(rowOffset),
+                Int32(height),
+                Ubiquitty.Rendering.CoverageSlot(plane)
+            )
+        }
+    }
+
     /// Draws one proportional glyph of the bitmap tier's strike into the plane,
     /// through Core: the origin, phase and overhang are the reference sheet's,
     /// so the bytes are the reference's.

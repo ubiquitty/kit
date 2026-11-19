@@ -2710,7 +2710,8 @@ extension GlyphAtlas {
     ///
     /// Drawn once into a plane holding the slot and `reach` rows past each of
     /// its edges, the slot's own drawing in it, and read for its first and
-    /// last inked rows (ClusterWindows.h).
+    /// last inked rows (ClusterWindows.h). A bitmap family's cluster is Core's
+    /// to stack and Core's to measure, through the same drawing its slot holds.
     ///
     /// - Parameters:
     ///   - codePoints: The cluster, base first.
@@ -2724,11 +2725,15 @@ extension GlyphAtlas {
         phase: UInt32,
         reach: Int32
     ) -> Ubiquitty.Rendering.ClusterInkRows {
+        if unifontScale > 0 {
+            var unifont = Ubiquitty.Rendering.UnifontRasterizer(Int32(unifontScale), 0, 0)
+            return unifont.measureClusterInk(codePoints, geometry.slotWidthInPixels, geometry.slotHeightInPixels, max(reach, 0))
+        }
         let codePoints = UnsafeBufferPointer(start: codePoints.__dataUnsafe(), count: Int(codePoints.size()))
         let slotHeight = Int(geometry.slotHeightInPixels)
         let reach = max(Int(reach), 0)
         let height = slotHeight + 2 * reach
-        guard unifontScale == 0, !codePoints.isEmpty else {
+        guard !codePoints.isEmpty else {
             return Ubiquitty.Rendering.ClusterInkRows()
         }
         if clusterReachPlane?.height != height {
@@ -2784,7 +2789,11 @@ extension GlyphAtlas {
     ) -> Bool {
         let codePoints = UnsafeBufferPointer(start: codePoints.__dataUnsafe(), count: Int(codePoints.size()))
         if unifontScale > 0 {
-            rasterizer.rasteriseBlank()
+            rasterizer.rasteriseUnifontClusterWindow(
+                Ubiquitty.Rendering.ClusterSpan(codePoints),
+                scale: unifontScale,
+                rowOffset: Int(rowOffset)
+            )
         } else {
             drawCluster(codePoints, face: face, phase: phase, showingRowsFrom: Int(rowOffset), into: rasterizer)
         }

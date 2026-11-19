@@ -514,7 +514,8 @@ Rendering::GlyphBackend VulkanGlyphAtlas::glyphBackend()
     };
     // A stack of marks past its slot draws through windows of this sheet
     // (Rendering/ClusterWindows.h), where the rasterizer knows where its slot
-    // puts the baseline; the Unifont fallback keeps its cells.
+    // puts the baseline: a loaded FreeType face, and Core's Unifont, which
+    // stacks a bitmap cluster's marks by whole texels of its own grid.
     if (m_rasterizer.drawsClusterWindows()) {
         backend.measureClusterInk = [](void* context, std::span<const std::uint32_t> codePoints, Rendering::FontFace face, std::uint32_t weight,
                                         std::uint32_t variant, int reachInPixels) {
