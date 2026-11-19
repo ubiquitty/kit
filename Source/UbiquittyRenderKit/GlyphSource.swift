@@ -423,6 +423,38 @@ protocol ClusterGlyphSource: GlyphSource {
         phase: UInt32,
         slot: Int32
     ) -> Bool
+
+    /// Measures the rows a cluster's ink covers, uncut by its slot.
+    ///
+    /// - Parameters:
+    ///   - codePoints: The cluster, base first.
+    ///   - face: Which face to shape it in.
+    ///   - phase: The raster variant the cluster's slot was keyed with.
+    ///   - reach: How far past each edge of the slot to look.
+    /// - Returns: The inked rows, in the rows of the cluster's own slot.
+    func measureClusterInk(
+        _ codePoints: Ubiquitty.Rendering.ClusterSpan,
+        face: Ubiquitty.Rendering.FontFace,
+        phase: UInt32,
+        reach: Int32
+    ) -> Ubiquitty.Rendering.ClusterInkRows
+
+    /// Fills one window of a tall cluster into a slot the cache assigned.
+    ///
+    /// - Parameters:
+    ///   - codePoints: The cluster, base first.
+    ///   - face: Which face to shape it in.
+    ///   - phase: The raster variant the cluster's slot was keyed with.
+    ///   - rowOffset: The row of the cluster's slot the window's top row shows.
+    ///   - slot: The slot the cache assigned the window.
+    /// - Returns: Whether the slot now holds the window.
+    func rasteriseClusterWindow(
+        _ codePoints: Ubiquitty.Rendering.ClusterSpan,
+        face: Ubiquitty.Rendering.FontFace,
+        phase: UInt32,
+        rowOffset: Int32,
+        slot: Int32
+    ) -> Bool
 }
 
 /// Holds the source for as long as Core is calling back into it.
@@ -743,6 +775,28 @@ final class GlyphBackendContext {
                         phase: phase,
                         slot: slot
                     )
+            }
+            // A stack of marks past its slot draws through windows of the
+            // mono sheet (ClusterWindows.h). The weight is not a key lane for
+            // clusters, so it is dropped here as the cluster entries drop it.
+            backend.measureClusterInk = { context, codePoints, face, _, variant, reach in
+                GlyphBackendContext.resolve(context).clusterSource?
+                    .measureClusterInk(
+                        codePoints,
+                        face: face,
+                        phase: variant,
+                        reach: reach
+                    ) ?? Ubiquitty.Rendering.ClusterInkRows()
+            }
+            backend.rasteriseClusterWindow = { context, codePoints, face, _, variant, rowOffset, slot in
+                GlyphBackendContext.resolve(context).clusterSource?
+                    .rasteriseClusterWindow(
+                        codePoints,
+                        face: face,
+                        phase: variant,
+                        rowOffset: rowOffset,
+                        slot: slot
+                    ) ?? false
             }
         }
     }

@@ -139,6 +139,33 @@ public:
     /// Fits a narrow shaped cluster when its advance exceeds its cell allocation.
     bool rasterizeClusterInCell(const std::uint32_t*, int count, Rendering::FontFace, std::uint32_t weight, double phaseInPixels,
         Rendering::ClusterRasterBounds, int slotWidth, int slotHeight, std::uint8_t* coverageOut) override;
+    /// Whether a stacked cluster's windows can be drawn: every slot this face
+    /// draws centres its cell, so the baseline in a slot of any height is
+    /// known. The Unifont fallback keeps its cells.
+    ///
+    /// - Returns: True once a face is loaded.
+    [[nodiscard]] bool drawsClusterWindows() const override { return ready(); }
+    /// Draws a window of a cluster's uncut drawing (Rendering::GlyphRasterizer).
+    ///
+    /// The cluster is drawn into a canvas taller than its slot by the same
+    /// count of rows at each edge, which centres the slot's drawing in it,
+    /// and the window is cut from the canvas as a band of rows.
+    ///
+    /// - Parameters:
+    ///   - codePoints: The cluster's Unicode scalars.
+    ///   - count: The number of scalars to read.
+    ///   - face: The font style to use.
+    ///   - weight: The weight override, or zero for the style's default.
+    ///   - phaseInPixels: The pen's fraction within one device pixel.
+    ///   - bounds: The allocated cell interval in slot coordinates.
+    ///   - slotWidth: The slot's and the window's width in pixels.
+    ///   - slotHeight: The height of the slot the cluster is drawn into.
+    ///   - rowOffsetInPixels: The slot row shown on the window's first row.
+    ///   - windowHeight: The window's height in pixels.
+    ///   - coverageOut: `slotWidth * windowHeight` coverage bytes.
+    /// - Returns: True when the window was drawn.
+    bool rasterizeClusterWindow(const std::uint32_t* codePoints, int count, Rendering::FontFace face, std::uint32_t weight, double phaseInPixels,
+        Rendering::ClusterRasterBounds bounds, int slotWidth, int slotHeight, int rowOffsetInPixels, int windowHeight, std::uint8_t* coverageOut) override;
 
     FreeTypeRasterizer(const FreeTypeRasterizer&) = delete;
     FreeTypeRasterizer& operator=(const FreeTypeRasterizer&) = delete;
@@ -867,6 +894,8 @@ private:
     // allocating once the first has sized them.
     ColorGlyphPainter m_colorGlyphPainter;
     std::vector<std::uint8_t> m_colorCanvas;
+    /// The tall canvas a cluster window is cut from, kept across windows.
+    std::vector<std::uint8_t> m_clusterWindowCanvas;
     // The shaper over that face, built once. A ZWJ sequence is a ligature in the
     // font's GSUB table and no amount of character-map lookup will find it, so
     // composing one needs a shaping pass rather than a wider probe.

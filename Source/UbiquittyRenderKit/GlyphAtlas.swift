@@ -331,6 +331,10 @@ package final class GlyphAtlas {
     private let ligature: LigatureSheet?
 
     private let rasterizer: GlyphRasterizer
+    /// The plane a stacked cluster is measured in: its slot and Core's reach
+    /// past each edge, built on the first measurement and kept while the
+    /// reach Core asks for stays the same.
+    private var clusterReachPlane: GlyphRasterizer?
     /// Draws the masters a sized block's windows are cut from, for the mono and the
     /// wide sheets alike.
     private let sizedRaster = SizedWindowRaster()
@@ -2621,30 +2625,8 @@ extension GlyphAtlas: ClusterGlyphSource {
         let codePoints = UnsafeBufferPointer(start: codePoints.__dataUnsafe(), count: Int(codePoints.size()))
         if unifontScale > 0 {
             rasterizer.rasteriseUnifontCluster(Ubiquitty.Rendering.ClusterSpan(codePoints), scale: unifontScale)
-        } else if let shaped = drawableClusterLine(codePoints, face: face) {
-            // The phase rides the pen here as it does on the mono path: a cluster
-            // keyed per phase and drawn at phase zero is the same eight-copies
-            // shape, one cache over.
-            let pen = CGPoint(
-                x: CGFloat(geometry.glyphMarginInPixels.width) + CGFloat(Ubiquitty.Rendering.variantPhase(phase))
-                    / CGFloat(subpixelPhaseCount),
-                y: CGFloat(baselinePenInPixels)
-                    + symbolBaselineRaise(shaped.base, font: faceCarrying(shaped.base, face: face), face: face, cluster: codePoints.span)
-            )
-            let advance =
-                geometry.referenceAdvanceInPixels > 0
-                ? Double(geometry.referenceAdvanceInPixels) : Double(geometry.glyphWidthInPixels)
-            var cellBounds = Ubiquitty.Rendering.ClusterRasterBounds()
-            cellBounds.left = Double(pen.x)
-            cellBounds.width = advance
-            rasterizer.rasterise(
-                line: shaped.line,
-                at: pen,
-                fittingIn: GlyphRasterizer.clusterFitMode(for: codePoints.span) == .fitAdvanceOverflow ? cellBounds : nil,
-                style: rasterStyle(for: phase)
-            )
         } else {
-            rasterizer.rasteriseBlank()
+            drawCluster(codePoints, face: face, phase: phase, showingRowsFrom: 0, into: rasterizer)
         }
         // A cluster shares the mono sheet's slots, so it owes the ink table the
         // same entry every other writer of those slots owes: the box left by an
@@ -2660,6 +2642,165 @@ extension GlyphAtlas: ClusterGlyphSource {
         rasterizer.coverage.withUnsafeBytes { bytes in
             uploader.stage(
                 bytes.baseAddress!,
+                bytesPerRow: Int(geometry.slotWidthInPixels),
+                region: region(for: Int(slot)),
+                ink: monoInk,
+                into: texture
+            )
+        }
+        return true
+    }
+}
+
+extension GlyphAtlas {
+    /// Shapes a cluster into a plane, as its own slot holds it or moved up by
+    /// a window's offset.
+    ///
+    /// One drawing for the cluster's slot, its windows and its measurement,
+    /// so the three cannot disagree about where a mark stands: the pen, the
+    /// phase, the fit and the tier are the slot's, and only the plane's view
+    /// of the drawing moves. Row `r` of the plane shows row
+    /// `firstRow + r` of the cluster's own slot; the offset is whole rows, so
+    /// every row the plane shares with the slot is the slot's own raster.
+    ///
+    /// - Parameters:
+    ///   - codePoints: The cluster, base first.
+    ///   - face: Which face to shape it in.
+    ///   - phase: The raster variant: subpixel phase and smoothing tier.
+    ///   - firstRow: The row of the cluster's own slot the plane's top row shows.
+    ///   - plane: The plane to draw into, of any height.
+    private func drawCluster(
+        _ codePoints: UnsafeBufferPointer<UInt32>,
+        face: Ubiquitty.Rendering.FontFace,
+        phase: UInt32,
+        showingRowsFrom firstRow: Int,
+        into plane: GlyphRasterizer
+    ) {
+        guard let shaped = drawableClusterLine(codePoints, face: face) else {
+            plane.rasteriseBlank()
+            return
+        }
+        // The phase rides the pen here as it does on the mono path: a cluster
+        // keyed per phase and drawn at phase zero is the same eight-copies
+        // shape, one cache over. The pen counts up from the plane's bottom, so
+        // showing rows further down the slot raises it, and a plane taller than
+        // the slot raises it by the difference.
+        let pen = CGPoint(
+            x: CGFloat(geometry.glyphMarginInPixels.width) + CGFloat(Ubiquitty.Rendering.variantPhase(phase))
+                / CGFloat(subpixelPhaseCount),
+            y: CGFloat(baselinePenInPixels)
+                + symbolBaselineRaise(shaped.base, font: faceCarrying(shaped.base, face: face), face: face, cluster: codePoints.span)
+                + CGFloat(firstRow + plane.height - Int(geometry.slotHeightInPixels))
+        )
+        let advance =
+            geometry.referenceAdvanceInPixels > 0
+            ? Double(geometry.referenceAdvanceInPixels) : Double(geometry.glyphWidthInPixels)
+        var cellBounds = Ubiquitty.Rendering.ClusterRasterBounds()
+        cellBounds.left = Double(pen.x)
+        cellBounds.width = advance
+        plane.rasterise(
+            line: shaped.line,
+            at: pen,
+            fittingIn: GlyphRasterizer.clusterFitMode(for: codePoints.span) == .fitAdvanceOverflow ? cellBounds : nil,
+            style: rasterStyle(for: phase)
+        )
+    }
+
+    /// Measures the rows a cluster's ink covers, uncut by its slot.
+    ///
+    /// Drawn once into a plane holding the slot and `reach` rows past each of
+    /// its edges, the slot's own drawing in it, and read for its first and
+    /// last inked rows (ClusterWindows.h).
+    ///
+    /// - Parameters:
+    ///   - codePoints: The cluster, base first.
+    ///   - face: Which face to shape it in.
+    ///   - phase: The raster variant the cluster's slot was keyed with.
+    ///   - reach: How far past each edge of the slot to look.
+    /// - Returns: The inked rows, in the rows of the cluster's own slot.
+    func measureClusterInk(
+        _ codePoints: Ubiquitty.Rendering.ClusterSpan,
+        face: Ubiquitty.Rendering.FontFace,
+        phase: UInt32,
+        reach: Int32
+    ) -> Ubiquitty.Rendering.ClusterInkRows {
+        let codePoints = UnsafeBufferPointer(start: codePoints.__dataUnsafe(), count: Int(codePoints.size()))
+        let slotHeight = Int(geometry.slotHeightInPixels)
+        let reach = max(Int(reach), 0)
+        let height = slotHeight + 2 * reach
+        guard unifontScale == 0, !codePoints.isEmpty else {
+            return Ubiquitty.Rendering.ClusterInkRows()
+        }
+        if clusterReachPlane?.height != height {
+            clusterReachPlane = GlyphRasterizer(width: Int(geometry.slotWidthInPixels), height: height)
+        }
+        guard let plane = clusterReachPlane else {
+            return Ubiquitty.Rendering.ClusterInkRows()
+        }
+        drawCluster(codePoints, face: face, phase: phase, showingRowsFrom: -reach, into: plane)
+        var top = -1
+        var bottom = -1
+        plane.coverage.withUnsafeBufferPointer { pixels in
+            for row in 0..<plane.height {
+                let start = row * plane.width
+                if pixels[start..<start + plane.width].contains(where: { $0 != 0 }) {
+                    if top < 0 {
+                        top = row
+                    }
+                    bottom = row + 1
+                }
+            }
+        }
+        var rows = Ubiquitty.Rendering.ClusterInkRows()
+        guard top >= 0 else {
+            return rows
+        }
+        rows.isInked = true
+        rows.topInPixels = Int32(top - reach)
+        rows.bottomInPixels = Int32(bottom - reach)
+        return rows
+    }
+
+    /// Shapes one window of a tall cluster into a mono slot the cache assigned.
+    ///
+    /// The window is the cluster's own drawing moved up by `rowOffset` rows,
+    /// so the window and the cluster's slot tile one tall picture. It owes the
+    /// ink table and the sheet what every writer of a mono slot owes them.
+    ///
+    /// - Parameters:
+    ///   - codePoints: The cluster, base first.
+    ///   - face: Which face to shape it in.
+    ///   - phase: The raster variant the cluster's slot was keyed with.
+    ///   - rowOffset: The row of the cluster's slot the window's top row shows.
+    ///   - slot: The slot the cache assigned the window.
+    /// - Returns: Always true: the upload happens on every path, so the slot
+    ///   is this window's whatever the shaping produced.
+    func rasteriseClusterWindow(
+        _ codePoints: Ubiquitty.Rendering.ClusterSpan,
+        face: Ubiquitty.Rendering.FontFace,
+        phase: UInt32,
+        rowOffset: Int32,
+        slot: Int32
+    ) -> Bool {
+        let codePoints = UnsafeBufferPointer(start: codePoints.__dataUnsafe(), count: Int(codePoints.size()))
+        if unifontScale > 0 {
+            rasterizer.rasteriseBlank()
+        } else {
+            drawCluster(codePoints, face: face, phase: phase, showingRowsFrom: Int(rowOffset), into: rasterizer)
+        }
+        inkBoxForSlot[Int(slot)] = rasterizer.coverage.withUnsafeBufferPointer { plane in
+            Ubiquitty.Rendering.measureInkBox(
+                Ubiquitty.Rendering.CoveragePlaneSpan(plane),
+                geometry.slotWidthInPixels,
+                geometry.slotHeightInPixels
+            )
+        }
+        rasterizer.coverage.withUnsafeBytes { bytes in
+            guard let base = bytes.baseAddress else {
+                return
+            }
+            uploader.stage(
+                base,
                 bytesPerRow: Int(geometry.slotWidthInPixels),
                 region: region(for: Int(slot)),
                 ink: monoInk,

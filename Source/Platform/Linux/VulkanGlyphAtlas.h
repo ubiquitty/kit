@@ -364,6 +364,35 @@ private:
     // The cluster counterpart of rasterizeInto, into its one- or two-cell canvas.
     void rasterizeClusterInto(int slot, std::span<const std::uint32_t> codePoints, Rendering::FontFace, std::uint32_t weight,
         std::uint32_t variant = 0, ClusterCanvas = ClusterCanvas::Mono);
+    /// Measures the rows a mono cluster's ink covers, past its slot's edges.
+    ///
+    /// Drawn at the pen, phase and fit ``rasterizeClusterInto`` draws the
+    /// cluster's own slot at, so the rows are the ones its windows will hold
+    /// (Rendering/ClusterWindows.h).
+    ///
+    /// - Parameters:
+    ///   - codePoints: The cluster's code points, base first.
+    ///   - face: The face to draw it at.
+    ///   - weight: The variable weight the rasterizer applies.
+    ///   - variant: The raster variant the cluster's own slot was keyed with.
+    ///   - reachInPixels: How far past each edge of the slot to look.
+    /// - Returns: The inked rows in the slot's own rows.
+    Rendering::ClusterInkRows measureClusterInk(std::span<const std::uint32_t> codePoints, Rendering::FontFace face, std::uint32_t weight,
+        std::uint32_t variant, int reachInPixels);
+    /// Draws one window of a tall cluster into a mono slot the cache assigned.
+    ///
+    /// - Parameters:
+    ///   - codePoints: The cluster's code points, base first.
+    ///   - face: The face to draw it at.
+    ///   - weight: The variable weight the rasterizer applies.
+    ///   - variant: The raster variant the cluster's own slot was keyed with.
+    ///   - rowOffsetInPixels: The row of the cluster's own slot shown on the
+    ///     window's first row.
+    ///   - slot: The slot the cache assigned the window.
+    /// - Returns: True, always: a window the rasterizer declines lands as a
+    ///   blank, which is this window's answer.
+    bool rasteriseClusterWindow(std::span<const std::uint32_t> codePoints, Rendering::FontFace face, std::uint32_t weight, std::uint32_t variant,
+        int rowOffsetInPixels, int slot);
     /// The canvas a sized window fills inside its slot.
     enum class SizedWindowCanvas : std::uint8_t {
         /// The mono overflow canvas: the cell with a margin at each side.

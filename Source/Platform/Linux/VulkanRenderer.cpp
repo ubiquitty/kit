@@ -2783,7 +2783,7 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
     // A box cell decomposes into several quads; the builder reports the count
     // it needed and the frame regrows below, as the software renderer does.
     const std::size_t boxFillCapacity = cellCapacity;
-    if (!ensureInstanceBuffers(cellCapacity, glyphCapacity,
+    if (!ensureInstanceBuffers(cellCapacity, std::max(glyphCapacity, m_glyphCapacity),
             proportionalCapacity, proportionalStripCapacity, std::max(decorationCapacity, m_decorationCapacity), overlayCapacity,
             colorCapacity, ligatureCapacity, wideCapacity, std::max(boxFillCapacity, m_boxFillCapacity))) {
         return false;
@@ -2870,13 +2870,16 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
     Rendering::InstanceCounts counts;
     const auto buildFrameWithRoom = [&] {
         counts = buildFrame();
-        if (counts.proportionalGlyphs > m_proportionalCapacity
+        // Glyphs too: a stacked cluster draws through windows of its own
+        // (ClusterWindows.h), so a frame can need more glyphs than cells.
+        if (counts.glyphs > m_glyphCapacity
+            || counts.proportionalGlyphs > m_proportionalCapacity
             || counts.proportionalStrips > m_proportionalStripCapacity
             || counts.ligatureGlyphs > m_ligatureCapacity
             || counts.wideGlyphs > m_wideCapacity
             || counts.boxFills > m_boxFillCapacity
             || counts.decorations > m_decorationCapacity) {
-            if (!ensureInstanceBuffers(cellCapacity, glyphCapacity,
+            if (!ensureInstanceBuffers(cellCapacity, std::max(counts.glyphs, m_glyphCapacity),
                     std::max(counts.proportionalGlyphs, m_proportionalCapacity),
                     std::max(counts.proportionalStrips, m_proportionalStripCapacity), std::max(counts.decorations, m_decorationCapacity), overlayCapacity,
                     colorCapacity, std::max(counts.ligatureGlyphs, m_ligatureCapacity), std::max(counts.wideGlyphs, m_wideCapacity),

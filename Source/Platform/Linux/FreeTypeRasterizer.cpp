@@ -2652,6 +2652,34 @@ bool FreeTypeRasterizer::rasterizeClusterInCell(const std::uint32_t* codePoints,
     return didRasterize;
 }
 
+bool FreeTypeRasterizer::rasterizeClusterWindow(const std::uint32_t* codePoints, int count, Rendering::FontFace face, std::uint32_t weight,
+    double phaseInPixels, Rendering::ClusterRasterBounds bounds, int slotWidth, int slotHeight, int rowOffsetInPixels, int windowHeight,
+    std::uint8_t* coverageOut)
+{
+    if (!ready() || !codePoints || count <= 0 || slotWidth <= 0 || slotHeight <= 0 || windowHeight <= 0 || !coverageOut)
+        return false;
+    // Every slot this face draws centres its cell, so a canvas taller than the
+    // slot by the same rows at each edge draws the cluster that many rows
+    // lower, and the slot's drawing sits whole inside it. The window is then a
+    // band of the canvas's rows. Grown until the band fits: the centring
+    // halves the growth, and an odd remainder rounds the baseline down.
+    const int reach = std::max({ -rowOffsetInPixels, rowOffsetInPixels + windowHeight - slotHeight, 0 });
+    const int slotBaseline = primaryBaselineY(slotHeight);
+    for (int extra = 0; extra <= 2; ++extra) {
+        const int canvasHeight = slotHeight + 2 * reach + extra;
+        const int firstRow = rowOffsetInPixels + primaryBaselineY(canvasHeight) - slotBaseline;
+        if (firstRow < 0 || firstRow + windowHeight > canvasHeight)
+            continue;
+        m_clusterWindowCanvas.assign(static_cast<std::size_t>(slotWidth) * static_cast<std::size_t>(canvasHeight), std::uint8_t { 0 });
+        if (!rasterizeClusterInCell(codePoints, count, face, weight, phaseInPixels, bounds, slotWidth, canvasHeight, m_clusterWindowCanvas.data()))
+            return false;
+        std::copy_n(m_clusterWindowCanvas.data() + static_cast<std::size_t>(firstRow) * static_cast<std::size_t>(slotWidth),
+            static_cast<std::size_t>(slotWidth) * static_cast<std::size_t>(windowHeight), coverageOut);
+        return true;
+    }
+    return false;
+}
+
 bool FreeTypeRasterizer::rasterizeGlyph(std::uint32_t codePoint, Rendering::FontFace face, std::uint32_t weight, int slotWidth, int slotHeight, std::uint8_t* coverageOut)
 {
     for (int i = 0; i < slotWidth * slotHeight; ++i)

@@ -221,6 +221,34 @@ void VulkanGlyphAtlas::rasterizeClusterInto(int slot, std::span<const std::uint3
     recordInkBox(slot, plane, width, height);
 }
 
+Rendering::ClusterInkRows VulkanGlyphAtlas::measureClusterInk(std::span<const std::uint32_t> codePoints, Rendering::FontFace face,
+    std::uint32_t weight, std::uint32_t variant, int reachInPixels)
+{
+    const double phase = static_cast<double>(Rendering::variantPhase(variant)) / std::max(1, m_rasterizer.glyphPhaseCount());
+    const Rendering::ClusterRasterBounds bounds { m_monoMarginXInPixels + phase, static_cast<double>(m_cellWidth) };
+    return Rendering::measureClusterInkThroughWindow(m_rasterizer, codePoints, face, weight, phase, bounds, m_monoSlotWidthInPixels,
+        m_slotHeightInPixels, reachInPixels, m_sizedScratch);
+}
+
+bool VulkanGlyphAtlas::rasteriseClusterWindow(std::span<const std::uint32_t> codePoints, Rendering::FontFace face, std::uint32_t weight,
+    std::uint32_t variant, int rowOffsetInPixels, int slot)
+{
+    // The mono canvas the cluster's own slot fills, at its pen, phase and fit,
+    // so the window's rows continue that slot's raster.
+    const int width = m_monoSlotWidthInPixels;
+    const int height = m_slotHeightInPixels;
+    const Rendering::AtlasSlotRegion region { (slot % m_columns) * m_slotWidthInPixels, (slot / m_columns) * m_slotHeightInPixels, width, height };
+    const double phase = static_cast<double>(Rendering::variantPhase(variant)) / std::max(1, m_rasterizer.glyphPhaseCount());
+    const Rendering::ClusterRasterBounds bounds { m_monoMarginXInPixels + phase, static_cast<double>(m_cellWidth) };
+    const bool inked = m_rasterizer.rasterizeClusterWindow(codePoints.data(), static_cast<int>(codePoints.size()), face, weight, phase, bounds,
+        width, height, rowOffsetInPixels, height, m_slotScratch.data());
+    const std::span<const std::uint8_t> plane = inked ? std::span<const std::uint8_t>(m_slotScratch).first(static_cast<std::size_t>(width) * static_cast<std::size_t>(height)) : std::span<const std::uint8_t> {};
+    Rendering::writeAtlasCoverage(m_coverage, m_atlasWidth, region, plane);
+    recordInkBox(slot, plane, width, height);
+    markSlotDirty(slot);
+    return true;
+}
+
 void VulkanGlyphAtlas::rasteriseSizedWindowInto(SizedWindowCanvas canvas, int slot, std::uint32_t codePoint, Rendering::FontFace face, std::uint32_t weight, std::uint32_t phase, Rendering::SizedTile tile)
 {
     // The window fills the canvas its unsized glyph fills: the mono overflow
@@ -484,6 +512,19 @@ Rendering::GlyphBackend VulkanGlyphAtlas::glyphBackend()
     backend.clusterGlyph = [](void* context, std::span<const std::uint32_t> codePoints, Rendering::FontFace face, std::uint32_t weight, std::uint32_t phase) {
         return static_cast<VulkanGlyphAtlas*>(context)->clusterGlyph(codePoints.data(), static_cast<int>(codePoints.size()), face, weight, phase);
     };
+    // A stack of marks past its slot draws through windows of this sheet
+    // (Rendering/ClusterWindows.h), where the rasterizer knows where its slot
+    // puts the baseline; the Unifont fallback keeps its cells.
+    if (m_rasterizer.drawsClusterWindows()) {
+        backend.measureClusterInk = [](void* context, std::span<const std::uint32_t> codePoints, Rendering::FontFace face, std::uint32_t weight,
+                                        std::uint32_t variant, int reachInPixels) {
+            return static_cast<VulkanGlyphAtlas*>(context)->measureClusterInk(codePoints, face, weight, variant, reachInPixels);
+        };
+        backend.rasteriseClusterWindow = [](void* context, std::span<const std::uint32_t> codePoints, Rendering::FontFace face, std::uint32_t weight,
+                                             std::uint32_t variant, int rowOffsetInPixels, int slot) {
+            return static_cast<VulkanGlyphAtlas*>(context)->rasteriseClusterWindow(codePoints, face, weight, variant, rowOffsetInPixels, slot);
+        };
+    }
     // Ligature shaping, present only over a sheet that reports itself usable —
     // it needs a face with a shaper, and a sheet whose slot did not fit reports
     // false. Both conditions, and for a sharper reason than the colour pair
