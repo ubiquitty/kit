@@ -431,7 +431,7 @@ final class RichTextFaceMeasurementCache: @unchecked Sendable {
     /// The process-wide cache.
     static let shared = RichTextFaceMeasurementCache()
 
-    private static let magic: UInt32 = 0x5542_5146  // "UBQF"
+    private static let magic: UInt32 = 0x5542_5146 // "UBQF"
     private static let formatVersion: UInt32 = 1
 
     /// How many measurement files the directory keeps: a few font sets' worth
@@ -640,13 +640,19 @@ final class RichTextFaceMeasurementCache: @unchecked Sendable {
         else {
             return nil
         }
-        var advances = [UInt16]()
+        var advances: [UInt16] = []
         advances.reserveCapacity(count)
         for _ in 0..<count {
             guard let advance = next16() else { return nil }
             advances.append(advance)
         }
-        return RichTextFaceMeasurement(ascent: ascent, descent: descent, lineHeight: lineHeight, averageAdvance: average, advances: advances)
+        return RichTextFaceMeasurement(
+            ascent: ascent,
+            descent: descent,
+            lineHeight: lineHeight,
+            averageAdvance: average,
+            advances: advances
+        )
     }
 
     private func write(_ measurement: RichTextFaceMeasurement, key: String) {
