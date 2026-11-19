@@ -158,6 +158,19 @@ public:
     ///
     /// - Returns: The native accent, or transparent for palette fallback.
     [[nodiscard]] const Rendering::Vec4& frameLinkAccentColor() const;
+    /// Supplies the desktop's selection colour for the pane about to draw,
+    /// which a `Native` selection washes over its cells; transparent leaves
+    /// the selection to Core's tint.
+    ///
+    /// Per pane, as the hovered link is: the colour follows whether that pane
+    /// holds the keyboard, and its frames and captures carry it.
+    ///
+    /// - Parameter color: The colour in straight-alpha sRGB.
+    void setFrameSelectionColor(Rendering::Vec4 color);
+    /// Returns the selection colour the current pane's frames carry.
+    ///
+    /// - Returns: The desktop's colour, or transparent for Core's tint.
+    [[nodiscard]] const Rendering::Vec4& frameSelectionColor() const;
     /// Applies shared link styling and absolute-to-visible hover conversion.
     ///
     /// - Parameters:

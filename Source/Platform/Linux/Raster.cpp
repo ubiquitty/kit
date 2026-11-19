@@ -100,6 +100,7 @@ struct RasterContext::State {
     float lastFocusedMatchAgeSeconds = -1.0f;
     Rendering::FrameHoverLink frameHoverLink;
     Rendering::Vec4 frameLinkAccentColor { 0, 0, 0, 0 };
+    Rendering::Vec4 frameSelectionColor { 0, 0, 0, 0 };
 };
 
 RasterContext::RasterContext()
@@ -194,6 +195,16 @@ const Rendering::Vec4& RasterContext::frameLinkAccentColor() const
     return m_state->frameLinkAccentColor;
 }
 
+void RasterContext::setFrameSelectionColor(Rendering::Vec4 color)
+{
+    m_state->frameSelectionColor = color;
+}
+
+const Rendering::Vec4& RasterContext::frameSelectionColor() const
+{
+    return m_state->frameSelectionColor;
+}
+
 void RasterContext::applyFrameLinkOptions(Rendering::TerminalSnapshotOptions& options, const Ubiquitty::Terminal& terminal, int viewOffset) const
 {
     applyLinkConfiguration(options, renderConfiguration(), m_state->frameLinkAccentColor);
@@ -255,6 +266,7 @@ Runtime::SyncFrameCaptureGeometry RasterContext::frameCaptureGeometry(FloatPoint
     geometry.style.shouldEnhanceTextContrast = configuration.shouldEnhanceTextContrast;
     geometry.style.unifontScale = embeddedBitmapScale();
     Preferences::Effective::applyRuleSettings(geometry.style, configuration, deviceScale());
+    geometry.style.platformSelectionColor = m_state->frameSelectionColor;
     geometry.cellHeightPoints = static_cast<double>(cellHeight()) / deviceScale();
     geometry.lineSpacingPoints = configuration.lineSpacingPoints;
     geometry.shouldDrawPasswordLock = true;
@@ -680,6 +692,7 @@ bool RasterContext::rasterizeTerm(Ubiquitty::Terminal* term, std::vector<uint8_t
     options.style.shouldEnhanceTextContrast = configuration.shouldEnhanceTextContrast;
     options.style.unifontScale = windowRenderSettings.embeddedBitmapScale;
     Preferences::Effective::applyRuleSettings(options.style, configuration, windowRenderSettings.deviceScale);
+    options.style.platformSelectionColor = m_state->frameSelectionColor;
     Preferences::Effective::applyCursorSettings(options, configuration);
     options.toolkitCaret = toolkitCaret();
     Preferences::Effective::applyTekSettings(options, configuration);
