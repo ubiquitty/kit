@@ -308,12 +308,44 @@ package struct RichTextFaces {
     }
 
     /// One face's metrics and the advances of the tabled range, in 1/2048 em.
+    ///
+    /// The measurement is the face's alone, made at the table's em, so it is
+    /// kept across launches (``RichTextFaceMeasurementCache``): a code point a
+    /// face lacks is measured in the face CoreText falls back to, and the first
+    /// such lookup against a registered face builds the character set of every
+    /// registered font, which is most of a launch's measuring.
     private static func measure(
         _ face: CTFont,
         as familyClass: Ubiquitty.RichText.FamilyClass,
         styles: UInt8,
         into builder: inout Ubiquitty.RichText.TypographyFactsBuilder
     ) {
+        let measurement = RichTextFaceMeasurementCache.shared.measurement(of: face) { measureFace(face) }
+        guard
+            builder.addFace(
+                familyClass,
+                styles,
+                measurement.ascent,
+                measurement.descent,
+                measurement.lineHeight,
+                measurement.averageAdvance
+            )
+        else {
+            return
+        }
+        let first = Ubiquitty.RichText.firstTabledCodePoint
+        for (index, advance) in measurement.advances.enumerated() {
+            builder.setAdvance(first + UInt32(index), advance)
+        }
+    }
+
+    /// Measures one face at the table's em: its vertical metrics, and the
+    /// advance of every tabled code point, from the face CoreText falls back
+    /// to where the face lacks one.
+    ///
+    /// - Parameter face: The face, at the table's em.
+    /// - Returns: The measurement.
+    private static func measureFace(_ face: CTFont) -> RichTextFaceMeasurement {
         let ascent = CTFontGetAscent(face)
         let descent = CTFontGetDescent(face)
         let lineHeight = ascent + descent + CTFontGetLeading(face)
@@ -347,12 +379,13 @@ package struct RichTextFaces {
         // The printable ASCII advances' mean, which an estimate takes.
         let ascii = advances[0..<95]
         let average = UInt16(ascii.reduce(0) { $0 + Int($1) } / ascii.count)
-        guard builder.addFace(familyClass, styles, clamped(ascent), clamped(descent), clamped(lineHeight), average) else {
-            return
-        }
-        for index in 0..<advances.count {
-            builder.setAdvance(first + UInt32(index), advances[index])
-        }
+        return RichTextFaceMeasurement(
+            ascent: clamped(ascent),
+            descent: clamped(descent),
+            lineHeight: clamped(lineHeight),
+            averageAdvance: average,
+            advances: advances
+        )
     }
 
     private static func clamped(_ value: CGFloat) -> UInt16 {
@@ -361,5 +394,285 @@ package struct RichTextFaces {
 
     private static func inSixtyFourths(_ points: Double) -> UInt16 {
         UInt16(max(1, min(Double(Ubiquitty.RichText.maxCellSize), (points * 64).rounded())))
+    }
+}
+
+/// One class face's measurement at the typography table's em, in 1/2048 em.
+struct RichTextFaceMeasurement: Equatable {
+    /// The face's ascent.
+    var ascent: UInt16
+    /// The face's descent.
+    var descent: UInt16
+    /// The face's line height: ascent, descent and leading.
+    var lineHeight: UInt16
+    /// The printable ASCII advances' mean, which an estimate takes.
+    var averageAdvance: UInt16
+    /// The advance of every tabled code point, from the first on.
+    var advances: [UInt16]
+}
+
+/// Class-face measurements kept across launches, in the user's cache directory.
+///
+/// A measurement depends on the face and on the faces CoreText falls back to
+/// for the code points it lacks, so its key names everything those depend on:
+/// the face's PostScript name, version, variation, matrix and size, its file's
+/// path, size and date, every installed and registered font file's path, size
+/// and date, the operating system's build, the preferred languages, and the
+/// table's range. A font installed, updated or removed changes the key, so the
+/// faces are measured again: an updated face by its own file, and every face
+/// by the installed set, since a new font may be the one a missing code point
+/// now falls back to. The installed set is read once a process and again when
+/// CoreText reports the registered fonts changed. A launch whose faces were
+/// measured before reads them instead of measuring, which a snapshot run, one
+/// process a case, would otherwise pay for every case. The file holds its own
+/// key, so a hash that collides reads as a miss, and the directory keeps the
+/// newest measurements only, so the ones a font change retired go.
+final class RichTextFaceMeasurementCache: @unchecked Sendable {
+    /// The process-wide cache.
+    static let shared = RichTextFaceMeasurementCache()
+
+    private static let magic: UInt32 = 0x5542_5146  // "UBQF"
+    private static let formatVersion: UInt32 = 1
+
+    /// How many measurement files the directory keeps: a few font sets' worth
+    /// of twelve class faces each.
+    private static let keptFiles = 96
+
+    private let lock = NSLock()
+    private var memory: [String: RichTextFaceMeasurement] = [:]
+    private var installedFonts: String?
+    private let directory: URL?
+    private var fontsChangedObserver: NSObjectProtocol?
+
+    /// Creates a cache over a directory, or the user's cache directory.
+    ///
+    /// - Parameter directory: Where measurements are kept; nil keeps them in
+    ///   memory only.
+    init(directory: URL? = RichTextFaceMeasurementCache.defaultDirectory()) {
+        self.directory = directory
+        fontsChangedObserver = NotificationCenter.default.addObserver(
+            forName: Notification.Name(kCTFontManagerRegisteredFontsChangedNotification as String),
+            object: nil,
+            queue: nil
+        ) { [weak self] _ in
+            self?.fontsChanged()
+        }
+    }
+
+    deinit {
+        if let fontsChangedObserver {
+            NotificationCenter.default.removeObserver(fontsChangedObserver)
+        }
+    }
+
+    /// Forgets the installed set and the measurements made under it, so the
+    /// next key reads the fonts afresh.
+    private func fontsChanged() {
+        lock.lock()
+        installedFonts = nil
+        memory.removeAll()
+        lock.unlock()
+    }
+
+    /// The directory measurements are kept in by default.
+    ///
+    /// - Returns: The application's cache directory's measurement folder, or
+    ///   nil where there is none.
+    static func defaultDirectory() -> URL? {
+        guard let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first else {
+            return nil
+        }
+        return caches.appendingPathComponent(Bundle.main.bundleIdentifier ?? "Ubiquitty", isDirectory: true)
+            .appendingPathComponent("RichTextFaceMeasurements", isDirectory: true)
+    }
+
+    /// Returns a face's measurement, measuring and keeping it on a miss.
+    ///
+    /// - Parameters:
+    ///   - face: The face, at the table's em.
+    ///   - measure: Measures the face when no measurement is kept.
+    /// - Returns: The measurement.
+    func measurement(of face: CTFont, measure: () -> RichTextFaceMeasurement) -> RichTextFaceMeasurement {
+        let key = Self.key(of: face, installedFonts: installedFontsIdentity())
+        lock.lock()
+        if let kept = memory[key] {
+            lock.unlock()
+            return kept
+        }
+        lock.unlock()
+        if let stored = read(key) {
+            lock.lock()
+            memory[key] = stored
+            lock.unlock()
+            return stored
+        }
+        let measured = measure()
+        lock.lock()
+        memory[key] = measured
+        lock.unlock()
+        write(measured, key: key)
+        return measured
+    }
+
+    /// The installed and registered fonts' identity, read once until CoreText
+    /// reports a change.
+    private func installedFontsIdentity() -> String {
+        lock.lock()
+        if let installedFonts {
+            lock.unlock()
+            return installedFonts
+        }
+        lock.unlock()
+        let identity = Self.readInstalledFontsIdentity()
+        lock.lock()
+        installedFonts = identity
+        lock.unlock()
+        return identity
+    }
+
+    /// Every installed font file's path, size and date, as a count and a hash.
+    ///
+    /// On macOS every font the process can use, the ones it registered among
+    /// them. On iOS the fonts registered for the process and the ones a font
+    /// app installed; the system's own change only with the build, which the
+    /// key names.
+    private static func readInstalledFontsIdentity() -> String {
+        #if os(macOS)
+        let urls = (CTFontManagerCopyAvailableFontURLs() as? [URL]) ?? []
+        #else
+        var urls: [URL] = []
+        for scope in [CTFontManagerScope.process, CTFontManagerScope.persistent] {
+            let descriptors = (CTFontManagerCopyRegisteredFontDescriptors(scope, true) as? [CTFontDescriptor]) ?? []
+            urls += descriptors.compactMap { CTFontDescriptorCopyAttribute($0, kCTFontURLAttribute) as? URL }
+        }
+        #endif
+        let files = Set(urls.map(fileIdentity)).sorted()
+        return "\(files.count):" + String(fnv1a(files.joined(separator: "\n")), radix: 16)
+    }
+
+    /// The key a face's measurement is kept under.
+    ///
+    /// - Parameters:
+    ///   - face: The face.
+    ///   - installedFonts: The installed and registered fonts' identity.
+    /// - Returns: The key.
+    static func key(of face: CTFont, installedFonts: String) -> String {
+        var parts = ["rich-text-face-\(formatVersion)"]
+        parts.append("range=\(Ubiquitty.RichText.firstTabledCodePoint)-\(Ubiquitty.RichText.lastTabledCodePoint)")
+        parts.append("name=\(CTFontCopyPostScriptName(face) as String)")
+        parts.append("version=\((CTFontCopyName(face, kCTFontVersionNameKey) as String?) ?? "")")
+        if let variation = CTFontCopyVariation(face) as? [NSNumber: NSNumber] {
+            parts.append("variation=" + variation.map { "\($0.key)=\($0.value)" }.sorted().joined(separator: ","))
+        }
+        let matrix = CTFontGetMatrix(face)
+        parts.append("size=\(CTFontGetSize(face)) matrix=\(matrix.a),\(matrix.b),\(matrix.c),\(matrix.d)")
+        if let url = CTFontCopyAttribute(face, kCTFontURLAttribute) as? URL {
+            parts.append("file=" + fileIdentity(url))
+        }
+        parts.append("installed=" + installedFonts)
+        parts.append("os=" + ProcessInfo.processInfo.operatingSystemVersionString)
+        parts.append("languages=" + Locale.preferredLanguages.joined(separator: ","))
+        return parts.joined(separator: "\n")
+    }
+
+    /// A file's path, size and modification date.
+    private static func fileIdentity(_ url: URL) -> String {
+        let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+        let size = values?.fileSize ?? -1
+        let date = values?.contentModificationDate?.timeIntervalSince1970 ?? 0
+        return "\(url.path)|\(size)|\(date)"
+    }
+
+    /// FNV-1a, 64-bit: a name for a key, not a check of it.
+    private static func fnv1a(_ text: String) -> UInt64 {
+        var hash: UInt64 = 0xcbf2_9ce4_8422_2325
+        for byte in text.utf8 {
+            hash ^= UInt64(byte)
+            hash = hash &* 0x0000_0100_0000_01b3
+        }
+        return hash
+    }
+
+    /// The file a key's measurement is kept in; the file holds its key.
+    private func fileURL(for key: String) -> URL? {
+        directory?.appendingPathComponent(String(Self.fnv1a(key), radix: 16) + ".measurement")
+    }
+
+    /// Removes all but the newest measurement files.
+    private func prune(_ directory: URL) {
+        let keys: Set<URLResourceKey> = [.contentModificationDateKey]
+        guard let files = try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: Array(keys)),
+            files.count > Self.keptFiles
+        else {
+            return
+        }
+        let dated = files.map { ($0, (try? $0.resourceValues(forKeys: keys).contentModificationDate) ?? .distantPast) }
+        for (file, _) in dated.sorted(by: { $0.1 > $1.1 }).dropFirst(Self.keptFiles) {
+            try? FileManager.default.removeItem(at: file)
+        }
+    }
+
+    private func read(_ key: String) -> RichTextFaceMeasurement? {
+        guard let url = fileURL(for: key), let data = try? Data(contentsOf: url) else {
+            return nil
+        }
+        var offset = 0
+        func next32() -> UInt32? {
+            guard offset + 4 <= data.count else { return nil }
+            defer { offset += 4 }
+            return data[offset..<offset + 4].reduce(UInt32(0)) { ($0 >> 8) | (UInt32($1) << 24) }
+        }
+        func next16() -> UInt16? {
+            guard offset + 2 <= data.count else { return nil }
+            defer { offset += 2 }
+            return UInt16(data[offset]) | (UInt16(data[offset + 1]) << 8)
+        }
+        guard next32() == Self.magic, next32() == Self.formatVersion, let keyLength = next32().map(Int.init),
+            offset + keyLength <= data.count,
+            String(decoding: data[offset..<offset + keyLength], as: UTF8.self) == key
+        else {
+            return nil
+        }
+        offset += keyLength
+        guard let count = next32().map(Int.init),
+            let ascent = next16(), let descent = next16(), let lineHeight = next16(), let average = next16(),
+            count == Int(Ubiquitty.RichText.lastTabledCodePoint - Ubiquitty.RichText.firstTabledCodePoint + 1)
+        else {
+            return nil
+        }
+        var advances = [UInt16]()
+        advances.reserveCapacity(count)
+        for _ in 0..<count {
+            guard let advance = next16() else { return nil }
+            advances.append(advance)
+        }
+        return RichTextFaceMeasurement(ascent: ascent, descent: descent, lineHeight: lineHeight, averageAdvance: average, advances: advances)
+    }
+
+    private func write(_ measurement: RichTextFaceMeasurement, key: String) {
+        guard let url = fileURL(for: key), let directory else {
+            return
+        }
+        var data = Data()
+        func append32(_ value: UInt32) { withUnsafeBytes(of: value.littleEndian) { data.append(contentsOf: $0) } }
+        func append16(_ value: UInt16) { withUnsafeBytes(of: value.littleEndian) { data.append(contentsOf: $0) } }
+        let keyBytes = Data(key.utf8)
+        append32(Self.magic)
+        append32(Self.formatVersion)
+        append32(UInt32(keyBytes.count))
+        data.append(keyBytes)
+        append32(UInt32(measurement.advances.count))
+        append16(measurement.ascent)
+        append16(measurement.descent)
+        append16(measurement.lineHeight)
+        append16(measurement.averageAdvance)
+        for advance in measurement.advances {
+            append16(advance)
+        }
+        // A cache that cannot be written is a cache that measures again: the
+        // table is right either way.
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try? data.write(to: url, options: .atomic)
+        prune(directory)
     }
 }
