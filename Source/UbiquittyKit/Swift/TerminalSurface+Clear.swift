@@ -89,6 +89,27 @@ extension TerminalSurface {
     package func runClearCommand(_ command: Ubiquitty.Screen.ClearCommand) {
         let hadSelection = hasSelection
         let returnsViewToTail = selectionModel.withState { drive.runClearCommand(command, droppingSelection: &$0) }
+        finishScreenCommand(hadSelection: hadSelection, returnsViewToTail: returnsViewToTail)
+    }
+
+    /// Runs a reset command against this surface's terminal: Soft Reset frees
+    /// stuck modes and leaves the screen, Hard Reset also blanks the screen and
+    /// keeps what was above the prompt as history. A pane attached to a host
+    /// asks the host.
+    ///
+    /// - Parameter command: Which reset the user asked for.
+    package func runResetCommand(_ command: Ubiquitty.Screen.ResetCommand) {
+        let hadSelection = hasSelection
+        let returnsViewToTail = selectionModel.withState { drive.runResetCommand(command, droppingSelection: &$0) }
+        finishScreenCommand(hadSelection: hadSelection, returnsViewToTail: returnsViewToTail)
+    }
+
+    /// What this view owes after a clear or a reset Core performed.
+    ///
+    /// - Parameters:
+    ///   - hadSelection: Whether a selection stood before the command.
+    ///   - returnsViewToTail: Whether Core asked the view back to the live tail.
+    private func finishScreenCommand(hadSelection: Bool, returnsViewToTail: Bool) {
         if returnsViewToTail {
             setViewOffset(absolute: 0)
         }

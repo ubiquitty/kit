@@ -2533,10 +2533,21 @@ final class ClearConsumer {
             // then overwrites rather than pushing the row along.
             surface.feed(Data("\u{1B}[H\u{1B}[2Jabc\r\u{1B}[4hY".utf8))
             expect(waitUntil(seconds: 10, { rows(surface).first == "Yabc" }), "menu: insert mode inserts (shows \(rows(surface)))")
-            pick("Reset Terminal")
+            pick("Soft Reset")
             surface.feed(Data("Z".utf8))
             expect(waitUntil(seconds: 10, { rows(surface).first != "Yabc" }), "menu: the next character lands")
-            expect(rows(surface).first == "YZbc", "menu: Reset Terminal turns insert mode off (shows \(rows(surface)))")
+            expect(rows(surface).first == "YZbc", "menu: Soft Reset turns insert mode off (shows \(rows(surface)))")
+
+            // Hard Reset leaves a blank screen with the cursor home, and the
+            // rows above it go to the history rather than away.
+            surface.feed(Data("\r\nprompt$ \u{1B}[4h".utf8))
+            expect(waitUntil(seconds: 10, { rows(surface)[1] == "prompt$" }), "menu: the prompt is drawn (shows \(rows(surface)))")
+            pick("Hard Reset")
+            expect(waitUntil(seconds: 10, { rows(surface) == blank(24) }), "menu: Hard Reset blanks the screen (shows \(rows(surface)))")
+            surface.feed(Data("ab\rX".utf8))
+            expect(waitUntil(seconds: 10, { rows(surface).first == "Xb" }), "menu: Hard Reset starts at home with insert mode off (shows \(rows(surface)))")
+            expect(scroll(surface, "scroll_to_top", until: { rows(surface).contains("YZbc") }), "menu: Hard Reset keeps the rows above the prompt as history")
+            surface.performKeyAction(named: "scroll_to_bottom")
         } else {
             expect(false, "menu: a surface is made")
         }

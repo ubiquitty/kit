@@ -3888,9 +3888,25 @@ public final class RuntimeDrive {
         return ResolvedBinding(kind: session.resolvedBindingKind(), bytes: [], name: "")
     }
 
-    /// Performs a local soft reset — the manual DECSTR.
+    /// Performs a soft reset — the manual DECSTR — on this session's terminal,
+    /// or asks the host for one when the session is attached to a host.
     public func softResetTerminal() {
         session.softResetTerminal()
+    }
+
+    /// Runs a reset command against this session's terminal, as the Edit
+    /// menu's Soft Reset and Hard Reset do. A session attached to a host asks
+    /// the host, whose next frame brings the result.
+    ///
+    /// - Parameters:
+    ///   - command: Which reset the user asked for.
+    ///   - selection: The view's selection, dropped when the rows it names move.
+    /// - Returns: Whether the viewport must return to the live tail.
+    public func runResetCommand(
+        _ command: Ubiquitty.Screen.ResetCommand,
+        droppingSelection selection: inout Ubiquitty.SelectionState
+    ) -> Bool {
+        session.runResetCommand(command, &selection)
     }
 
     /// Whether the shell's marks yield a last-command-output region.

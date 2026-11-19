@@ -17,10 +17,15 @@ import AppKit
 #endif
 
 extension TerminalSurface {
-    /// Performs a local soft reset.
+    /// Performs a soft reset: stuck modes go and the screen stays.
     package func softResetTerminal() {
-        drive.softResetTerminal()
-        needsDisplay = true
+        runResetCommand(.Soft)
+    }
+
+    /// Performs a hard reset: a soft reset from a blank screen, the rows above
+    /// the prompt kept as history, and the program asked to draw itself again.
+    package func hardResetTerminal() {
+        runResetCommand(.Hard)
     }
 
     /// Whether the shell's marks yield a last-command-output region.

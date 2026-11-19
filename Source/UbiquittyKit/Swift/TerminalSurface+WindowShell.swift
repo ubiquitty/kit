@@ -68,11 +68,18 @@ public protocol TerminalWindowCommands: AnyObject {
     @objc
     func clearScrollback(_ sender: Any?)
 
-    /// Soft-resets the focused terminal.
+    /// Soft-resets the focused terminal: stuck modes go and the screen stays.
     ///
     /// - Parameter sender: The control that sent the command.
     @objc
     func resetTerminal(_ sender: Any?)
+
+    /// Hard-resets the focused terminal: a soft reset from a blank screen, the
+    /// rows above the prompt kept as history.
+    ///
+    /// - Parameter sender: The control that sent the command.
+    @objc
+    func hardResetTerminal(_ sender: Any?)
 
     /// Summons the command palette over the window, or dismisses it.
     ///

@@ -559,12 +559,15 @@ attached to a host, `accessibilityValue()` reads the screen the command left as
 soon as the call returns, with or without a selection and wherever the view
 was.
 
-The surface's own context menu offers Clear Scrollback and Reset Terminal, and
-the surface answers both for itself, acting on the pane the menu opened over;
-a host's responder chain needs nothing for them. On a pane attached to a host,
-Clear Scrollback goes to the host as `clear(.scrollback)` does, and Reset
-Terminal is disabled: the program's terminal is the host's, and a reset of the
-pane's copy would leave the host's modes standing while the pane drew others.
+The surface's own context menu offers Clear Scrollback, Soft Reset and Hard
+Reset, and the surface answers all three for itself, acting on the pane the
+menu opened over; a host's responder chain needs nothing for them. Soft Reset
+frees modes a program left stuck and leaves the screen; Hard Reset does the
+same from a blank screen with the cursor home, keeping the rows above the
+prompt as history, and sends the program Ctrl-L to draw itself again. On a
+pane attached to a host, all three go to the host, as `clear(.scrollback)`
+does: the program's terminal is the host's, so the host runs the command and
+the pane draws what the host sends.
 
 A pane attached to a host sends the command to the host, which runs it on its
 own copy and sends Ctrl-L to its program itself; the result arrives with the

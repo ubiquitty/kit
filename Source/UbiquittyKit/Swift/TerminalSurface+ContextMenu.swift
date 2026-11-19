@@ -99,8 +99,14 @@ extension TerminalSurface {
         )
         addItem(
             to: menu,
-            title: "Reset Terminal",
-            action: #selector(resetTerminalUnderMouse(_:)),
+            title: "Soft Reset",
+            action: #selector(softResetUnderMouse(_:)),
+            target: self
+        )
+        addItem(
+            to: menu,
+            title: "Hard Reset",
+            action: #selector(hardResetUnderMouse(_:)),
             target: self
         )
         return menu
@@ -118,8 +124,16 @@ extension TerminalSurface {
     ///
     /// - Parameter sender: The item.
     @objc
-    package func resetTerminalUnderMouse(_ sender: NSMenuItem) {
+    package func softResetUnderMouse(_ sender: NSMenuItem) {
         softResetTerminal()
+    }
+
+    /// Hard-resets the terminal of this surface, the one the menu opened over.
+    ///
+    /// - Parameter sender: The item.
+    @objc
+    package func hardResetUnderMouse(_ sender: NSMenuItem) {
+        hardResetTerminal()
     }
 
     /// Copies the resolved link target captured when the menu was built.
@@ -164,10 +178,6 @@ extension TerminalSurface {
             // A shell with no integration marks nothing, which is the common
             // case, so these grey out rather than beeping at every pick.
             return drive.hasCommand(underAbsoluteRow: item.tag)
-        case #selector(resetTerminalUnderMouse(_:)):
-            // A pane attached to a host shows the host's terminal, which Core's
-            // reset leaves as it is.
-            return !drive.isRemoteAttached
         default:
             return true
         }
