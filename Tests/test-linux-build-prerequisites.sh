@@ -24,9 +24,10 @@ trap 'rm -rf "$FIXTURE"' EXIT
 
 # The check runs with the fixture as its whole PATH and the compiler CXX names,
 # so nothing of the host's toolchain reaches it. What it printed lands in a
-# file named after the case, which a failing assertion quotes back.
+# file named after the case, which a failing assertion quotes back; arguments
+# after the case name go to the check.
 runCheck() {
-    PATH="$FIXTURE" CXX="$1" "$BASH_BINARY" "$CHECK" >"$FIXTURE/$2.out" 2>&1
+    PATH="$FIXTURE" CXX="$1" "$BASH_BINARY" "$CHECK" "${@:3}" >"$FIXTURE/$2.out" 2>&1
 }
 fail() {
     echo "FAIL: $1" >&2
@@ -59,7 +60,18 @@ expectPrinted empty "Ubuntu 26.04 and newer: sudo apt install" "the check named 
 for tool in cmake "$compiler" 'compiler with spaces'; do
     installStub "$tool" 'exit 0'
 done
-installStub pkg-config 'case "$1" in --exists) exit 0 ;; --atleast-version=*) [ -z "${FIXTURE_OLD_GTK:-}" ] ;; --modversion) echo 4.14.2 ;; *) exit 1 ;; esac'
+# Every module is present at its floor unless a case asks for an older GTK, an
+# older libadwaita, or none.
+installStub pkg-config 'case "$1:$2" in
+    --exists:libadwaita-1) [ -z "${FIXTURE_NO_ADWAITA:-}" ] ;;
+    --exists:*) exit 0 ;;
+    --atleast-version=*:gtk4) [ -z "${FIXTURE_OLD_GTK:-}" ] ;;
+    --atleast-version=*:libadwaita-1) [ -z "${FIXTURE_OLD_ADWAITA:-}" ] ;;
+    --atleast-version=*) exit 0 ;;
+    --modversion:gtk4) echo 4.14.2 ;;
+    --modversion:libadwaita-1) echo 1.5.3 ;;
+    *) exit 1 ;;
+esac'
 
 # glslc compiles the renderer's shaders, and its absence is named unless the
 # build asked for a binary that renders on the CPU only.
@@ -87,6 +99,22 @@ if FIXTURE_OLD_GTK=1 runCheck "$compiler" old-gtk; then
     fail "GTK 4.14 passed the prerequisite check" old-gtk
 fi
 expectPrinted old-gtk "missing prerequisites: GTK 4.16 or newer (this is 4.14.2)" "the check did not name the GTK floor"
+# The app's frontend links libadwaita 1.6 or newer; the kit's own libraries do
+# not, and --library does not ask for it.
+if FIXTURE_NO_ADWAITA=1 runCheck "$compiler" adwaita-missing; then
+    fail "a PATH without libadwaita passed the prerequisite check"
+fi
+expectPrinted adwaita-missing "missing prerequisites: libadwaita development files" "the check did not name the missing libadwaita"
+expectPrinted adwaita-missing "libadwaita-1-dev" "the check named no package that provides libadwaita"
+if FIXTURE_OLD_ADWAITA=1 runCheck "$compiler" old-adwaita; then
+    fail "libadwaita 1.5 passed the prerequisite check" old-adwaita
+fi
+expectPrinted old-adwaita "missing prerequisites: libadwaita 1.6 or newer (this is 1.5.3)" "the check did not name the libadwaita floor"
+FIXTURE_NO_ADWAITA=1 runCheck "$compiler" library-without-adwaita --library \
+    || fail "--library refused a PATH without libadwaita" library-without-adwaita
+if runCheck "$compiler" unknown-argument --unknown; then
+    fail "the check accepted an unknown argument"
+fi
 runCheck "$FIXTURE/compiler with spaces" spaced || fail "the check refused an existing absolute compiler path containing spaces" spaced
 if runCheck "$FIXTURE/missing compiler" absolute-missing; then
     fail "a missing absolute compiler passed the prerequisite check"

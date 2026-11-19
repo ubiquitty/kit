@@ -25,7 +25,7 @@ CORE="$UBQ_CORE_ROOT"
 
 # Names the development package a machine lacks, where cmake would name only
 # the module it could not find.
-"$ROOT/Scripts/check-linux-build-prerequisites.sh"
+"$ROOT/Scripts/check-linux-build-prerequisites.sh" --library
 
 test=0
 if [ "${1:-}" = --test ]; then

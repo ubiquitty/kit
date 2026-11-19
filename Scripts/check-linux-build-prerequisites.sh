@@ -5,12 +5,25 @@
 # check-linux-build-prerequisites.sh — refuse a Linux frontend build that would
 # stop at configure time, and say what to install instead.
 #
+#   Scripts/check-linux-build-prerequisites.sh             the Linux app
+#   Scripts/check-linux-build-prerequisites.sh --library   the kit's own libraries
+#
+# The app's frontend links libadwaita 1.6 or newer; the kit's libraries do not,
+# so a build of the kit alone does not ask for it.
+#
 # Named one at a time rather than left to "cmake failed": the GTK 4 and Vulkan
 # development files are what a desktop machine usually lacks, and CMake's
 # report of a missing pkg-config module names the module, not the package a
 # distribution ships it in.
 
 set -uo pipefail
+
+application=true
+case "${1:-}" in
+    "") ;;
+    --library) application=false ;;
+    *) echo "check-linux-build-prerequisites: unknown argument: $1" >&2; exit 2 ;;
+esac
 
 compiler="${CXX:-c++}"
 absent=()
@@ -28,6 +41,13 @@ if presentOnPath pkg-config; then
         absent+=("gtk4 development files")
     elif ! pkg-config --atleast-version=4.16 gtk4; then
         absent+=("GTK 4.16 or newer (this is $(pkg-config --modversion gtk4))")
+    fi
+    if [ "$application" = true ]; then
+        if ! pkg-config --exists libadwaita-1; then
+            absent+=("libadwaita development files")
+        elif ! pkg-config --atleast-version=1.6 libadwaita-1; then
+            absent+=("libadwaita 1.6 or newer (this is $(pkg-config --modversion libadwaita-1))")
+        fi
     fi
     pkg-config --exists vulkan || absent+=("Vulkan development files")
 fi
@@ -55,10 +75,10 @@ shopt -u nocasematch
 {
     echo "build-linux-gtk: missing prerequisites: ${absent[*]}"
     echo "Install them with one of:"
-    echo "  Debian 13, Ubuntu 26.04 and newer: sudo apt install cmake ninja-build g++ pkg-config libgtk-4-dev libvulkan-dev glslc"
+    echo "  Debian 13, Ubuntu 26.04 and newer: sudo apt install cmake ninja-build g++ pkg-config libgtk-4-dev libadwaita-1-dev libvulkan-dev glslc"
     echo "    (Ubuntu 24.04's GTK is 4.14, below the 4.16 floor)"
-    echo "  Fedora: sudo dnf install cmake ninja-build gcc-c++ pkgconf-pkg-config gtk4-devel vulkan-loader-devel glslc"
-    echo "  Arch: sudo pacman -S cmake ninja gcc pkgconf gtk4 vulkan-headers vulkan-icd-loader shaderc"
+    echo "  Fedora: sudo dnf install cmake ninja-build gcc-c++ pkgconf-pkg-config gtk4-devel libadwaita-devel vulkan-loader-devel glslc"
+    echo "  Arch: sudo pacman -S cmake ninja gcc pkgconf gtk4 libadwaita vulkan-headers vulkan-icd-loader shaderc"
     echo "Without glslc, UBIQUITTY_LINUX_GPU_SHADERS=OFF builds a binary that renders on the CPU only."
 } >&2
 exit 1
