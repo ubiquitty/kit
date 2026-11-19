@@ -466,14 +466,20 @@ extension FontGeometry {
 }
 
 extension FontGeometry {
-    /// Returns the weight the face's own underscore draws at, as the glyph
-    /// raster draws it, read by Core's rule (measuredUnderscoreWeight) as every
-    /// engine's underscore is.
+    /// Returns the weight the face's own underscore draws at, read by Core's
+    /// rule (measuredUnderscoreWeight) as every engine's underscore is.
     ///
-    /// Drawn into the same kind of context the atlas draws glyphs into, a
-    /// linear-gray alpha bitmap with antialiasing on and font smoothing left to
-    /// the user's setting, so the weight is the one the face's letters are seen
-    /// at, stem darkening included, rather than the outline's.
+    /// Drawn into the kind of context the atlas draws glyphs into, a
+    /// linear-gray alpha bitmap with antialiasing on, but with font smoothing
+    /// off: the outline's own coverage, which is what iOS (which never smooths)
+    /// and FreeType measure, so one face gets one rule weight on each of them.
+    /// Smoothing's stem darkening added about 0.6 of a pixel to the coverage
+    /// at text sizes, and none of it reaches the screen as weight: the glyph
+    /// pass mixes coverage the way CoreGraphics mixes text, in encoded space,
+    /// so a light underscore on a dark ground shows close to its outline's
+    /// weight. The rule, drawn at the darkened coverage, read a third heavier
+    /// than the underscore beside it (2.32 against 1.78 pixels for SF Mono at
+    /// 12 points on a 2x display).
     ///
     /// - Parameter font: The face, already at its size in device pixels.
     /// - Returns: The weight, or zero for a face with no underscore or one
@@ -507,6 +513,8 @@ extension FontGeometry {
         }
         context.setFillColor(gray: 1.0, alpha: 1.0)
         context.setShouldAntialias(true)
+        context.setAllowsFontSmoothing(false)
+        context.setShouldSmoothFonts(false)
         var position = CGPoint(x: CGFloat(margin) - bounds.minX, y: CGFloat(margin) - bounds.minY)
         CTFontDrawGlyphs(font, &glyph, &position, 1, context)
         guard let image = context.makeImage(), let pixels = image.dataProvider?.data, image.bytesPerRow > 0 else {
