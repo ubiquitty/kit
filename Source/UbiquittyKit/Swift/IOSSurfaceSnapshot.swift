@@ -65,8 +65,8 @@ public enum IOSSurfaceSnapshot {
             return nil
         }
         // The renderer every iOS pane is built with, from Core's fold of the
-        // case's document: the font, the typography, the padding per edge and
-        // the frame style all come with it, so a golden shows what a pane shows.
+        // case's document: the font, the typography and the frame style all
+        // come with it, so a golden shows what a pane shows.
         guard let surface = TerminalSurface(rows: rows, columns: columns),
             let renderer = TerminalSurface.makeRenderer(
                 device: device,
@@ -75,6 +75,36 @@ public enum IOSSurfaceSnapshot {
             ) as? SurfaceRenderer
         else {
             return nil
+        }
+        // The padding is the desktop's, not a pane's. A golden is one picture
+        // for every arm, minted by the macOS arms with the desktop's padding,
+        // and an iOS pane's own 4 pt on every edge framed every iOS case a
+        // different size from the golden it is held to. An edge the case's
+        // document states still wins, as it does on every arm.
+        let padding = Ubiquitty.Preferences.values().pointee.resolvedPadding(Ubiquitty.Preferences.DefaultsTarget.Desktop)
+        var style = renderer.style
+        style.paddingLeftPoints = padding.left
+        style.paddingRightPoints = padding.right
+        style.paddingTopPoints = padding.top
+        style.paddingBottomPoints = padding.bottom
+        renderer.style = style
+        // The backdrop the case's document names, decoded by the Kit component
+        // every arm calls and set as the macOS snapshot sets it
+        // (SurfaceSnapshot.swift), so the two frames sample the same bytes.
+        let configuration = Ubiquitty.Preferences.values().pointee
+        if let backdrop = BackdropImage.load(
+            path: String(Ubiquitty.Preferences.Effective.backgroundImage(configuration)),
+            usesDisplayP3: Ubiquitty.Preferences.Effective.imagePresentationColorSpace(configuration)
+                == Ubiquitty.Image.PresentationColorSpace.DisplayP3,
+            device: device
+        ) {
+            renderer.setBackdrop(
+                texture: backdrop.texture,
+                opacity: Double(Ubiquitty.Preferences.Effective.backgroundImageOpacity(configuration)),
+                mode: Int32(Ubiquitty.Preferences.Effective.backgroundImageMode(configuration).rawValue),
+                pixelWidth: Int32(backdrop.pixelWidth),
+                pixelHeight: Int32(backdrop.pixelHeight)
+            )
         }
         surface.renderer = renderer
         surface.setSurfaceFocused(isFocused)

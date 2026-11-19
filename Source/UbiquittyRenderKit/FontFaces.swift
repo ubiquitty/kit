@@ -375,6 +375,13 @@ package final class FontFaces {
         if let confirmed = confirmed(family, size) {
             return (confirmed, normalisedFontName(family).isEmpty)
         }
+        // SF Pro is the system's own face. iOS carries it as the system font
+        // and under no family name, as does a Mac without Apple's SF Pro
+        // download, so the name answers with the system face rather than the
+        // fixed-pitch stand-in a font the machine lacks gets.
+        if systemFamilyNames.contains(normalisedFontName(family)), let system = CTFontCreateUIFontForLanguage(.system, size, nil) {
+            return (system, false)
+        }
         let substitute = CTFontCreateUIFontForLanguage(.userFixedPitch, size, nil) ?? CTFontCreateWithName(family as CFString, size, nil)
         return (substitute, true)
     }
@@ -426,6 +433,10 @@ package final class FontFaces {
     ///
     /// - Parameter name: The name to fold.
     /// - Returns: The folded name.
+    /// The names the system face answers to where no installed family carries
+    /// them, normalised: SF Pro and its optical sizes.
+    private static let systemFamilyNames: Set<String> = ["sfpro", "sfprotext", "sfprodisplay"]
+
     private static func normalisedFontName(_ name: String) -> String {
         name.lowercased().filter { !$0.isWhitespace && $0 != "-" }
     }
