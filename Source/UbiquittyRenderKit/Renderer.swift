@@ -40,7 +40,7 @@ import UbiquittyCore
 /// The renderer scalars the cell metrics are derived from.
 ///
 /// A parameter object rather than a long argument list: the derivation reads
-/// sixteen values that are meaningless apart, and a caller filling some of them
+/// eighteen values that are meaningless apart, and a caller filling some of them
 /// gets geometry that is wrong rather than a diagnostic. Grouping them also means
 /// adding an input is a change the compiler routes to every call site.
 ///
@@ -79,6 +79,12 @@ public struct CellMetricsInputs {
     public var underlineThicknessBoldInAtlasPixels: Double
     /// Underline drop below the baseline for the bold face, in atlas pixels.
     public var underlineDropBoldInAtlasPixels: Double
+    /// The top of the face's declared underline below the baseline, in atlas
+    /// pixels; zero when the face declares none.
+    public var fontUnderlineTopInAtlasPixels: Double
+    /// The face's declared underline thickness, in atlas pixels; zero when the
+    /// face declares no position.
+    public var fontUnderlineThicknessInAtlasPixels: Double
     /// Curl stroke weight, in atlas pixels.
     ///
     /// Carried beside the solid weights rather than derived from the em at the
@@ -108,6 +114,8 @@ public struct CellMetricsInputs {
         underlineDropInAtlasPixels: Double,
         underlineThicknessBoldInAtlasPixels: Double,
         underlineDropBoldInAtlasPixels: Double,
+        fontUnderlineTopInAtlasPixels: Double,
+        fontUnderlineThicknessInAtlasPixels: Double,
         underlineCurlyThicknessInAtlasPixels: Double,
         strikeThicknessInAtlasPixels: Double,
         strikeThicknessBoldInAtlasPixels: Double
@@ -125,6 +133,8 @@ public struct CellMetricsInputs {
         self.underlineDropInAtlasPixels = underlineDropInAtlasPixels
         self.underlineThicknessBoldInAtlasPixels = underlineThicknessBoldInAtlasPixels
         self.underlineDropBoldInAtlasPixels = underlineDropBoldInAtlasPixels
+        self.fontUnderlineTopInAtlasPixels = fontUnderlineTopInAtlasPixels
+        self.fontUnderlineThicknessInAtlasPixels = fontUnderlineThicknessInAtlasPixels
         self.underlineCurlyThicknessInAtlasPixels = underlineCurlyThicknessInAtlasPixels
         self.strikeThicknessInAtlasPixels = strikeThicknessInAtlasPixels
         self.strikeThicknessBoldInAtlasPixels = strikeThicknessBoldInAtlasPixels
@@ -195,6 +205,8 @@ public func resolveCellMetrics(_ inputs: borrowing CellMetricsInputs) -> Ubiquit
     metrics.underlineDrop = Float(inputs.underlineDropInAtlasPixels * rule)
     metrics.underlineThicknessBold = Float(inputs.underlineThicknessBoldInAtlasPixels * rule)
     metrics.underlineDropBold = Float(inputs.underlineDropBoldInAtlasPixels * rule)
+    metrics.fontUnderlineTop = Float(inputs.fontUnderlineTopInAtlasPixels * rule)
+    metrics.fontUnderlineThickness = Float(inputs.fontUnderlineThicknessInAtlasPixels * rule)
     metrics.underlineCurlyThickness = Float(inputs.underlineCurlyThicknessInAtlasPixels * rule)
     metrics.strikeThickness = Float(inputs.strikeThicknessInAtlasPixels * rule)
     metrics.strikeThicknessBold = Float(inputs.strikeThicknessBoldInAtlasPixels * rule)

@@ -196,6 +196,29 @@ Rendering::BoxFamilyPixelOffset measureBoxFamilyPixelOffset(FT_FaceRec_* face)
     return Rendering::boxFamilyPixelOffset(horizontal.low, horizontal.high, vertical.low, vertical.high);
 }
 
+/// Returns the top of a face's declared underline below the baseline, in
+/// pixels, for Core's rule (RuleFaceMetrics::underlinePosition).
+///
+/// The `post` table states the rule's top edge, up positive, and FreeType
+/// keeps it as the face's variation instance sets it. FreeType's own
+/// `underline_position` is the stem's centre, half the thickness below that
+/// top, so a scalable face without a `post` table has the half added back.
+///
+/// - Parameters:
+///   - face: The face, at its size.
+///   - pixelSize: The face's em, in pixels.
+/// - Returns: The distance down to the rule's top, or zero for a face that
+///   declares none.
+float declaredUnderlineTop(FT_FaceRec_* face, double pixelSize)
+{
+    if (!face || face->units_per_EM == 0 || !FT_IS_SCALABLE(face))
+        return 0.0f;
+    const auto* post = static_cast<const TT_Postscript*>(FT_Get_Sfnt_Table(face, FT_SFNT_POST));
+    const double top = post ? static_cast<double>(post->underlinePosition)
+                            : static_cast<double>(face->underline_position) + static_cast<double>(face->underline_thickness) * 0.5;
+    return static_cast<float>(-top * pixelSize / static_cast<double>(face->units_per_EM));
+}
+
 } // namespace
 
 const char* colorGlyphFormatName(ColorGlyphFormat format)
@@ -1152,6 +1175,7 @@ Rendering::CellMetrics FreeTypeRasterizer::computeCellMetrics() const
     if (m_face->units_per_EM > 0)
         faceRules.underlineThickness = static_cast<float>(
             static_cast<double>(m_face->underline_thickness) * m_fontPixelSize / m_face->units_per_EM);
+    faceRules.underlinePosition = declaredUnderlineTop(m_face, m_fontPixelSize);
     faceRules.underscoreWeight = m_underscoreWeight;
     faceRules.descent = static_cast<float>(-static_cast<double>(sm.descender) / 64.0);
     faceRules.leading = static_cast<float>(std::max(0.0, (static_cast<double>(sm.height) - static_cast<double>(sm.ascender - sm.descender)) / 64.0));
@@ -1176,6 +1200,8 @@ Rendering::CellMetrics FreeTypeRasterizer::computeCellMetrics() const
 
     m.underlineCurlyThickness = rules.curlyThickness;
     m.strikeThickness = rules.strikeThickness;
+    m.fontUnderlineTop = rules.fontUnderlineTop;
+    m.fontUnderlineThickness = rules.fontUnderlineThickness;
 
     // x-height: the bitmap height of 'x', which every face has and none decorates, so
     // the strike (baseline - xHeight*0.5) lands mid-glyph. Fall back to half

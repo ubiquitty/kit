@@ -177,6 +177,44 @@ extension CurlyUnderlineShape {
     }
 }
 
+/// Where the single underline's top and weight come from
+/// (`[underline] metrics`).
+///
+/// A Swift mirror of `Ubiquitty::Rendering::RuleMetricsSource` for the reason
+/// ``BrailleStyle`` is one; `Tests/Core/Rendering/test_render_configuration.cpp`
+/// fails if a case is added, removed or reordered on the C++ side.
+public enum UnderlineMetrics: UInt8, Sendable, CaseIterable {
+    /// The underscore's weight in whole pixels, its top the lower of a clear
+    /// gap below the baseline and the face's declared position.
+    case ubiquitty = 0
+    /// The face's declared underline, snapped outward to whole pixels.
+    case font = 1
+}
+
+extension UnderlineMetrics {
+    /// The portable enumerator this source stands for.
+    var core: Ubiquitty.Rendering.RuleMetricsSource {
+        switch self {
+        case .ubiquitty: return Ubiquitty.Rendering.RuleMetricsSource.Ubiquitty
+        case .font: return Ubiquitty.Rendering.RuleMetricsSource.Font
+        }
+    }
+
+    /// The source a portable enumerator stands for.
+    ///
+    /// Internal for the reason ``BrailleStyle/from(_:)`` is.
+    ///
+    /// - Parameter core: The Core value, from a preference.
+    /// - Returns: The matching source, or ubiquitty for a value this build
+    ///   does not know.
+    static func from(_ core: Ubiquitty.Rendering.RuleMetricsSource) -> UnderlineMetrics {
+        switch core {
+        case Ubiquitty.Rendering.RuleMetricsSource.Font: return .font
+        default: return .ubiquitty
+        }
+    }
+}
+
 /// Where a selection's colour is drawn.
 public enum SelectionStyle: UInt8, Sendable, CaseIterable {
     /// The system's selection colour, opaque, under the text.
@@ -443,6 +481,9 @@ public struct SurfaceStyle: Hashable, Sendable {
     public var shadeStyle: ShadeStyle = .pattern
     /// The shape a curly underline draws at, defaulting to Core's factory setting.
     public var curlyUnderlineShape: CurlyUnderlineShape = .medium
+    /// Where the single underline's top and weight come from, defaulting to
+    /// Core's factory setting.
+    public var underlineMetrics: UnderlineMetrics = .ubiquitty
     /// Where a selection's colour is drawn, defaulting to Core's factory setting.
     public var selectionStyle: SelectionStyle = .native
     /// Native-size cursor following is opt-in; it never resizes the host grid.
@@ -3176,6 +3217,7 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
         options.style.brailleStyle = style.brailleStyle.core
         options.style.shadeStyle = style.shadeStyle.core
         options.style.curlyRuleShape = style.curlyUnderlineShape.core
+        options.style.underlineMetrics = style.underlineMetrics.core
         let hasSelection = Ubiquitty.Selection.hasSelection(surface.selectionModel.session.pointee)
         applyPlatformSelection(
             to: &options.style,

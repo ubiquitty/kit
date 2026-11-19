@@ -194,6 +194,8 @@ package struct FontGeometry {
                 underlineDropInAtlasPixels: Double(cm.underlineDrop),
                 underlineThicknessBoldInAtlasPixels: Double(cm.underlineThickness),
                 underlineDropBoldInAtlasPixels: Double(cm.underlineDrop),
+                fontUnderlineTopInAtlasPixels: Double(cm.fontUnderlineTop),
+                fontUnderlineThicknessInAtlasPixels: Double(cm.fontUnderlineThickness),
                 underlineCurlyThicknessInAtlasPixels: Double(cm.underlineCurlyThickness),
                 strikeThicknessInAtlasPixels: Double(cm.strikeThickness),
                 strikeThicknessBoldInAtlasPixels: Double(cm.strikeThickness)
@@ -209,9 +211,12 @@ package struct FontGeometry {
         // The face rule policy: the face's own underline weight and the space
         // below its baseline, which is what AppKit places a rule by. The face
         // is built at point size times atlas scale, so every metric here is
-        // already in device pixels.
+        // already in device pixels. CoreText answers the declared underline
+        // position as `post` states it, the rule's top edge with up positive,
+        // so its negation is the distance down to the top.
         var faceRules = Ubiquitty.Rendering.RuleFaceMetrics()
         faceRules.underlineThickness = Float(CTFontGetUnderlineThickness(font))
+        faceRules.underlinePosition = Float(-CTFontGetUnderlinePosition(font))
         faceRules.descent = Float(descent)
         faceRules.leading = Float(leading)
         faceRules.underscoreWeight = Self.underscoreWeight(font)
@@ -387,6 +392,8 @@ package struct FontGeometry {
         let underlineDrop = Double(rules.underlineDrop)
         let strikeThickness = Double(rules.strikeThickness)
         let curlyThickness = Double(rules.curlyThickness)
+        let fontUnderlineTop = Double(rules.fontUnderlineTop)
+        let fontUnderlineThickness = Double(rules.fontUnderlineThickness)
         self.metricsInputs = CellMetricsInputs(
             // The tracked pitch, because this is the LAYOUT metric: quads,
             // slices and the pointer's cell all derive from it, and a builder
@@ -405,6 +412,8 @@ package struct FontGeometry {
             underlineDropInAtlasPixels: underlineDrop,
             underlineThicknessBoldInAtlasPixels: underlineThickness,
             underlineDropBoldInAtlasPixels: underlineDrop,
+            fontUnderlineTopInAtlasPixels: fontUnderlineTop,
+            fontUnderlineThicknessInAtlasPixels: fontUnderlineThickness,
             underlineCurlyThicknessInAtlasPixels: curlyThickness,
             strikeThicknessInAtlasPixels: strikeThickness,
             strikeThicknessBoldInAtlasPixels: strikeThickness
