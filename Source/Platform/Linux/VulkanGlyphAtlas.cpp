@@ -606,10 +606,10 @@ bool VulkanGlyphAtlas::upload(VkDevice device, VkQueue queue, VkCommandPool comm
     return true;
 }
 
-bool VulkanGlyphAtlas::recordUpload(VkDevice device, VkCommandBuffer commandBuffer)
+bool VulkanGlyphAtlas::recordUpload(VkCommandBuffer commandBuffer)
 {
     const Rendering::AtlasRowBand band = dirtyRows();
-    return m_sheet.recordUpload(device, commandBuffer, m_coverage, band.firstRow, band.rowCount);
+    return m_sheet.recordUpload(commandBuffer, m_coverage, band.firstRow, band.rowCount);
 }
 
 void VulkanGlyphAtlas::didUpload()

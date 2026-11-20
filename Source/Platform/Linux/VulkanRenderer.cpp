@@ -3261,24 +3261,34 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
     // their copies before the draw so one submission orders all uploads and
     // rendering, without a host queue wait between individual sheets.
     const bool didUploadFontMasks = m_fontAtlas->hasPendingUploads();
-    if (!m_fontAtlas->atlas->recordUpload(m_device, m_commandBuffer)
-        || !m_fontAtlas->colorAtlas->recordUpload(m_device, m_commandBuffer))
+    if (!m_fontAtlas->atlas->recordUpload(m_commandBuffer)
+        || !m_fontAtlas->colorAtlas->recordUpload(m_commandBuffer))
         return false;
     if (canShapeProportional) {
         const Rendering::AtlasRowBand dirty = m_fontAtlas->proportionalSheet->dirtyRows();
         if ((!m_fontAtlas->proportionalImage.isReadable() || dirty.rowCount > 0)
-            && !m_fontAtlas->proportionalImage.recordUpload(m_device, m_commandBuffer,
+            && !m_fontAtlas->proportionalImage.recordUpload(m_commandBuffer,
                 m_fontAtlas->proportionalSheet->coverage(), dirty.firstRow, dirty.rowCount))
             return false;
     }
-    if (canShapeProportionalStrips
-        && (m_fontAtlas->proportionalStripSheet->isDirty() || !m_fontAtlas->proportionalStripImage.isReadable())
-        && !m_fontAtlas->proportionalStripImage.recordUpload(m_device, m_commandBuffer,
-            m_fontAtlas->proportionalStripSheet->coverage(), 0, m_fontAtlas->proportionalStripSheet->heightInPixels()))
+    // A strip sheet is megabytes and a frame draws a few of its strips: the
+    // whole of it goes up until its image has been written once, and after
+    // that the strips drawn since.
+    const auto recordStripUpload = [&](const Rendering::LigatureSheet& sheet, VulkanCoverageSheet& image) {
+        if (!image.isReadable())
+            return image.recordUpload(m_commandBuffer, sheet.coverage(), 0, sheet.heightInPixels());
+        m_stripRects.clear();
+        for (const int slot : sheet.dirtySlots()) {
+            m_stripRects.push_back({ .x = (slot % sheet.slotColumns()) * sheet.slotWidthInPixels(),
+                .y = (slot / sheet.slotColumns()) * sheet.slotHeightInPixels(),
+                .width = sheet.slotWidthInPixels(),
+                .height = sheet.slotHeightInPixels() });
+        }
+        return image.recordUpload(m_commandBuffer, sheet.coverage(), m_stripRects);
+    };
+    if (canShapeProportionalStrips && !recordStripUpload(*m_fontAtlas->proportionalStripSheet, m_fontAtlas->proportionalStripImage))
         return false;
-    if (canShapeLigatures && (m_fontAtlas->ligatureSheet->isDirty() || !m_fontAtlas->ligatureImage.isReadable())
-        && !m_fontAtlas->ligatureImage.recordUpload(m_device, m_commandBuffer,
-            m_fontAtlas->ligatureSheet->coverage(), 0, m_fontAtlas->ligatureSheet->heightInPixels()))
+    if (canShapeLigatures && !recordStripUpload(*m_fontAtlas->ligatureSheet, m_fontAtlas->ligatureImage))
         return false;
 
     // A retained frame draws its grid passes into the pair, never into

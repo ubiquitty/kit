@@ -95,7 +95,9 @@ bool VulkanCoverageSheet::create(VkDevice device, VkPhysicalDevice physical, int
         return false;
     if (vkAllocateMemory(device, &stagingAlloc, nullptr, &m_stagingMemory) != VK_SUCCESS)
         return false;
-    return vkBindBufferMemory(device, m_staging, m_stagingMemory, 0) == VK_SUCCESS;
+    if (vkBindBufferMemory(device, m_staging, m_stagingMemory, 0) != VK_SUCCESS)
+        return false;
+    return vkMapMemory(device, m_stagingMemory, 0, VK_WHOLE_SIZE, 0, &m_stagingMapped) == VK_SUCCESS;
 }
 
 void VulkanCoverageSheet::destroy(VkDevice device)
@@ -105,6 +107,9 @@ void VulkanCoverageSheet::destroy(VkDevice device)
         m_staging = VK_NULL_HANDLE;
     }
     if (m_stagingMemory) {
+        if (m_stagingMapped)
+            vkUnmapMemory(device, m_stagingMemory);
+        m_stagingMapped = nullptr;
         vkFreeMemory(device, m_stagingMemory, nullptr);
         m_stagingMemory = VK_NULL_HANDLE;
     }
@@ -153,7 +158,7 @@ bool VulkanCoverageSheet::upload(VkDevice device, VkQueue queue, VkCommandPool c
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     bool didComplete = false;
     if (vkBeginCommandBuffer(commandBuffer, &beginInfo) == VK_SUCCESS
-        && recordUpload(device, commandBuffer, mirror, firstRow, rowCount)
+        && recordUpload(commandBuffer, mirror, firstRow, rowCount)
         && vkEndCommandBuffer(commandBuffer) == VK_SUCCESS) {
         VkSubmitInfo submit {};
         submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -176,11 +181,11 @@ void VulkanCoverageSheet::didUpload()
     }
 }
 
-bool VulkanCoverageSheet::recordUpload(VkDevice device, VkCommandBuffer commandBuffer, std::span<const std::uint8_t> mirror,
+bool VulkanCoverageSheet::recordUpload(VkCommandBuffer commandBuffer, std::span<const std::uint8_t> mirror,
     int firstRow, int rowCount)
 {
     m_hasPendingUpload = false;
-    if (!m_image || !m_staging)
+    if (!m_image || !m_staging || !m_stagingMapped)
         return false;
     // An empty range is a caller saying nothing changed, which is not a failure.
     if (rowCount <= 0)
@@ -196,19 +201,69 @@ bool VulkanCoverageSheet::recordUpload(VkDevice device, VkCommandBuffer commandB
     if (mirror.size() != static_cast<std::size_t>(m_stagingSize))
         return false;
 
-    // Stage the band at offset zero. `vkMapMemory` requires an aligned offset,
-    // while a row stride is not generally aligned; the image destination still
-    // carries `firstRow`, so no full-sheet copy is needed.
+    // Stage the band at offset zero: the image destination carries
+    // `firstRow`, so the copy's source needs no offset of its own.
     const VkDeviceSize rowStride = static_cast<VkDeviceSize>(m_widthInPixels);
     const VkDeviceSize byteOffset = rowStride * static_cast<VkDeviceSize>(firstRow);
     const VkDeviceSize byteCount = rowStride * static_cast<VkDeviceSize>(rowCount);
+    std::memcpy(m_stagingMapped, mirror.data() + byteOffset, static_cast<std::size_t>(byteCount));
 
-    void* mapped = nullptr;
-    if (vkMapMemory(device, m_stagingMemory, 0, byteCount, 0, &mapped) != VK_SUCCESS)
+    VkBufferImageCopy region {};
+    region.bufferOffset = 0;
+    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.imageSubresource.layerCount = 1;
+    region.imageOffset = { 0, firstRow, 0 };
+    region.imageExtent = { static_cast<uint32_t>(m_widthInPixels), static_cast<uint32_t>(rowCount), 1 };
+    recordCopies(commandBuffer, { &region, 1 });
+    return true;
+}
+
+bool VulkanCoverageSheet::recordUpload(VkCommandBuffer commandBuffer, std::span<const std::uint8_t> mirror, std::span<const Rect> rects)
+{
+    m_hasPendingUpload = false;
+    if (!m_image || !m_staging || !m_stagingMapped)
         return false;
-    std::memcpy(mapped, mirror.data() + byteOffset, static_cast<std::size_t>(byteCount));
-    vkUnmapMemory(device, m_stagingMemory);
+    if (rects.empty())
+        return true;
+    if (mirror.size() != static_cast<std::size_t>(m_stagingSize))
+        return false;
 
+    // Each rectangle is staged behind the one before it, its rows packed, so
+    // the staging buffer holds the rectangles' bytes and nothing between them.
+    m_regions.clear();
+    VkDeviceSize staged = 0;
+    auto* const staging = static_cast<std::uint8_t*>(m_stagingMapped);
+    for (const Rect& rect : rects) {
+        // Refused rather than clamped, as a row range past the sheet is.
+        if (rect.x < 0 || rect.y < 0 || rect.width <= 0 || rect.height <= 0
+            || rect.width > m_widthInPixels - rect.x || rect.height > m_heightInPixels - rect.y)
+            return false;
+        const VkDeviceSize byteCount = static_cast<VkDeviceSize>(rect.width) * static_cast<VkDeviceSize>(rect.height);
+        // Rectangles that overlap can name more bytes than the sheet has.
+        if (byteCount > m_stagingSize - staged)
+            return false;
+        const std::uint8_t* source = mirror.data() + static_cast<std::size_t>(rect.y) * static_cast<std::size_t>(m_widthInPixels) + static_cast<std::size_t>(rect.x);
+        std::uint8_t* destination = staging + staged;
+        for (int row = 0; row < rect.height; ++row) {
+            std::memcpy(destination, source, static_cast<std::size_t>(rect.width));
+            source += m_widthInPixels;
+            destination += rect.width;
+        }
+        VkBufferImageCopy region {};
+        region.bufferOffset = staged;
+        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.imageSubresource.layerCount = 1;
+        region.imageOffset = { rect.x, rect.y, 0 };
+        region.imageExtent = { static_cast<uint32_t>(rect.width), static_cast<uint32_t>(rect.height), 1 };
+        m_regions.push_back(region);
+        staged += byteCount;
+    }
+    recordCopies(commandBuffer, m_regions);
+    return true;
+}
+
+void VulkanCoverageSheet::recordCopies(VkCommandBuffer commandBuffer, std::span<const VkBufferImageCopy> regions)
+{
     VkImageSubresourceRange range {};
     range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     range.levelCount = 1;
@@ -233,20 +288,12 @@ bool VulkanCoverageSheet::recordUpload(VkDevice device, VkCommandBuffer commandB
     barrier(from, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, m_isImageInitialized ? VK_ACCESS_SHADER_READ_BIT : 0,
         VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
         VK_PIPELINE_STAGE_TRANSFER_BIT);
-
-    VkBufferImageCopy region {};
-    region.bufferOffset = 0;
-    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    region.imageSubresource.layerCount = 1;
-    region.imageOffset = { 0, firstRow, 0 };
-    region.imageExtent = { static_cast<uint32_t>(m_widthInPixels), static_cast<uint32_t>(rowCount), 1 };
-    vkCmdCopyBufferToImage(commandBuffer, m_staging, m_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
-
+    vkCmdCopyBufferToImage(commandBuffer, m_staging, m_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        static_cast<uint32_t>(regions.size()), regions.data());
     barrier(VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
         VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
 
     m_hasPendingUpload = true;
-    return true;
 }
 
 } // namespace Ubiquitty::Linux

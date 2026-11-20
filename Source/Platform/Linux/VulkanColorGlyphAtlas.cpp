@@ -142,7 +142,9 @@ bool VulkanColorGlyphAtlas::create(VkDevice device, VkPhysicalDevice physical)
         return false;
     if (vkAllocateMemory(device, &bufferAlloc, nullptr, &m_stagingMemory) != VK_SUCCESS)
         return false;
-    return vkBindBufferMemory(device, m_staging, m_stagingMemory, 0) == VK_SUCCESS;
+    if (vkBindBufferMemory(device, m_staging, m_stagingMemory, 0) != VK_SUCCESS)
+        return false;
+    return vkMapMemory(device, m_stagingMemory, 0, VK_WHOLE_SIZE, 0, &m_stagingMapped) == VK_SUCCESS;
 }
 
 void VulkanColorGlyphAtlas::destroy(VkDevice device)
@@ -168,6 +170,9 @@ void VulkanColorGlyphAtlas::destroy(VkDevice device)
         m_staging = VK_NULL_HANDLE;
     }
     if (m_stagingMemory) {
+        if (m_stagingMapped)
+            vkUnmapMemory(device, m_stagingMemory);
+        m_stagingMapped = nullptr;
         vkFreeMemory(device, m_stagingMemory, nullptr);
         m_stagingMemory = VK_NULL_HANDLE;
     }
@@ -288,7 +293,7 @@ bool VulkanColorGlyphAtlas::upload(VkDevice device, VkQueue queue, VkCommandPool
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     bool didComplete = false;
     if (vkBeginCommandBuffer(commandBuffer, &beginInfo) == VK_SUCCESS
-        && recordUpload(device, commandBuffer)
+        && recordUpload(commandBuffer)
         && vkEndCommandBuffer(commandBuffer) == VK_SUCCESS) {
         VkSubmitInfo submit {};
         submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -313,10 +318,10 @@ void VulkanColorGlyphAtlas::didUpload()
     }
 }
 
-bool VulkanColorGlyphAtlas::recordUpload(VkDevice device, VkCommandBuffer commandBuffer)
+bool VulkanColorGlyphAtlas::recordUpload(VkCommandBuffer commandBuffer)
 {
     m_hasPendingUpload = false;
-    if (!m_image || !m_staging)
+    if (!m_image || !m_staging || !m_stagingMapped)
         return false;
     const bool isDirty = m_lastDirtySlot >= m_firstDirtySlot;
     if (!isDirty && m_isImageInitialized)
@@ -339,17 +344,12 @@ bool VulkanColorGlyphAtlas::recordUpload(VkDevice device, VkCommandBuffer comman
         return true;
     }
 
-    // Four bytes per pixel. Stage the band at offset zero so the mapped offset
-    // satisfies the device's alignment independently of the selected row.
+    // Four bytes per pixel, staged at offset zero: the image destination
+    // carries the row.
     const VkDeviceSize rowStride = static_cast<VkDeviceSize>(m_atlasWidth) * 4;
     const VkDeviceSize byteOffset = rowStride * static_cast<VkDeviceSize>(firstRow);
     const VkDeviceSize byteCount = rowStride * static_cast<VkDeviceSize>(rowCount);
-
-    void* mapped = nullptr;
-    if (vkMapMemory(device, m_stagingMemory, 0, byteCount, 0, &mapped) != VK_SUCCESS)
-        return false;
-    std::memcpy(mapped, m_pixels.data() + byteOffset, static_cast<std::size_t>(byteCount));
-    vkUnmapMemory(device, m_stagingMemory);
+    std::memcpy(m_stagingMapped, m_pixels.data() + byteOffset, static_cast<std::size_t>(byteCount));
 
     VkImageSubresourceRange range {};
     range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;

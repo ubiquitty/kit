@@ -611,6 +611,9 @@ private:
     // while the instance buffer is mapped, because the quads' rects are what
     // decides it and the buffer is unmapped before the pass records.
     std::vector<std::size_t> m_overlayRunLengths;
+    // The strips a frame drew, as the rectangles their upload copies; kept
+    // across frames for its storage.
+    std::vector<VulkanCoverageSheet::Rect> m_stripRects;
 
     // Whether the readback staging memory is coherent. A cached type that is
     // not coherent holds stale lines until the range is invalidated, and the

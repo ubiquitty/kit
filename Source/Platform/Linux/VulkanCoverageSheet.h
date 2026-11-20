@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <span>
+#include <vector>
 #include <vulkan/vulkan.h>
 
 // One R8 coverage sheet on the device, uploaded from a host mirror.
@@ -121,9 +122,34 @@ public:
     /// The previous upload must have completed. Keep the sheet and its staging
     /// storage alive and unchanged until this buffer completes, then call
     /// `didUpload`. Discarding an unsubmitted buffer leaves the image state intact.
-    [[nodiscard]] bool recordUpload(VkDevice device, VkCommandBuffer commandBuffer, std::span<const std::uint8_t> mirror,
+    [[nodiscard]] bool recordUpload(VkCommandBuffer commandBuffer, std::span<const std::uint8_t> mirror,
         int firstRow, int rowCount);
 
+    /// A rectangle of the sheet, in pixels.
+    struct Rect {
+        /// The left edge.
+        int x = 0;
+        /// The top edge.
+        int y = 0;
+        /// The width.
+        int width = 0;
+        /// The height.
+        int height = 0;
+    };
+    /// Stages rectangles of the mirror and records their copies into a
+    /// caller-owned command buffer, on ``recordUpload``'s terms.
+    ///
+    /// For a sheet whose changes lie apart: the rows between the first and
+    /// the last of them are most of the sheet, and the rectangles alone are
+    /// what changed.
+    ///
+    /// - Parameters:
+    ///   - commandBuffer: The command buffer the copies are recorded into.
+    ///   - mirror: The host bytes, exactly `width * height` of them.
+    ///   - rects: The rectangles to copy, none overlapping another. One that
+    ///     reaches past the sheet is refused rather than clamped.
+    /// - Returns: Whether the copies were recorded; true for no rectangle.
+    [[nodiscard]] bool recordUpload(VkCommandBuffer commandBuffer, std::span<const std::uint8_t> mirror, std::span<const Rect> rects);
     /// Commits the image layout after the recorded upload completes successfully.
     void didUpload();
 
@@ -143,6 +169,14 @@ public:
     [[nodiscard]] bool isReadable() const { return m_isImageInitialized; }
 
 private:
+    /// Records the copies of staged bytes into the image, between the
+    /// transitions that take it to the transfer layout and back.
+    ///
+    /// - Parameters:
+    ///   - commandBuffer: The command buffer to record into.
+    ///   - regions: Where each staged run of bytes lands in the image.
+    void recordCopies(VkCommandBuffer commandBuffer, std::span<const VkBufferImageCopy> regions);
+
     int m_widthInPixels = 0;
     int m_heightInPixels = 0;
     VkImage m_image = VK_NULL_HANDLE;
@@ -152,6 +186,14 @@ private:
     VkBuffer m_staging = VK_NULL_HANDLE;
     VkDeviceMemory m_stagingMemory = VK_NULL_HANDLE;
     VkDeviceSize m_stagingSize = 0;
+    // Mapped from creation to destruction. A mapping made for one upload is a
+    // new address range, and each of its pages is faulted in by the copy that
+    // first touches it: a sheet of megabytes staged that way every frame
+    // spends more of the frame in those faults than in the copy.
+    void* m_stagingMapped = nullptr;
+    // The copies of one upload by rectangles, kept so a frame's upload
+    // allocates nothing once the list has grown to what a frame draws.
+    std::vector<VkBufferImageCopy> m_regions;
     // False until the first upload's layout transition, which decides whether a
     // barrier comes from UNDEFINED or from SHADER_READ_ONLY.
     bool m_isImageInitialized = false;

@@ -81,7 +81,7 @@ public:
     /// Stages changed slots and records their copy beside the frame's draw.
     /// The previous upload must have completed. Keep this atlas unchanged until
     /// the command buffer completes, then call `didUpload`.
-    [[nodiscard]] bool recordUpload(VkDevice device, VkCommandBuffer commandBuffer);
+    [[nodiscard]] bool recordUpload(VkCommandBuffer commandBuffer);
 
     /// Commits the dirty range and image layout after successful completion.
     void didUpload();
@@ -190,6 +190,8 @@ private:
     VkBuffer m_staging = VK_NULL_HANDLE;
     VkDeviceMemory m_stagingMemory = VK_NULL_HANDLE;
     VkDeviceSize m_stagingSize = 0;
+    // Mapped for the atlas's life, as the coverage sheets' staging is.
+    void* m_stagingMapped = nullptr;
 };
 
 } // namespace Ubiquitty::Linux

@@ -116,7 +116,7 @@ public:
     /// Stages changed slots and records their copy beside the frame's draw.
     /// The previous upload must have completed. Keep this atlas unchanged until
     /// the command buffer completes, then call `didUpload`.
-    [[nodiscard]] bool recordUpload(VkDevice device, VkCommandBuffer commandBuffer);
+    [[nodiscard]] bool recordUpload(VkCommandBuffer commandBuffer);
 
     /// Commits the dirty range and image layout after successful completion.
     void didUpload();
