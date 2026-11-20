@@ -528,6 +528,26 @@ private:
     VkBuffer m_decorationBuffer = VK_NULL_HANDLE;
     VkDeviceMemory m_decorationBufferMemory = VK_NULL_HANDLE;
     void* m_decorationMapped = nullptr;
+    /// The rules of one batch that share a top and a bottom edge, joined
+    /// across: what the next rule is compared with to tell whether it meets
+    /// anything the batch has drawn.
+    struct RuleBand {
+        /// The shared top edge, in pixels.
+        float top;
+        /// The shared bottom edge, in pixels.
+        float bottom;
+        /// The leftmost edge of the rules joined.
+        float left;
+        /// The rightmost edge of the rules joined.
+        float right;
+    };
+    /// How many bands one cell row of a batch may hold; a rule with no room
+    /// left for its band starts a new batch.
+    static constexpr std::size_t ruleBandsPerRow = 8;
+    /// The open batch's bands, `ruleBandsPerRow` to each cell row.
+    std::vector<RuleBand> m_ruleBands;
+    /// How many of each row's bands are in use.
+    std::vector<std::uint8_t> m_ruleBandCounts;
     std::size_t m_decorationCapacity = 0; // DecorationInstance slots
     VkBuffer m_colorBuffer = VK_NULL_HANDLE;
     VkDeviceMemory m_colorBufferMemory = VK_NULL_HANDLE;

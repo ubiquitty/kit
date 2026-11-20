@@ -3543,30 +3543,66 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
                 vkCmdPipelineBarrier(m_commandBuffer, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                     VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_DEPENDENCY_BY_REGION_BIT, 1, &barrier, 0, nullptr, 0, nullptr);
             };
-            // Adjacent rules share a draw. Only overlapping bounds split a
-            // batch, making every read observe earlier rule writes without
-            // turning a row of underlines into one draw per cell.
+            // Rules that touch no pixel of one another share a draw: a read
+            // must observe an earlier rule's write only where the two meet.
+            // A batch remembers what it has drawn as bands, one for each
+            // distinct pair of top and bottom edges, kept by the cell row the
+            // band starts in. A rule is no taller than a cell, so whatever it
+            // could meet starts in its own row or a neighbouring one. One box
+            // around the whole batch is not enough to tell: a row with two
+            // lines, an underline and a strike or the two of a double
+            // underline, makes it cover both, and every rule after falls
+            // inside it.
             const auto* rules = static_cast<const Rendering::DecorationInstance*>(m_decorationMapped);
-            uint32_t first = decorations.first;
-            auto minimum = rules[first].topLeftInPixels;
-            auto maximum = rules[first].bottomRightInPixels;
-            synchronizeRules();
             const uint32_t end = decorations.first + decorations.count;
-            for (uint32_t index = first + 1; index < end; ++index) {
+            const float rowHeight = static_cast<float>(std::max(m_cellHeight, 1));
+            const std::size_t rowCount = static_cast<std::size_t>(height / static_cast<uint32_t>(std::max(m_cellHeight, 1))) + 3;
+            m_ruleBands.resize(rowCount * ruleBandsPerRow);
+            m_ruleBandCounts.assign(rowCount, 0);
+            const auto rowOf = [&](float top) {
+                return static_cast<std::size_t>(std::clamp(static_cast<int>(top / rowHeight) + 1, 0, static_cast<int>(rowCount) - 1));
+            };
+            uint32_t first = decorations.first;
+            synchronizeRules();
+            for (uint32_t index = first; index < end; ++index) {
                 const auto& rule = rules[index];
-                const bool doesOverlap = rule.topLeftInPixels.x < maximum.x && rule.bottomRightInPixels.x > minimum.x
-                    && rule.topLeftInPixels.y < maximum.y && rule.bottomRightInPixels.y > minimum.y;
+                const float top = rule.topLeftInPixels.y;
+                const float bottom = rule.bottomRightInPixels.y;
+                const float left = rule.topLeftInPixels.x;
+                const float right = rule.bottomRightInPixels.x;
+                const std::size_t row = rowOf(top);
+                // A rule taller than a cell could meet a band further off
+                // than the rows looked at, so it is drawn by itself.
+                bool doesOverlap = bottom - top > rowHeight;
+                RuleBand* own = nullptr;
+                for (std::size_t near = row == 0 ? 0 : row - 1; !doesOverlap && near <= std::min(row + 1, rowCount - 1); ++near) {
+                    RuleBand* bands = m_ruleBands.data() + near * ruleBandsPerRow;
+                    for (std::uint8_t band = 0; band < m_ruleBandCounts[near]; ++band) {
+                        RuleBand& drawn = bands[band];
+                        if (top < drawn.bottom && bottom > drawn.top && left < drawn.right && right > drawn.left) {
+                            doesOverlap = true;
+                            break;
+                        }
+                        if (near == row && drawn.top == top && drawn.bottom == bottom)
+                            own = &drawn;
+                    }
+                }
+                if (!doesOverlap && !own && m_ruleBandCounts[row] == ruleBandsPerRow)
+                    doesOverlap = true; // no room to remember it: start afresh
                 if (doesOverlap) {
-                    vkCmdDraw(m_commandBuffer, 6, index - first, 0, first);
-                    synchronizeRules();
+                    if (index > first) {
+                        vkCmdDraw(m_commandBuffer, 6, index - first, 0, first);
+                        synchronizeRules();
+                    }
                     first = index;
-                    minimum = rule.topLeftInPixels;
-                    maximum = rule.bottomRightInPixels;
+                    std::fill(m_ruleBandCounts.begin(), m_ruleBandCounts.end(), std::uint8_t { 0 });
+                    own = nullptr;
+                }
+                if (own) {
+                    own->left = std::min(own->left, left);
+                    own->right = std::max(own->right, right);
                 } else {
-                    minimum.x = std::min(minimum.x, rule.topLeftInPixels.x);
-                    minimum.y = std::min(minimum.y, rule.topLeftInPixels.y);
-                    maximum.x = std::max(maximum.x, rule.bottomRightInPixels.x);
-                    maximum.y = std::max(maximum.y, rule.bottomRightInPixels.y);
+                    m_ruleBands[row * ruleBandsPerRow + m_ruleBandCounts[row]++] = { top, bottom, left, right };
                 }
             }
             vkCmdDraw(m_commandBuffer, 6, end - first, 0, first);
