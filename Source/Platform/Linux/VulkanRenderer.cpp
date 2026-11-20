@@ -2523,7 +2523,9 @@ bool VulkanRenderer::renderGrid(RasterContext& rasterContext, Ubiquitty::Termina
         // may Load this pair: a skipped capture may own dirty rows absent from
         // the next record. A later live read starts its own baseline afresh.
         m_retainedBaseline = {};
-        m_focusedMatchAgeSeconds = 0.0f;
+        // The capture read the bounce clock when it was taken. Any age inside
+        // the curve keeps the window painting; none says it rests.
+        m_focusedMatchAgeSeconds = capturedFrame->isFocusedMatchBouncing() ? 0.0f : -1.0f;
         drawsThroughRetainedTarget = ensureRetainedGridImages(width, height);
         framePlan.damage = capturedFrame->frameDamage();
         m_rowDirty.resize(static_cast<std::size_t>(rows));
