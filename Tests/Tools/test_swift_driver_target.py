@@ -66,7 +66,7 @@ if os.environ.get("DRIVER_FIXTURE_DIAGNOSTIC") and "-warnings-as-errors" in sys.
         scripts = core / "Scripts"
         scripts.mkdir(parents=True)
         selected = ROOT / "Libraries/ubiquitty-core/Scripts"
-        for name in ("build-root.sh", "ccache-env.sh"):
+        for name in ("build-root.sh", "ccache-env.sh", "default-compiler.sh"):
             shutil.copyfile(selected / name, scripts / name)
         (scripts / "macos-deployment-target.txt").write_text(f"cxx=13.3\napp={floor}\n")
 
